@@ -234,8 +234,10 @@ fi
 echo "Running $AUTH tests over $SSL with python $PYTHON"
 python -c 'import sys; print(sys.version)'
 
-# Try to source exported AWS Secrets
+# Try to source exported AWS Secrets, fixing Windows line endings
 if [ -f ./secrets-export.sh ]; then
+  < ./secrets-export.sh tr -d '\r' > ./secrets-export.sh.new
+  mv ./secrets-export.sh.new ./secrets-export.sh
   source ./secrets-export.sh
 fi
 
