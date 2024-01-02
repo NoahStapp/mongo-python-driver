@@ -107,6 +107,7 @@ import json
 import math
 import re
 import uuid
+from sys import getsizeof
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -481,6 +482,13 @@ def dumps(obj: Any, *args: Any, **kwargs: Any) -> str:
        Accepts optional parameter `json_options`. See :class:`JSONOptions`.
     """
     json_options = kwargs.pop("json_options", DEFAULT_JSON_OPTIONS)
+    if "max_length" in kwargs:
+        max_length = kwargs.pop("max_length")
+        size = get_size(obj)
+        if size > max_length:
+            truncated_obj = truncate_obj(obj, max_length)
+            return json.dumps(_json_convert(truncated_obj, json_options), *args, **kwargs)
+
     return json.dumps(_json_convert(obj, json_options), *args, **kwargs)
 
 
@@ -949,3 +957,37 @@ def default(obj: Any, json_options: JSONOptions = DEFAULT_JSON_OPTIONS) -> Any:
             # original value, when float() is called on it.
             return {"$numberDouble": str(repr(obj))}
     raise TypeError("%r is not JSON serializable" % obj)
+
+
+def get_size(obj: Any, seen=None) -> int:
+    """Recursively finds size of objects"""
+    size = getsizeof(obj)
+    if seen is None:
+        seen = set()
+    obj_id = id(obj)
+    if obj_id in seen:
+        return 0
+    # Important mark as seen *before* entering recursion to gracefully handle
+    # self-referential objects
+    seen.add(obj_id)
+    if isinstance(obj, dict):
+        size += sum([get_size(v, seen) for v in obj.values()])
+        size += sum([get_size(k, seen) for k in obj])
+    elif hasattr(obj, "__dict__"):
+        size += get_size(obj.__dict__, seen)
+    elif hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes, bytearray)):
+        size += sum([get_size(i, seen) for i in obj])
+    return int(size / 8)
+
+
+def truncate_obj(obj: Any, max_length: int) -> Any:
+    total_size = 0
+    truncated = {}
+    for k, v in obj.items():
+        size = get_size(v)
+        truncated[k] = v
+        if total_size + size < max_length:
+            total_size += size
+        else:
+            break
+    return truncated
