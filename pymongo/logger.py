@@ -97,6 +97,7 @@ class LogMessage:
                     doc = json_util.dumps(
                         doc,
                         json_options=_JSON_OPTIONS,
+                        max_length=document_length,
                         default=lambda o: o.__repr__(),
                     )
                 if len(doc) > document_length:
