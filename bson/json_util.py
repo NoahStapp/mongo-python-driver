@@ -987,6 +987,7 @@ def get_size(obj: Any, max_size: int, seen=None, current_size=0) -> int:
 
 
 def truncate_documents(obj: Any, max_length: int) -> Any:
+    """Truncate documents if necessary to fit inside max_length."""
     if "documents" not in obj:
         return obj
     else:
@@ -998,33 +999,13 @@ def truncate_documents(obj: Any, max_length: int) -> Any:
             if isinstance(doc, dict):
                 truncated_doc = {}
                 for k, v in doc.items():
-                    size = get_size(v, max_length)
+                    total_size += get_size(v, max_length)
                     truncated_doc[k] = v
-                    if size + total_size > max_length:
+                    if total_size > max_length:
                         truncated["documents"].append(truncated_doc)
                         return truncated
-                    else:
-                        total_size += size
                 truncated["documents"].append(truncated_doc)
             else:
                 truncated["documents"].append(doc)
 
         return truncated
-
-    # for k, v in obj.items():
-    #     size = get_size(v, max_length)
-    #     if total_size + size > max_length and isinstance(v, list):
-    #             truncated_v = {}
-    #             for k1, v1 in v.items():
-    #                 v1_size = get_size(v1, max_length)
-    #                 truncated_v[k1] = v1
-    #                 if v1_size + total_size > max_length:
-    #                     break
-    #             truncated[k] = truncated_v
-    #     else:
-    #         truncated[k] = v
-    #     if total_size + size < max_length:
-    #         total_size += size
-    #     else:
-    #         break
-    # return truncated
