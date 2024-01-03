@@ -484,10 +484,8 @@ def dumps(obj: Any, *args: Any, **kwargs: Any) -> str:
     json_options = kwargs.pop("json_options", DEFAULT_JSON_OPTIONS)
     if "max_length" in kwargs:
         max_length = kwargs.pop("max_length")
-        size = get_size(obj)
-        if size > max_length:
-            truncated_obj = truncate_obj(obj, max_length)
-            return json.dumps(_json_convert(truncated_obj, json_options), *args, **kwargs)
+        truncated_obj = truncate_documents(obj, max_length)
+        return json.dumps(_json_convert(truncated_obj, json_options), *args, **kwargs)
 
     return json.dumps(_json_convert(obj, json_options), *args, **kwargs)
 
@@ -959,9 +957,11 @@ def default(obj: Any, json_options: JSONOptions = DEFAULT_JSON_OPTIONS) -> Any:
     raise TypeError("%r is not JSON serializable" % obj)
 
 
-def get_size(obj: Any, seen=None) -> int:
+def get_size(obj: Any, max_size: int, seen=None, current_size=0) -> int:
     """Recursively finds size of objects"""
-    size = getsizeof(obj)
+    current_size += getsizeof(obj)
+    if current_size >= max_size:
+        return current_size
     if seen is None:
         seen = set()
     obj_id = id(obj)
@@ -971,23 +971,60 @@ def get_size(obj: Any, seen=None) -> int:
     # self-referential objects
     seen.add(obj_id)
     if isinstance(obj, dict):
-        size += sum([get_size(v, seen) for v in obj.values()])
-        size += sum([get_size(k, seen) for k in obj])
+        for k, v in obj.items():
+            current_size += get_size(k, max_size, seen, current_size)
+            current_size += get_size(v, max_size, seen, current_size)
+            if current_size >= max_size:
+                return current_size
     elif hasattr(obj, "__dict__"):
-        size += get_size(obj.__dict__, seen)
+        current_size += get_size(obj.__dict__, max_size, seen, current_size)
     elif hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes, bytearray)):
-        size += sum([get_size(i, seen) for i in obj])
-    return int(size / 8)
+        for i in obj:
+            current_size += get_size(i, max_size, seen, current_size)
+            if current_size >= max_size:
+                return current_size
+    return int(current_size / 8)
 
 
-def truncate_obj(obj: Any, max_length: int) -> Any:
-    total_size = 0
-    truncated = {}
-    for k, v in obj.items():
-        size = get_size(v)
-        truncated[k] = v
-        if total_size + size < max_length:
-            total_size += size
-        else:
-            break
-    return truncated
+def truncate_documents(obj: Any, max_length: int) -> Any:
+    if "documents" not in obj:
+        return obj
+    else:
+        total_size = 0
+        truncated = {k: v for k, v in obj.items() if k != "documents"}
+        docs = obj["documents"]
+        truncated["documents"] = []
+        for doc in docs:
+            if isinstance(doc, dict):
+                truncated_doc = {}
+                for k, v in doc.items():
+                    size = get_size(v, max_length)
+                    truncated_doc[k] = v
+                    if size + total_size > max_length:
+                        truncated["documents"].append(truncated_doc)
+                        return truncated
+                    else:
+                        total_size += size
+                truncated["documents"].append(truncated_doc)
+            else:
+                truncated["documents"].append(doc)
+
+        return truncated
+
+    # for k, v in obj.items():
+    #     size = get_size(v, max_length)
+    #     if total_size + size > max_length and isinstance(v, list):
+    #             truncated_v = {}
+    #             for k1, v1 in v.items():
+    #                 v1_size = get_size(v1, max_length)
+    #                 truncated_v[k1] = v1
+    #                 if v1_size + total_size > max_length:
+    #                     break
+    #             truncated[k] = truncated_v
+    #     else:
+    #         truncated[k] = v
+    #     if total_size + size < max_length:
+    #         total_size += size
+    #     else:
+    #         break
+    # return truncated
