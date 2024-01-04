@@ -107,7 +107,6 @@ import json
 import math
 import re
 import uuid
-from sys import getsizeof
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -957,33 +956,48 @@ def default(obj: Any, json_options: JSONOptions = DEFAULT_JSON_OPTIONS) -> Any:
     raise TypeError("%r is not JSON serializable" % obj)
 
 
-def get_size(obj: Any, max_size: int, seen=None, current_size=0) -> int:
+def get_size(obj: Any, max_size: int, current_size=0) -> int:
     """Recursively finds size of objects"""
-    current_size += getsizeof(obj)
     if current_size >= max_size:
         return current_size
-    if seen is None:
-        seen = set()
-    obj_id = id(obj)
-    if obj_id in seen:
-        return 0
-    # Important mark as seen *before* entering recursion to gracefully handle
-    # self-referential objects
-    seen.add(obj_id)
-    if isinstance(obj, dict):
+    if isinstance(obj, ObjectId):
+        current_size += len("$oid") + 24
+    elif isinstance(obj, Code):
+        if obj.scope:
+            current_size += (
+                len("$code")
+                + get_size(obj.scope, max_size, current_size)
+                + len(obj)
+                - len(obj.scope)
+            )
+        else:
+            current_size += len("$code") + len(obj)
+    elif isinstance(obj, (str, bytes)):
+        current_size += len(obj)
+    elif isinstance(obj, (int, Int64, Decimal128)):
+        current_size += len("$numberInt") + 1
+    elif isinstance(obj, Timestamp):
+        current_size += len({"$timestamp"}) + 4
+    elif isinstance(obj, datetime.datetime):
+        current_size += len({"$date"}) + len(str(obj.time()))
+    elif isinstance(obj, Regex):
+        current_size += len("$regularExpression") + len(obj.pattern)
+    elif isinstance(obj, DBRef):
+        current_size += len("$dbPointer") + len(obj.collection) + 24
+    elif isinstance(obj, (MinKey, MaxKey)):
+        current_size += len("$minKey") + 1
+    elif isinstance(obj, dict):
         for k, v in obj.items():
-            current_size += get_size(k, max_size, seen, current_size)
-            current_size += get_size(v, max_size, seen, current_size)
+            current_size += get_size(k, max_size, current_size)
+            current_size += get_size(v, max_size, current_size)
             if current_size >= max_size:
                 return current_size
-    elif hasattr(obj, "__dict__"):
-        current_size += get_size(obj.__dict__, max_size, seen, current_size)
-    elif hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes, bytearray)):
+    elif hasattr(obj, "__iter__"):
         for i in obj:
-            current_size += get_size(i, max_size, seen, current_size)
+            current_size += get_size(i, max_size, current_size)
             if current_size >= max_size:
                 return current_size
-    return int(current_size / 8)
+    return current_size
 
 
 def truncate_documents(obj: Any, max_length: int) -> Any:
@@ -999,11 +1013,17 @@ def truncate_documents(obj: Any, max_length: int) -> Any:
             if isinstance(doc, dict):
                 truncated_doc = {}
                 for k, v in doc.items():
-                    total_size += get_size(v, max_length)
-                    truncated_doc[k] = v
-                    if total_size > max_length:
+                    size = get_size(v, max_length)
+                    if size + total_size > max_length:
+                        try:
+                            truncated_doc[k] = v[: max_length - total_size]
+                        except TypeError:
+                            truncated_doc[k] = v
                         truncated["documents"].append(truncated_doc)
                         return truncated
+                    else:
+                        total_size += size
+                        truncated_doc[k] = v
                 truncated["documents"].append(truncated_doc)
             else:
                 truncated["documents"].append(doc)
