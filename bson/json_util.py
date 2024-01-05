@@ -483,7 +483,7 @@ def dumps(obj: Any, *args: Any, **kwargs: Any) -> str:
     json_options = kwargs.pop("json_options", DEFAULT_JSON_OPTIONS)
     if "max_length" in kwargs:
         max_length = kwargs.pop("max_length")
-        truncated_obj = truncate_documents(obj, max_length)
+        truncated_obj = truncate_documents(obj, max_length)[0]
         return json.dumps(_json_convert(truncated_obj, json_options), *args, **kwargs)
 
     return json.dumps(_json_convert(obj, json_options), *args, **kwargs)
@@ -1000,32 +1000,103 @@ def get_size(obj: Any, max_size: int, current_size=0) -> int:
     return current_size
 
 
-def truncate_documents(obj: Any, max_length: int) -> Any:
-    """Truncate documents if necessary to fit inside max_length."""
-    if "documents" not in obj:
-        return obj
+def truncate_documents(obj: Any, max_length: int) -> Tuple[Any, int]:
+    """Recursively truncate documents as needed to fit inside max_length characters."""
+    if max_length <= 0:
+        return None, 0
+    remaining = max_length
+    if hasattr(obj, "items"):
+        truncated = {}
+        for k, v in obj.items():
+            truncated_v, remaining = truncate_documents(v, remaining)
+            if truncated_v:
+                truncated[k] = truncated_v
+            if remaining <= 0:
+                break
+        return truncated, remaining
+    elif hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes)):
+        truncated = []
+        for v in obj:
+            truncated_v, remaining = truncate_documents(v, remaining)
+            if truncated_v:
+                truncated.append(truncated_v)
+            if remaining <= 0:
+                break
+        return truncated, remaining
     else:
-        total_size = 0
-        truncated = {k: v for k, v in obj.items() if k != "documents"}
-        docs = obj["documents"]
-        truncated["documents"] = []
-        for doc in docs:
-            if isinstance(doc, dict):
-                truncated_doc = {}
-                for k, v in doc.items():
-                    size = get_size(v, max_length)
-                    if size + total_size > max_length:
-                        try:
-                            truncated_doc[k] = v[: max_length - total_size]
-                        except TypeError:
-                            truncated_doc[k] = v
-                        truncated["documents"].append(truncated_doc)
-                        return truncated
-                    else:
-                        total_size += size
-                        truncated_doc[k] = v
-                truncated["documents"].append(truncated_doc)
-            else:
-                truncated["documents"].append(doc)
+        return _truncate(obj, remaining)
 
-        return truncated
+
+def _truncate(obj: Any, remaining: int) -> Tuple[Any, int]:
+    size = get_size(obj, remaining)
+
+    if size <= remaining:
+        return obj, remaining - size
+    else:
+        try:
+            truncated = obj[:remaining]
+        except TypeError:
+            truncated = obj
+        return truncated, remaining - size
+
+    # for k, v in obj.items():
+    #     if hasattr(v, "__iter__") and not isinstance(v, (str, bytes)):
+    #         truncated_v = []
+    #         for item in v:
+    #             if isinstance(item, dict):
+    #                 truncated_item = {}
+    #                 for doc_k, doc_v in item.items():
+    #                     size = get_size(doc_v, max_length)
+    #                     if size + total_size > max_length:
+    #                         try:
+    #                             truncated_item[doc_k] = doc_v[: max_length - total_size]
+    #                         except TypeError:
+    #                             truncated_item[doc_k] = doc_v
+    #                         truncated_v.append(truncated_item)
+    #                         truncated[k] = truncated_v
+    #                         return truncated
+    #                     else:
+    #                         total_size += size
+    #                         truncated_item[k] = v
+    #                 truncated_v.append(truncated_item)
+    #             else:
+    #                 size = get_size(v, max_length)
+    #                 if size + total_size > max_length:
+    #                     try:
+    #                         item = item[: max_length - total_size]
+    #                     except TypeError:
+    #                         pass
+    #                     truncated_v.append(item)
+    #                     truncated[k] = truncated_v
+    #                     return truncated
+    #                 else:
+    #                     total_size += size
+    #                     truncated_v.append(item)
+
+    # if "documents" not in obj:
+    #     return obj
+    # else:
+    #     total_size = 0
+    #     truncated = {k: v for k, v in obj.items() if k != "documents"}
+    #     docs = obj["documents"]
+    #     truncated["documents"] = []
+    #     for doc in docs:
+    #         if isinstance(doc, dict):
+    #             truncated_doc = {}
+    #             for k, v in doc.items():
+    #                 size = get_size(v, max_length)
+    #                 if size + total_size > max_length:
+    #                     try:
+    #                         truncated_doc[k] = v[: max_length - total_size]
+    #                     except TypeError:
+    #                         truncated_doc[k] = v
+    #                     truncated["documents"].append(truncated_doc)
+    #                     return truncated
+    #                 else:
+    #                     total_size += size
+    #                     truncated_doc[k] = v
+    #             truncated["documents"].append(truncated_doc)
+    #         else:
+    #             truncated["documents"].append(doc)
+    #
+    #     return truncated
