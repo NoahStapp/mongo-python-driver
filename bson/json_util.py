@@ -956,7 +956,7 @@ def default(obj: Any, json_options: JSONOptions = DEFAULT_JSON_OPTIONS) -> Any:
     raise TypeError("%r is not JSON serializable" % obj)
 
 
-def get_size(obj: Any, max_size: int, current_size=0) -> int:
+def get_size(obj: Any, max_size: int, current_size: int = 0) -> int:
     """Recursively finds size of objects"""
     if current_size >= max_size:
         return current_size
@@ -1006,7 +1006,7 @@ def truncate_documents(obj: Any, max_length: int) -> Tuple[Any, int]:
         return None, 0
     remaining = max_length
     if hasattr(obj, "items"):
-        truncated = {}
+        truncated: Any = {}
         for k, v in obj.items():
             truncated_v, remaining = truncate_documents(v, remaining)
             if truncated_v:
@@ -1015,7 +1015,7 @@ def truncate_documents(obj: Any, max_length: int) -> Tuple[Any, int]:
                 break
         return truncated, remaining
     elif hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes)):
-        truncated = []
+        truncated: Any = []  # type:ignore[no-redef]
         for v in obj:
             truncated_v, remaining = truncate_documents(v, remaining)
             if truncated_v:

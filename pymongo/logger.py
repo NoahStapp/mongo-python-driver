@@ -50,7 +50,7 @@ class LogMessage:
 
     def __init__(self, **kwargs: Any):
         self._kwargs = kwargs
-        self._redact()
+        # self._redact()
 
         if "durationMS" in self._kwargs:
             self._kwargs["durationMS"] = self._kwargs["durationMS"].total_seconds() * 1000
