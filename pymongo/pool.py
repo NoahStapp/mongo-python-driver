@@ -17,6 +17,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import copy
+import logging
 import os
 import platform
 import socket
@@ -71,6 +72,7 @@ from pymongo.errors import (  # type:ignore[attr-defined]
 from pymongo.hello import Hello, HelloCompat
 from pymongo.helpers import _handle_reauth
 from pymongo.lock import _create_lock
+from pymongo.logger import LogMessage
 from pymongo.monitoring import (
     ConnectionCheckOutFailedReason,
     ConnectionClosedReason,
@@ -259,6 +261,8 @@ ENV_VAR_K8S = "KUBERNETES_SERVICE_HOST"
 
 RUNTIME_NAME_DOCKER = "docker"
 ORCHESTRATOR_NAME_K8S = "kubernetes"
+
+connection_logger = logging.getLogger("pymongo.connection")
 
 
 def get_container_env_info() -> dict[str, str]:
@@ -1083,6 +1087,14 @@ class Connection:
             if self.enabled_for_cmap:
                 assert self.listeners is not None
                 self.listeners.publish_connection_ready(self.address, self.id)
+                connection_logger.debug(
+                    LogMessage(
+                        message="Connection ready",
+                        serverHost=self.address[0],
+                        serverPort=self.address[1],
+                        driverConnectionId=self.id,
+                    )
+                )
 
     def validate_session(
         self, client: Optional[MongoClient], session: Optional[ClientSession]
@@ -1103,6 +1115,15 @@ class Connection:
         if reason and self.enabled_for_cmap:
             assert self.listeners is not None
             self.listeners.publish_connection_closed(self.address, self.id, reason)
+            connection_logger.debug(
+                LogMessage(
+                    message="Connection closed",
+                    serverHost=self.address[0],
+                    serverPort=self.address[1],
+                    driverConnectionId=self.id,
+                    reason=reason,
+                )
+            )
 
     def _close_conn(self) -> None:
         """Close this connection."""
@@ -1416,6 +1437,14 @@ class Pool:
             self.opts._event_listeners.publish_pool_created(
                 self.address, self.opts.non_default_options
             )
+            connection_logger.debug(
+                LogMessage(
+                    message="Connection pool created",
+                    serverHost=self.address[0],
+                    serverPort=self.address[1],
+                    **self.opts.non_default_options,
+                )
+            )
         # Similar to active_sockets but includes threads in the wait queue.
         self.operation_count = 0
         # Retain references to pinned connections to prevent the CPython GC
@@ -1433,6 +1462,13 @@ class Pool:
                 if self.enabled_for_cmap:
                     assert self.opts._event_listeners is not None
                     self.opts._event_listeners.publish_pool_ready(self.address)
+                    connection_logger.debug(
+                        LogMessage(
+                            message="Connection pool ready",
+                            serverHost=self.address[0],
+                            serverPort=self.address[1],
+                        )
+                    )
 
     @property
     def closed(self) -> bool:
@@ -1490,6 +1526,13 @@ class Pool:
             if self.enabled_for_cmap:
                 assert listeners is not None
                 listeners.publish_pool_closed(self.address)
+                connection_logger.debug(
+                    LogMessage(
+                        message="Connection pool closed",
+                        serverHost=self.address[0],
+                        serverPort=self.address[1],
+                    )
+                )
         else:
             if old_state != PoolState.PAUSED and self.enabled_for_cmap:
                 assert listeners is not None
@@ -1497,6 +1540,14 @@ class Pool:
                     self.address,
                     service_id=service_id,
                     interrupt_connections=interrupt_connections,
+                )
+                connection_logger.debug(
+                    LogMessage(
+                        message="Connection pool cleared",
+                        serverHost=self.address[0],
+                        serverPort=self.address[1],
+                        serviceId=service_id,
+                    )
                 )
             for conn in sockets:
                 conn.close_conn(ConnectionClosedReason.STALE)
@@ -1597,6 +1648,14 @@ class Pool:
         if self.enabled_for_cmap:
             assert listeners is not None
             listeners.publish_connection_created(self.address, conn_id)
+            connection_logger.debug(
+                LogMessage(
+                    message="Connection created",
+                    serverHost=self.address[0],
+                    serverPort=self.address[1],
+                    driverConnectionId=conn_id,
+                )
+            )
 
         try:
             sock = _configured_socket(self.address, self.opts)
@@ -1606,7 +1665,16 @@ class Pool:
                 listeners.publish_connection_closed(
                     self.address, conn_id, ConnectionClosedReason.ERROR
                 )
-
+                connection_logger.debug(
+                    LogMessage(
+                        message="Connection closed",
+                        serverHost=self.address[0],
+                        serverPort=self.address[1],
+                        driverConnectionId=conn_id,
+                        reason="An error occurred while using the connection",
+                        error=ConnectionClosedReason.ERROR,
+                    )
+                )
             if isinstance(error, (IOError, OSError, SSLError)):
                 details = _get_timeout_details(self.opts)
                 _raise_connection_failure(self.address, error, timeout_details=details)
@@ -1651,12 +1719,27 @@ class Pool:
         if self.enabled_for_cmap:
             assert listeners is not None
             listeners.publish_connection_check_out_started(self.address)
+            connection_logger.debug(
+                LogMessage(
+                    message="Connection checkout started",
+                    serverHost=self.address[0],
+                    serverPort=self.address[1],
+                )
+            )
 
         conn = self._get_conn(handler=handler)
 
         if self.enabled_for_cmap:
             assert listeners is not None
             listeners.publish_connection_checked_out(self.address, conn.id)
+            connection_logger.debug(
+                LogMessage(
+                    message="Connection checked out",
+                    serverHost=self.address[0],
+                    serverPort=self.address[1],
+                    driverConnectionId=conn.id,
+                )
+            )
         try:
             with self.lock:
                 self.active_contexts.add(conn.cancel_context)
@@ -1693,6 +1776,16 @@ class Pool:
                 self.opts._event_listeners.publish_connection_check_out_failed(
                     self.address, ConnectionCheckOutFailedReason.CONN_ERROR
                 )
+                connection_logger.debug(
+                    LogMessage(
+                        message="Connection checkout failed",
+                        serverHost=self.address[0],
+                        serverPort=self.address[1],
+                        reason="An error occurred while trying to establish a new connection",
+                        error=ConnectionCheckOutFailedReason.CONN_ERROR,
+                    )
+                )
+
             details = _get_timeout_details(self.opts)
             _raise_connection_failure(
                 self.address, AutoReconnect("connection pool paused"), timeout_details=details
@@ -1711,6 +1804,15 @@ class Pool:
                 assert self.opts._event_listeners is not None
                 self.opts._event_listeners.publish_connection_check_out_failed(
                     self.address, ConnectionCheckOutFailedReason.POOL_CLOSED
+                )
+                connection_logger.debug(
+                    LogMessage(
+                        message="Connection checkout failed",
+                        serverHost=self.address[0],
+                        serverPort=self.address[1],
+                        reason="Connection pool was closed",
+                        error=ConnectionCheckOutFailedReason.POOL_CLOSED,
+                    )
                 )
             raise _PoolClosedError(
                 "Attempted to check out a connection from closed connection pool"
@@ -1792,6 +1894,15 @@ class Pool:
                 self.opts._event_listeners.publish_connection_check_out_failed(
                     self.address, ConnectionCheckOutFailedReason.CONN_ERROR
                 )
+                connection_logger.debug(
+                    LogMessage(
+                        message="Connection checkout failed",
+                        serverHost=self.address[0],
+                        serverPort=self.address[1],
+                        reason="An error occurred while trying to establish a new connection",
+                        error=ConnectionCheckOutFailedReason.CONN_ERROR,
+                    )
+                )
             raise
 
         conn.active = True
@@ -1814,6 +1925,14 @@ class Pool:
         if self.enabled_for_cmap:
             assert listeners is not None
             listeners.publish_connection_checked_in(self.address, conn.id)
+            connection_logger.debug(
+                LogMessage(
+                    message="Connection checked in",
+                    serverHost=self.address[0],
+                    serverPort=self.address[1],
+                    driverConnectionId=conn.id,
+                )
+            )
         if self.pid != os.getpid():
             self.reset_without_pause()
         else:
@@ -1825,6 +1944,16 @@ class Pool:
                     assert listeners is not None
                     listeners.publish_connection_closed(
                         self.address, conn.id, ConnectionClosedReason.ERROR
+                    )
+                    connection_logger.debug(
+                        LogMessage(
+                            message="Connection closed",
+                            serverHost=self.address[0],
+                            serverPort=self.address[1],
+                            driverConnectionId=conn.id,
+                            reason="An error occurred while using the connection",
+                            error=ConnectionClosedReason.ERROR,
+                        )
                     )
             else:
                 with self.lock:
@@ -1891,6 +2020,15 @@ class Pool:
             assert listeners is not None
             listeners.publish_connection_check_out_failed(
                 self.address, ConnectionCheckOutFailedReason.TIMEOUT
+            )
+            connection_logger.debug(
+                LogMessage(
+                    message="Connection checkout failed",
+                    serverHost=self.address[0],
+                    serverPort=self.address[1],
+                    reason="Wait queue timeout elapsed without a connection becoming available",
+                    error=ConnectionCheckOutFailedReason.TIMEOUT,
+                )
             )
         timeout = _csot.get_timeout() or self.opts.wait_queue_timeout
         if self.opts.load_balanced:
