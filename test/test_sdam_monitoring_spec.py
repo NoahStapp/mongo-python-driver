@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Run the sdam monitoring spec tests."""
+from __future__ import annotations
 
 import json
 import os
@@ -44,23 +45,23 @@ _TEST_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "sdam_mon
 
 
 def compare_server_descriptions(expected, actual):
-    if (not expected["address"] == "%s:%s" % actual.address) or (
-        not server_name_to_type(expected["type"]) == actual.server_type
+    if (expected["address"] != "{}:{}".format(*actual.address)) or (
+        server_name_to_type(expected["type"]) != actual.server_type
     ):
         return False
     expected_hosts = set(expected["arbiters"] + expected["passives"] + expected["hosts"])
-    return expected_hosts == set("%s:%s" % s for s in actual.all_hosts)
+    return expected_hosts == {"{}:{}".format(*s) for s in actual.all_hosts}
 
 
 def compare_topology_descriptions(expected, actual):
-    if not (TOPOLOGY_TYPE.__getattribute__(expected["topologyType"]) == actual.topology_type):
+    if TOPOLOGY_TYPE.__getattribute__(expected["topologyType"]) != actual.topology_type:
         return False
     expected = expected["servers"]
     actual = actual.server_descriptions()
     if len(expected) != len(actual):
         return False
     for exp_server in expected:
-        for address, actual_server in actual.items():
+        for _address, actual_server in actual.items():
             if compare_server_descriptions(exp_server, actual_server):
                 break
         else:
@@ -79,22 +80,23 @@ def compare_events(expected_dict, actual):
     if expected_type == "server_opening_event":
         if not isinstance(actual, monitoring.ServerOpeningEvent):
             return False, "Expected ServerOpeningEvent, got %s" % (actual.__class__)
-        if not expected["address"] == "%s:%s" % actual.server_address:
+        if expected["address"] != "{}:{}".format(*actual.server_address):
             return (
                 False,
-                "ServerOpeningEvent published with wrong address (expected"
-                " %s, got %s" % (expected["address"], actual.server_address),
+                "ServerOpeningEvent published with wrong address (expected" " {}, got {}".format(
+                    expected["address"], actual.server_address
+                ),
             )
 
     elif expected_type == "server_description_changed_event":
-
         if not isinstance(actual, monitoring.ServerDescriptionChangedEvent):
             return (False, "Expected ServerDescriptionChangedEvent, got %s" % (actual.__class__))
-        if not expected["address"] == "%s:%s" % actual.server_address:
+        if expected["address"] != "{}:{}".format(*actual.server_address):
             return (
                 False,
-                "ServerDescriptionChangedEvent has wrong address"
-                " (expected %s, got %s" % (expected["address"], actual.server_address),
+                "ServerDescriptionChangedEvent has wrong address" " (expected {}, got {}".format(
+                    expected["address"], actual.server_address
+                ),
             )
 
         if not compare_server_descriptions(expected["newDescription"], actual.new_description):
@@ -110,11 +112,12 @@ def compare_events(expected_dict, actual):
     elif expected_type == "server_closed_event":
         if not isinstance(actual, monitoring.ServerClosedEvent):
             return False, "Expected ServerClosedEvent, got %s" % (actual.__class__)
-        if not expected["address"] == "%s:%s" % actual.server_address:
+        if expected["address"] != "{}:{}".format(*actual.server_address):
             return (
                 False,
-                "ServerClosedEvent published with wrong address"
-                " (expected %s, got %s" % (expected["address"], actual.server_address),
+                "ServerClosedEvent published with wrong address" " (expected {}, got {}".format(
+                    expected["address"], actual.server_address
+                ),
             )
 
     elif expected_type == "topology_opening_event":
@@ -145,7 +148,7 @@ def compare_events(expected_dict, actual):
             return False, "Expected TopologyClosedEvent, got %s" % (actual.__class__)
 
     else:
-        return False, "Incorrect event: expected %s, actual %s" % (expected_type, actual)
+        return False, f"Incorrect event: expected {expected_type}, actual {actual}"
 
     return True, ""
 
@@ -170,7 +173,7 @@ def compare_multiple_events(i, expected_results, actual_results):
 
 class TestAllScenarios(IntegrationTest):
     def setUp(self):
-        super(TestAllScenarios, self).setUp()
+        super().setUp()
         self.all_listener = ServerAndTopologyEventListener()
 
 
@@ -196,7 +199,7 @@ def create_test(scenario_def):
 
         try:
             for phase in scenario_def["phases"]:
-                for (source, response) in phase.get("responses", []):
+                for source, response in phase.get("responses", []):
                     source_address = clean_node(source)
                     topology.on_change(
                         ServerDescription(
@@ -235,7 +238,7 @@ def create_test(scenario_def):
                 # Assert no extra events.
                 extra_events = self.all_listener.results[expected_len:]
                 if extra_events:
-                    self.fail("Extra events %r" % (extra_events,))
+                    self.fail(f"Extra events {extra_events!r}")
 
                 self.all_listener.reset()
         finally:
@@ -251,7 +254,7 @@ def create_tests():
                 scenario_def = json.load(scenario_stream, object_hook=object_hook)
             # Construct test from scenario.
             new_test = create_test(scenario_def)
-            test_name = "test_%s" % (os.path.splitext(filename)[0],)
+            test_name = f"test_{os.path.splitext(filename)[0]}"
             new_test.__name__ = test_name
             setattr(TestAllScenarios, new_test.__name__, new_test)
 
@@ -268,7 +271,7 @@ class TestSdamMonitoring(IntegrationTest):
     @classmethod
     @client_context.require_failCommand_fail_point
     def setUpClass(cls):
-        super(TestSdamMonitoring, cls).setUpClass()
+        super().setUpClass()
         # Speed up the tests by decreasing the event publish frequency.
         cls.knobs = client_knobs(events_queue_frequency=0.1)
         cls.knobs.enable()
@@ -284,7 +287,7 @@ class TestSdamMonitoring(IntegrationTest):
     def tearDownClass(cls):
         cls.test_client.close()
         cls.knobs.disable()
-        super(TestSdamMonitoring, cls).tearDownClass()
+        super().tearDownClass()
 
     def setUp(self):
         self.listener.reset()

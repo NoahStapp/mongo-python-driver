@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # Copyright 2009-present MongoDB, Inc.
 #
@@ -14,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the grid_file module.
-"""
+"""Tests for the grid_file module."""
+from __future__ import annotations
 
 import datetime
 import io
@@ -462,12 +461,10 @@ class TestGridFile(IntegrationTest):
     def test_readline(self):
         f = GridIn(self.db.fs, chunkSize=5)
         f.write(
-            (
-                b"""Hello world,
+            b"""Hello world,
 How are you?
 Hope all is well.
 Bye"""
-            )
         )
         f.close()
 
@@ -498,12 +495,10 @@ Bye"""
     def test_readlines(self):
         f = GridIn(self.db.fs, chunkSize=5)
         f.write(
-            (
-                b"""Hello world,
+            b"""Hello world,
 How are you?
 Hope all is well.
 Bye"""
-            )
         )
         f.close()
 
@@ -675,6 +670,22 @@ Bye"""
         with GridOut(self.db.fs, infile._id) as outfile:
             self.assertEqual(contents, outfile.read())
 
+    def test_exception_file_non_existence(self):
+        contents = b"Imagine this is some important data..."
+
+        with self.assertRaises(ConnectionError):
+            with GridIn(self.db.fs, filename="important") as infile:
+                infile.write(contents)
+                raise ConnectionError("Test exception")
+
+        # Expectation: File chunks are written, entry in files doesn't appear.
+        self.assertEqual(
+            self.db.fs.chunks.count_documents({"files_id": infile._id}), infile._chunk_number
+        )
+
+        self.assertIsNone(self.db.fs.files.find_one({"_id": infile._id}))
+        self.assertTrue(infile.closed)
+
     def test_prechunked_string(self):
         def write_me(s, chunk_size):
             buf = BytesIO(s)
@@ -744,6 +755,7 @@ Bye"""
             # Kill the cursor to simulate the cursor timing out on the server
             # when an application spends a long time between two calls to
             # readchunk().
+            assert client.address is not None
             client._close_cursor_now(
                 outfile._GridOut__chunk_iter._cursor.cursor_id,
                 _CursorAddress(client.address, db.fs.chunks.full_name),

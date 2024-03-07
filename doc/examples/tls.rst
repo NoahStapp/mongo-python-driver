@@ -3,7 +3,7 @@ TLS/SSL and PyMongo
 
 PyMongo supports connecting to MongoDB over TLS/SSL. This guide covers the
 configuration options supported by PyMongo. See `the server documentation
-<http://docs.mongodb.org/manual/tutorial/configure-ssl/>`_ to configure
+<http://mongodb.com/docs/manual/tutorial/configure-ssl/>`_ to configure
 MongoDB.
 
 .. warning:: Industry best practices recommend, and some regulations require,
@@ -32,7 +32,7 @@ MongoDB.
 
   You can read more about TLS versions and their security implications here:
 
-  `<https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Protection_Cheat_Sheet.html#only-support-strong-protocols>`_
+  `<https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html#only-support-strong-protocols>`_
 
 .. _python.org: https://www.python.org/downloads/
 .. _homebrew: https://brew.sh/
@@ -167,6 +167,7 @@ handshake will only fail in this case if the response indicates that the
 certificate is revoked. Invalid or malformed responses will be ignored,
 favoring availability over maximum security.
 
+.. _TLSErrors:
 
 Troubleshooting TLS Errors
 ..........................
@@ -181,7 +182,7 @@ server's certificate::
 This often occurs because OpenSSL does not have access to the system's
 root certificates or the certificates are out of date. Linux users should
 ensure that they have the latest root certificate updates installed from
-their Linux vendor. macOS users using Python 3.6.2 or newer downloaded
+their Linux vendor. macOS users using Python 3.7 or newer downloaded
 from python.org `may have to run a script included with python
 <https://bugs.python.org/issue29065#msg283984>`_ to install
 root certificates::

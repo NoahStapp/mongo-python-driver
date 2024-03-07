@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 # Copyright 2009-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,13 +13,14 @@
 # limitations under the License.
 
 """Test the collection module."""
+from __future__ import annotations
 
 import contextlib
 import re
 import sys
-from codecs import utf_8_decode  # type: ignore
+from codecs import utf_8_decode
 from collections import defaultdict
-from typing import Iterable, no_type_check
+from typing import Any, Iterable, no_type_check
 
 from pymongo.database import Database
 
@@ -125,7 +124,7 @@ class TestCollectionNoConnect(unittest.TestCase):
 
     def test_iteration(self):
         coll = self.db.coll
-        if "PyPy" in sys.version:
+        if "PyPy" in sys.version and sys.version_info < (3, 8, 15):
             msg = "'NoneType' object is not callable"
         else:
             msg = "'Collection' object is not iterable"
@@ -151,7 +150,7 @@ class TestCollection(IntegrationTest):
 
     @classmethod
     def setUpClass(cls):
-        super(TestCollection, cls).setUpClass()
+        super().setUpClass()
         cls.w = client_context.w  # type: ignore
 
     @classmethod
@@ -278,7 +277,6 @@ class TestCollection(IntegrationTest):
         db = self.db
 
         self.assertRaises(TypeError, db.test.create_index, 5)
-        self.assertRaises(TypeError, db.test.create_index, {"hello": 1})
         self.assertRaises(ValueError, db.test.create_index, [])
 
         db.test.drop_indexes()
@@ -307,6 +305,10 @@ class TestCollection(IntegrationTest):
         db.test.create_index([("hello", DESCENDING), ("world", ASCENDING)])
         self.assertTrue("hello_-1_world_1" in db.test.index_information())
 
+        db.test.drop_indexes()
+        db.test.create_index([("hello", DESCENDING), ("world", ASCENDING)], name=None)
+        self.assertTrue("hello_-1_world_1" in db.test.index_information())
+
         db.test.drop()
         db.test.insert_one({"a": 1})
         db.test.insert_one({"a": 1})
@@ -314,6 +316,10 @@ class TestCollection(IntegrationTest):
 
         with self.write_concern_collection() as coll:
             coll.create_index([("hello", DESCENDING)])
+
+        db.test.create_index(["hello", "world"])
+        db.test.create_index(["hello", ("world", DESCENDING)])
+        db.test.create_index({"hello": 1}.items())  # type:ignore[arg-type]
 
     def test_drop_index(self):
         db = self.db
@@ -365,7 +371,7 @@ class TestCollection(IntegrationTest):
         db.test.insert_one({})  # create collection
 
         def map_indexes(indexes):
-            return dict([(index["name"], index) for index in indexes])
+            return {index["name"]: index for index in indexes}
 
         indexes = list(db.test.list_indexes())
         self.assertEqual(len(indexes), 1)
@@ -685,7 +691,7 @@ class TestCollection(IntegrationTest):
         db = self.db
         db.test.drop()
 
-        document = {"_id": 1000}
+        document: dict[str, Any] = {"_id": 1000}
         result = db.test.insert_one(document)
         self.assertTrue(isinstance(result, InsertOneResult))
         self.assertTrue(isinstance(result.inserted_id, int))
@@ -710,7 +716,7 @@ class TestCollection(IntegrationTest):
         self.assertEqual(document["_id"], result.inserted_id)
         self.assertFalse(result.acknowledged)
         # The insert failed duplicate key...
-        wait_until(lambda: 2 == db.test.count_documents({}), "forcing duplicate key error")
+        wait_until(lambda: db.test.count_documents({}) == 2, "forcing duplicate key error")
 
         document = RawBSONDocument(encode({"_id": ObjectId(), "foo": "bar"}))
         result = db.test.insert_one(document)
@@ -785,7 +791,7 @@ class TestCollection(IntegrationTest):
             db.test.insert_many(1)  # type: ignore[arg-type]
 
         with self.assertRaisesRegex(TypeError, "documents must be a non-empty list"):
-            db.test.insert_many(RawBSONDocument(encode({"_id": 2})))  # type: ignore[arg-type]
+            db.test.insert_many(RawBSONDocument(encode({"_id": 2})))
 
     def test_delete_one(self):
         self.db.test.drop()
@@ -811,7 +817,7 @@ class TestCollection(IntegrationTest):
         self.assertTrue(isinstance(result, DeleteResult))
         self.assertRaises(InvalidOperation, lambda: result.deleted_count)
         self.assertFalse(result.acknowledged)
-        wait_until(lambda: 0 == db.test.count_documents({}), "delete 1 documents")
+        wait_until(lambda: db.test.count_documents({}) == 0, "delete 1 documents")
 
     def test_delete_many(self):
         self.db.test.drop()
@@ -832,7 +838,7 @@ class TestCollection(IntegrationTest):
         self.assertTrue(isinstance(result, DeleteResult))
         self.assertRaises(InvalidOperation, lambda: result.deleted_count)
         self.assertFalse(result.acknowledged)
-        wait_until(lambda: 0 == db.test.count_documents({}), "delete 2 documents")
+        wait_until(lambda: db.test.count_documents({}) == 0, "delete 2 documents")
 
     def test_command_document_too_large(self):
         large = "*" * (client_context.max_bson_size + _COMMAND_OVERHEAD)
@@ -1420,16 +1426,7 @@ class TestCollection(IntegrationTest):
     def test_acknowledged_delete(self):
         db = self.db
         db.drop_collection("test")
-        db.create_collection("test", capped=True, size=1000)
-
-        db.test.insert_one({"x": 1})
-        self.assertEqual(1, db.test.count_documents({}))
-
-        # Can't remove from capped collection.
-        self.assertRaises(OperationFailure, db.test.delete_one, {"x": 1})
-        db.drop_collection("test")
-        db.test.insert_one({"x": 1})
-        db.test.insert_one({"x": 1})
+        db.test.insert_many([{"x": 1}, {"x": 1}])
         self.assertEqual(2, db.test.delete_many({}).deleted_count)
         self.assertEqual(0, db.test.delete_many({}).deleted_count)
 
@@ -1541,11 +1538,18 @@ class TestCollection(IntegrationTest):
         while True:
             cursor.next()
             n += 1
-            if 3 == n:
+            if n == 3:
                 self.assertFalse(cursor.alive)
                 break
 
             self.assertTrue(cursor.alive)
+
+    def test_invalid_session_parameter(self):
+        def try_invalid_session():
+            with self.db.test.aggregate([], {}):  # type:ignore
+                pass
+
+        self.assertRaisesRegex(ValueError, "must be a ClientSession", try_invalid_session)
 
     def test_large_limit(self):
         db = self.db
@@ -1632,8 +1636,8 @@ class TestCollection(IntegrationTest):
         self.assertTrue("hello" in db.test.find_one(projection=("hello",)))
         self.assertTrue("hello" not in db.test.find_one(projection=("foo",)))
 
-        self.assertTrue("hello" in db.test.find_one(projection=set(["hello"])))
-        self.assertTrue("hello" not in db.test.find_one(projection=set(["foo"])))
+        self.assertTrue("hello" in db.test.find_one(projection={"hello"}))
+        self.assertTrue("hello" not in db.test.find_one(projection={"foo"}))
 
         self.assertTrue("hello" in db.test.find_one(projection=frozenset(["hello"])))
         self.assertTrue("hello" not in db.test.find_one(projection=frozenset(["foo"])))
@@ -1682,7 +1686,7 @@ class TestCollection(IntegrationTest):
 
         self.assertRaises(TypeError, db.test.find, sort=5)
         self.assertRaises(TypeError, db.test.find, sort="hello")
-        self.assertRaises(ValueError, db.test.find, sort=["hello", 1])
+        self.assertRaises(TypeError, db.test.find, sort=["hello", 1])
 
     # TODO doesn't actually test functionality, just that it doesn't blow up
     def test_cursor_timeout(self):
@@ -1717,15 +1721,15 @@ class TestCollection(IntegrationTest):
         # Make sure the socket is returned after exhaustion.
         cur = client[self.db.name].test.find(cursor_type=CursorType.EXHAUST)
         next(cur)
-        self.assertEqual(0, len(pool.sockets))
+        self.assertEqual(0, len(pool.conns))
         for _ in cur:
             pass
-        self.assertEqual(1, len(pool.sockets))
+        self.assertEqual(1, len(pool.conns))
 
         # Same as previous but don't call next()
         for _ in client[self.db.name].test.find(cursor_type=CursorType.EXHAUST):
             pass
-        self.assertEqual(1, len(pool.sockets))
+        self.assertEqual(1, len(pool.conns))
 
         # If the Cursor instance is discarded before being completely iterated
         # and the socket has pending data (more_to_come=True) we have to close
@@ -1738,7 +1742,7 @@ class TestCollection(IntegrationTest):
                 next(cur)
         else:
             next(cur)
-        self.assertEqual(0, len(pool.sockets))
+        self.assertEqual(0, len(pool.conns))
         if sys.platform.startswith("java") or "PyPy" in sys.version:
             # Don't wait for GC or use gc.collect(), it's unreliable.
             cur.close()
@@ -1746,7 +1750,7 @@ class TestCollection(IntegrationTest):
         # Wait until the background thread returns the socket.
         wait_until(lambda: pool.active_sockets == 0, "return socket")
         # The socket should be discarded.
-        self.assertEqual(0, len(pool.sockets))
+        self.assertEqual(0, len(pool.conns))
 
     def test_distinct(self):
         self.db.drop_collection("test")
@@ -1845,7 +1849,7 @@ class TestCollection(IntegrationTest):
         unack_coll = db.collection_2.with_options(write_concern=WriteConcern(w=0))
         unack_coll.insert_many(insert_second_fails)
         wait_until(
-            lambda: 1 == db.collection_2.count_documents({}), "insert 1 document", timeout=60
+            lambda: db.collection_2.count_documents({}) == 1, "insert 1 document", timeout=60
         )
 
         db.collection_2.drop()
@@ -1875,7 +1879,7 @@ class TestCollection(IntegrationTest):
 
         # Only the first and third documents are inserted.
         wait_until(
-            lambda: 2 == db.collection_4.count_documents({}), "insert 2 documents", timeout=60
+            lambda: db.collection_4.count_documents({}) == 2, "insert 2 documents", timeout=60
         )
 
         db.collection_4.drop()
@@ -1988,21 +1992,20 @@ class TestCollection(IntegrationTest):
         c_w0 = db.get_collection("test", write_concern=WriteConcern(w=0))
         # default WriteConcern.
         c_default = db.get_collection("test", write_concern=WriteConcern())
-        results = listener.results
         # Authenticate the client and throw out auth commands from the listener.
         db.command("ping")
-        results.clear()
+        listener.reset()
         c_w0.find_one_and_update({"_id": 1}, {"$set": {"foo": "bar"}})
-        self.assertEqual({"w": 0}, results["started"][0].command["writeConcern"])
-        results.clear()
+        self.assertEqual({"w": 0}, listener.started_events[0].command["writeConcern"])
+        listener.reset()
 
         c_w0.find_one_and_replace({"_id": 1}, {"foo": "bar"})
-        self.assertEqual({"w": 0}, results["started"][0].command["writeConcern"])
-        results.clear()
+        self.assertEqual({"w": 0}, listener.started_events[0].command["writeConcern"])
+        listener.reset()
 
         c_w0.find_one_and_delete({"_id": 1})
-        self.assertEqual({"w": 0}, results["started"][0].command["writeConcern"])
-        results.clear()
+        self.assertEqual({"w": 0}, listener.started_events[0].command["writeConcern"])
+        listener.reset()
 
         # Test write concern errors.
         if client_context.is_rs:
@@ -2019,27 +2022,27 @@ class TestCollection(IntegrationTest):
                 WriteConcernError,
                 c_wc_error.find_one_and_replace,
                 {"w": 0},
-                results["started"][0].command["writeConcern"],
+                listener.started_events[0].command["writeConcern"],
             )
             self.assertRaises(
                 WriteConcernError,
                 c_wc_error.find_one_and_delete,
                 {"w": 0},
-                results["started"][0].command["writeConcern"],
+                listener.started_events[0].command["writeConcern"],
             )
-            results.clear()
+            listener.reset()
 
         c_default.find_one_and_update({"_id": 1}, {"$set": {"foo": "bar"}})
-        self.assertNotIn("writeConcern", results["started"][0].command)
-        results.clear()
+        self.assertNotIn("writeConcern", listener.started_events[0].command)
+        listener.reset()
 
         c_default.find_one_and_replace({"_id": 1}, {"foo": "bar"})
-        self.assertNotIn("writeConcern", results["started"][0].command)
-        results.clear()
+        self.assertNotIn("writeConcern", listener.started_events[0].command)
+        listener.reset()
 
         c_default.find_one_and_delete({"_id": 1})
-        self.assertNotIn("writeConcern", results["started"][0].command)
-        results.clear()
+        self.assertNotIn("writeConcern", listener.started_events[0].command)
+        listener.reset()
 
     def test_find_with_nested(self):
         c = self.db.test
@@ -2121,9 +2124,7 @@ class TestCollection(IntegrationTest):
             None,
             None,
         )
-        self.assertEqual(
-            cmd.to_dict(), SON([("find", "coll"), ("$dumb", 2), ("filter", {"foo": 1})]).to_dict()
-        )
+        self.assertEqual(cmd, {"find": "coll", "$dumb": 2, "filter": {"foo": 1}})
 
     def test_bool(self):
         with self.assertRaises(NotImplementedError):
@@ -2140,7 +2141,7 @@ class TestCollection(IntegrationTest):
             (c.update_one, ({}, {"$inc": {"x": 3}})),
             (c.find_one_and_delete, ({}, {})),
             (c.find_one_and_replace, ({}, {})),
-            (c.aggregate, ([], {})),
+            (c.aggregate, ([],)),
         ]
         for let in [10, "str", [], False]:
             for helper, args in helpers:

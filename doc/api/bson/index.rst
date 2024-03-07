@@ -3,7 +3,7 @@
 
 .. automodule:: bson
    :synopsis: BSON (Binary JSON) Encoding and Decoding
-   :members:
+   :members: BSON, decode, decode_all, decode_file_iter, decode_iter, encode, gen_list_name, has_c, is_valid
 
 Sub-modules:
 
@@ -13,6 +13,7 @@ Sub-modules:
    binary
    code
    codec_options
+   datetime_ms
    dbref
    decimal128
    errors

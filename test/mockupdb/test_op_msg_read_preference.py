@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import copy
 import itertools
@@ -18,7 +19,7 @@ import unittest
 from typing import Any
 
 from mockupdb import CommandBase, MockupDB, going
-from operations import operations
+from operations import operations  # type: ignore[import]
 
 from pymongo import MongoClient, ReadPreference
 from pymongo.read_preferences import (
@@ -35,7 +36,7 @@ class OpMsgReadPrefBase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        super(OpMsgReadPrefBase, cls).setUpClass()
+        super().setUpClass()
 
     @classmethod
     def add_test(cls, mode, test_name, test):
@@ -50,7 +51,7 @@ class OpMsgReadPrefBase(unittest.TestCase):
 class TestOpMsgMongos(OpMsgReadPrefBase):
     @classmethod
     def setUpClass(cls):
-        super(TestOpMsgMongos, cls).setUpClass()
+        super().setUpClass()
         auto_ismaster = {
             "ismaster": True,
             "msg": "isdbgrid",  # Mongos.
@@ -64,13 +65,13 @@ class TestOpMsgMongos(OpMsgReadPrefBase):
     @classmethod
     def tearDownClass(cls):
         cls.primary.stop()
-        super(TestOpMsgMongos, cls).tearDownClass()
+        super().tearDownClass()
 
 
 class TestOpMsgReplicaSet(OpMsgReadPrefBase):
     @classmethod
     def setUpClass(cls):
-        super(TestOpMsgReplicaSet, cls).setUpClass()
+        super().setUpClass()
         cls.primary, cls.secondary = MockupDB(), MockupDB()
         for server in cls.primary, cls.secondary:
             server.run()
@@ -94,7 +95,7 @@ class TestOpMsgReplicaSet(OpMsgReadPrefBase):
     def tearDownClass(cls):
         for server in cls.primary, cls.secondary:
             server.stop()
-        super(TestOpMsgReplicaSet, cls).tearDownClass()
+        super().tearDownClass()
 
     @classmethod
     def add_test(cls, mode, test_name, test):
@@ -118,7 +119,7 @@ class TestOpMsgSingle(OpMsgReadPrefBase):
 
     @classmethod
     def setUpClass(cls):
-        super(TestOpMsgSingle, cls).setUpClass()
+        super().setUpClass()
         auto_ismaster = {
             "ismaster": True,
             "minWireVersion": 2,
@@ -131,7 +132,7 @@ class TestOpMsgSingle(OpMsgReadPrefBase):
     @classmethod
     def tearDownClass(cls):
         cls.primary.stop()
-        super(TestOpMsgSingle, cls).tearDownClass()
+        super().tearDownClass()
 
 
 def create_op_msg_read_mode_test(mode, operation):
@@ -181,7 +182,7 @@ def generate_op_msg_read_mode_tests():
     for entry in matrix:
         mode, operation = entry
         test = create_op_msg_read_mode_test(mode, operation)
-        test_name = "test_%s_with_mode_%s" % (operation.name.replace(" ", "_"), mode)
+        test_name = "test_{}_with_mode_{}".format(operation.name.replace(" ", "_"), mode)
         test.__name__ = test_name
         for cls in TestOpMsgMongos, TestOpMsgReplicaSet, TestOpMsgSingle:
             cls.add_test(mode, test_name, test)

@@ -18,12 +18,14 @@
 - A direct connection to a slave.
 - A direct connection to a mongos.
 """
+from __future__ import annotations
+
 import itertools
 import unittest
 from queue import Queue
 
 from mockupdb import MockupDB, going
-from operations import operations
+from operations import operations  # type: ignore[import]
 
 from pymongo import MongoClient
 from pymongo.read_preferences import make_read_preference, read_pref_mode_from_name
@@ -43,10 +45,7 @@ class TestSlaveOkaySharded(unittest.TestCase):
                 "ismaster", minWireVersion=2, maxWireVersion=6, ismaster=True, msg="isdbgrid"
             )
 
-        self.mongoses_uri = "mongodb://%s,%s" % (
-            self.mongos1.address_string,
-            self.mongos2.address_string,
-        )
+        self.mongoses_uri = f"mongodb://{self.mongos1.address_string},{self.mongos2.address_string}"
 
 
 def create_slave_ok_sharded_test(mode, operation):
@@ -59,7 +58,7 @@ def create_slave_ok_sharded_test(mode, operation):
         elif operation.op_type == "must-use-primary":
             slave_ok = False
         else:
-            assert False, "unrecognized op_type %r" % operation.op_type
+            raise AssertionError("unrecognized op_type %r" % operation.op_type)
 
         pref = make_read_preference(read_pref_mode_from_name(mode), tag_sets=None)
 
@@ -84,7 +83,7 @@ def generate_slave_ok_sharded_tests():
     for entry in matrix:
         mode, operation = entry
         test = create_slave_ok_sharded_test(mode, operation)
-        test_name = "test_%s_with_mode_%s" % (operation.name.replace(" ", "_"), mode)
+        test_name = "test_{}_with_mode_{}".format(operation.name.replace(" ", "_"), mode)
 
         test.__name__ = test_name
         setattr(TestSlaveOkaySharded, test_name, test)

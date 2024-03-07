@@ -13,7 +13,9 @@
 # limitations under the License.
 
 """Test that the pymongo.uri_parser module is compliant with the connection
-string and uri options specifications."""
+string and uri options specifications.
+"""
+from __future__ import annotations
 
 import json
 import os
@@ -72,8 +74,8 @@ class TestAllScenarios(unittest.TestCase):
         clear_warning_registry()
 
 
-def get_error_message_template(expected, artefact):
-    return "%s %s for test '%s'" % ("Expected" if expected else "Unexpected", artefact, "%s")
+def get_error_message_template(expected, artifact):
+    return "{} {} for test '{}'".format("Expected" if expected else "Unexpected", artifact, "%s")
 
 
 def run_scenario_in_dir(target_workdir):
@@ -81,7 +83,9 @@ def run_scenario_in_dir(target_workdir):
         def modified_test_scenario(*args, **kwargs):
             original_workdir = os.getcwd()
             os.chdir(target_workdir)
-            func(*args, **kwargs)
+            with warnings.catch_warnings():
+                warnings.simplefilter("default")
+                func(*args, **kwargs)
             os.chdir(original_workdir)
 
         return modified_test_scenario
@@ -98,17 +102,20 @@ def create_test(test, test_workdir):
             self.skipTest("This test needs dnspython package.")
         valid = True
         warning = False
+        expected_warning = test.get("warning", False)
+        expected_valid = test.get("valid", True)
 
         with warnings.catch_warnings(record=True) as ctx:
-            warnings.simplefilter("always")
+            warnings.simplefilter("ignore", category=ResourceWarning)
             try:
                 options = parse_uri(test["uri"], warn=True)
             except Exception:
                 valid = False
             else:
                 warning = len(ctx) > 0
+                if expected_valid and warning and not expected_warning:
+                    raise ValueError("Got unexpected warning(s): ", [str(i) for i in ctx])
 
-        expected_valid = test.get("valid", True)
         self.assertEqual(
             valid,
             expected_valid,
@@ -116,7 +123,6 @@ def create_test(test, test_workdir):
         )
 
         if expected_valid:
-            expected_warning = test.get("warning", False)
             self.assertEqual(
                 warning,
                 expected_warning,
@@ -133,13 +139,15 @@ def create_test(test, test_workdir):
 
             for exp, actual in zip(test["hosts"], options["nodelist"]):
                 self.assertEqual(
-                    exp["host"], actual[0], "Expected host %s but got %s" % (exp["host"], actual[0])
+                    exp["host"],
+                    actual[0],
+                    "Expected host {} but got {}".format(exp["host"], actual[0]),
                 )
                 if exp["port"] is not None:
                     self.assertEqual(
                         exp["port"],
                         actual[1],
-                        "Expected port %s but got %s" % (exp["port"], actual),
+                        "Expected port {} but got {}".format(exp["port"], actual),
                     )
 
         # Compare auth options.
@@ -157,7 +165,7 @@ def create_test(test, test_workdir):
                     self.assertEqual(
                         auth[elm],
                         options[elm],
-                        "Expected %s but got %s" % (auth[elm], options[elm]),
+                        f"Expected {auth[elm]} but got {options[elm]}",
                     )
 
         # Compare URI options.
@@ -183,7 +191,7 @@ def create_test(test, test_workdir):
                         ),
                     )
                 else:
-                    self.fail("Missing expected option %s" % (opt,))
+                    self.fail(f"Missing expected option {opt}")
 
     return run_scenario_in_dir(test_workdir)(run_scenario)
 
@@ -209,7 +217,7 @@ def create_tests(test_path):
                     continue
 
                 testmethod = create_test(testcase, dirpath)
-                testname = "test_%s_%s_%s" % (
+                testname = "test_{}_{}_{}".format(
                     dirname,
                     os.path.splitext(filename)[0],
                     str(dsc).replace(" ", "_"),

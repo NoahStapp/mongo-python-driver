@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
 #
 # PyMongo documentation build configuration file
 #
 # This file is execfile()d with the current directory set to its containing dir.
+from __future__ import annotations
 
-import os
 import sys
+from pathlib import Path
 
-sys.path[0:0] = [os.path.abspath("..")]
+sys.path[0:0] = [Path("..").resolve()]
 
-import pymongo  # noqa
+import pymongo  # noqa: E402
 
 # -- General configuration -----------------------------------------------------
 
@@ -26,12 +26,11 @@ extensions = [
 
 # Add optional extensions
 try:
-    import sphinxcontrib.shellcheck  # noqa
+    import sphinxcontrib.shellcheck  # noqa: F401
 
     extensions += ["sphinxcontrib.shellcheck"]
 except ImportError:
     pass
-
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]
@@ -82,15 +81,22 @@ pygments_style = "sphinx"
 
 # Options for link checking
 # The anchors on the rendered markdown page are created after the fact,
-# so this link results in a 404.
+# so those link results in a 404.
+# wiki.centos.org has been flakey.
+# sourceforge.net is giving a 403 error, but is still accessible from the browser.
 linkcheck_ignore = [
-    "https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#requesting-an-immediate-check"
+    "https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#requesting-an-immediate-check",
+    "https://github.com/mongodb/libmongocrypt/blob/master/bindings/python/README.rst#installing-from-source",
+    r"https://wiki.centos.org/[\w/]*",
+    r"http://sourceforge.net/",
 ]
 
 # -- Options for extensions ----------------------------------------------------
 autoclass_content = "init"
 
-doctest_path = [os.path.abspath("..")]
+autodoc_typehints = "description"
+
+doctest_path = [Path("..").resolve()]
 
 doctest_test_doctest_blocks = ""
 
@@ -103,13 +109,18 @@ db = client.doctest_test
 
 # -- Options for HTML output ---------------------------------------------------
 
-# Theme gratefully vendored from CPython source.
-html_theme = "pydoctheme"
-html_theme_path = ["."]
-html_theme_options = {"collapsiblesidebar": True, "googletag": False}
+try:
+    import furo  # noqa: F401
 
-# Additional static files.
-html_static_path = ["static"]
+    html_theme = "furo"
+except ImportError:
+    # Theme gratefully vendored from CPython source.
+    html_theme = "pydoctheme"
+    html_theme_path = ["."]
+    html_theme_options = {"collapsiblesidebar": True, "googletag": False}
+
+    # Additional static files.
+    html_static_path = ["static"]
 
 # The name for this set of Sphinx documents.  If None, it defaults to
 # "<project> v<release> documentation".
@@ -187,6 +198,6 @@ latex_documents = [
 
 
 intersphinx_mapping = {
-    "gevent": ("http://www.gevent.org/", None),
+    "gevent": ("https://www.gevent.org/", None),
     "py": ("https://docs.python.org/3/", None),
 }

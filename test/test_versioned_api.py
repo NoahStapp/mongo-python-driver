@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import os
 import sys
@@ -56,9 +57,9 @@ class TestServerApi(IntegrationTest):
         with self.assertRaises(ValueError):
             ServerApi("2")
         with self.assertRaises(TypeError):
-            ServerApi("1", strict="not-a-bool")
+            ServerApi("1", strict="not-a-bool")  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
-            ServerApi("1", deprecation_errors="not-a-bool")
+            ServerApi("1", deprecation_errors="not-a-bool")  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             MongoClient(server_api="not-a-ServerApi")
 
@@ -83,7 +84,7 @@ class TestServerApi(IntegrationTest):
         self.addCleanup(coll.delete_many, {})
         list(coll.find(batch_size=25))
         client.admin.command("ping")
-        self.assertServerApiInAllCommands(listener.results["started"])
+        self.assertServerApiInAllCommands(listener.started_events)
 
     @client_context.require_version_min(4, 7)
     @client_context.require_transactions
@@ -100,7 +101,7 @@ class TestServerApi(IntegrationTest):
             coll.insert_many([{} for _ in range(100)], session=s)
             list(coll.find(batch_size=25, session=s))
             client.test.command("find", "test", session=s)
-            self.assertServerApiInAllCommands(listener.results["started"])
+            self.assertServerApiInAllCommands(listener.started_events)
 
 
 if __name__ == "__main__":

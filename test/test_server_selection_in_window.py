@@ -13,14 +13,22 @@
 # limitations under the License.
 
 """Test the topology module's Server Selection Spec implementation."""
+from __future__ import annotations
 
 import os
 import threading
 from test import IntegrationTest, client_context, unittest
-from test.utils import OvertCommandListener, TestCreator, rs_client, wait_until
+from test.utils import (
+    OvertCommandListener,
+    SpecTestCreator,
+    get_pool,
+    rs_client,
+    wait_until,
+)
 from test.utils_selection_tests import create_topology
 
 from pymongo.common import clean_node
+from pymongo.operations import _Op
 from pymongo.read_preferences import ReadPreference
 
 # Location of JSON test specifications.
@@ -40,12 +48,12 @@ class TestAllScenarios(unittest.TestCase):
             server.pool.operation_count = mock["operation_count"]
 
         pref = ReadPreference.NEAREST
-        counts = dict((address, 0) for address in topology._description.server_descriptions())
+        counts = {address: 0 for address in topology._description.server_descriptions()}
 
         # Number of times to repeat server selection
         iterations = scenario_def["iterations"]
         for _ in range(iterations):
-            server = topology.select_server(pref, server_selection_timeout=0)
+            server = topology.select_server(pref, _Op.TEST, server_selection_timeout=0)
             counts[server.description.address] += 1
 
         # Verify expected_frequencies
@@ -70,7 +78,7 @@ def create_test(scenario_def, test, name):
     return run_scenario
 
 
-class CustomTestCreator(TestCreator):
+class CustomSpecTestCreator(SpecTestCreator):
     def tests(self, scenario_def):
         """Extract the tests from a spec file.
 
@@ -80,12 +88,12 @@ class CustomTestCreator(TestCreator):
         return [scenario_def]
 
 
-CustomTestCreator(create_test, TestAllScenarios, TEST_PATH).create_tests()
+CustomSpecTestCreator(create_test, TestAllScenarios, TEST_PATH).create_tests()
 
 
 class FinderThread(threading.Thread):
     def __init__(self, collection, iterations):
-        super(FinderThread, self).__init__()
+        super().__init__()
         self.daemon = True
         self.collection = collection
         self.iterations = iterations
@@ -98,11 +106,10 @@ class FinderThread(threading.Thread):
 
 
 class TestProse(IntegrationTest):
-    def frequencies(self, client, listener):
+    def frequencies(self, client, listener, n_finds=10):
         coll = client.test.test
-        N_FINDS = 10
         N_THREADS = 10
-        threads = [FinderThread(coll, N_FINDS) for _ in range(N_THREADS)]
+        threads = [FinderThread(coll, n_finds) for _ in range(N_THREADS)]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -110,8 +117,8 @@ class TestProse(IntegrationTest):
         for thread in threads:
             self.assertTrue(thread.passed)
 
-        events = listener.results["started"]
-        self.assertEqual(len(events), N_FINDS * N_THREADS)
+        events = listener.started_events
+        self.assertEqual(len(events), n_finds * N_THREADS)
         nodes = client.nodes
         self.assertEqual(len(nodes), 2)
         freqs = {address: 0.0 for address in nodes}
@@ -131,10 +138,12 @@ class TestProse(IntegrationTest):
             client_context.mongos_seeds(),
             appName="loadBalancingTest",
             event_listeners=[listener],
-            localThresholdMS=10000,
+            localThresholdMS=30000,
+            minPoolSize=10,
         )
         self.addCleanup(client.close)
         wait_until(lambda: len(client.nodes) == 2, "discover both nodes")
+        wait_until(lambda: len(get_pool(client).conns) >= 10, "create 10 connections")
         # Delay find commands on
         delay_finds = {
             "configureFailPoint": "failCommand",
@@ -153,7 +162,7 @@ class TestProse(IntegrationTest):
             freqs = self.frequencies(client, listener)
             self.assertLessEqual(freqs[delayed_server], 0.25)
         listener.reset()
-        freqs = self.frequencies(client, listener)
+        freqs = self.frequencies(client, listener, n_finds=100)
         self.assertAlmostEqual(freqs[delayed_server], 0.50, delta=0.15)
 
 

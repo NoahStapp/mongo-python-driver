@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test the database module."""
+from __future__ import annotations
 
 import sys
 import time
@@ -122,6 +123,7 @@ class TestStreamingProtocol(IntegrationTest):
                 # XXX: Add a public TopologyDescription getter to MongoClient?
                 topology = client._topology
                 sd = topology.description.server_descriptions()[address]
+                assert sd.round_trip_time is not None
                 return sd.round_trip_time > 0.250
 
             wait_until(rtt_exceeds_250_ms, "exceed 250ms RTT")

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # Copyright 2009-present MongoDB, Inc.
 #
@@ -15,6 +14,7 @@
 # limitations under the License.
 
 """Test the bson module."""
+from __future__ import annotations
 
 import array
 import collections
@@ -38,7 +38,9 @@ import bson
 from bson import (
     BSON,
     EPOCH_AWARE,
+    DatetimeMS,
     Regex,
+    _datetime_to_millis,
     decode,
     decode_all,
     decode_file_iter,
@@ -46,9 +48,10 @@ from bson import (
     encode,
     is_valid,
 )
-from bson.binary import Binary, UuidRepresentation
+from bson.binary import USER_DEFINED_SUBTYPE, Binary, UuidRepresentation
 from bson.code import Code
-from bson.codec_options import CodecOptions
+from bson.codec_options import CodecOptions, DatetimeConversion
+from bson.datetime_ms import _DATETIME_ERROR_SUGGESTION
 from bson.dbref import DBRef
 from bson.errors import InvalidBSON, InvalidDocument
 from bson.int64 import Int64
@@ -120,7 +123,6 @@ class TestBSON(unittest.TestCase):
         self.assertRaises(InvalidBSON, decode, data)
 
     def check_encode_then_decode(self, doc_class=dict, decoder=decode, encoder=encode):
-
         # Work around http://bugs.jython.org/issue1728
         if sys.platform.startswith("java"):
             doc_class = SON
@@ -368,7 +370,7 @@ class TestBSON(unittest.TestCase):
             ),
         ]
         for i, data in enumerate(bad_bsons):
-            msg = "bad_bson[{}]".format(i)
+            msg = f"bad_bson[{i}]"
             with self.assertRaises(InvalidBSON, msg=msg):
                 decode_all(data)
             with self.assertRaises(InvalidBSON, msg=msg):
@@ -489,7 +491,7 @@ class TestBSON(unittest.TestCase):
 
     def test_unknown_type(self):
         # Repr value differs with major python version
-        part = "type %r for fieldname 'foo'" % (b"\x14",)
+        part = "type {!r} for fieldname 'foo'".format(b"\x14")
         docs = [
             b"\x0e\x00\x00\x00\x14foo\x00\x01\x00\x00\x00\x00",
             (b"\x16\x00\x00\x00\x04foo\x00\x0c\x00\x00\x00\x140\x00\x01\x00\x00\x00\x00\x00"),
@@ -528,8 +530,8 @@ class TestBSON(unittest.TestCase):
     def test_bytes_as_keys(self):
         doc = {b"foo": "bar"}
         # Since `bytes` are stored as Binary you can't use them
-        # as keys in python 3.x. Using binary data as a key makes
-        # no sense in BSON anyway and little sense in python.
+        # as keys. Using binary data as a key makes no sense in BSON
+        # anyway and little sense in python.
         self.assertRaises(InvalidDocument, encode, doc)
 
     def test_datetime_encode_decode(self):
@@ -646,7 +648,7 @@ class TestBSON(unittest.TestCase):
         encoded1 = encode({"x": 256})
         decoded1 = decode(encoded1)["x"]
         self.assertEqual(256, decoded1)
-        self.assertEqual(type(256), type(decoded1))
+        self.assertEqual(int, type(decoded1))
 
         encoded2 = encode({"x": Int64(256)})
         decoded2 = decode(encoded2)["x"]
@@ -770,6 +772,21 @@ class TestBSON(unittest.TestCase):
             self.assertEqual(type(value), orig_type)
             self.assertEqual(value, orig_type(value))
 
+    def test_encode_type_marker(self):
+        # Assert that a custom subclass can be BSON encoded based on the _type_marker attribute.
+        class MyMaxKey:
+            _type_marker = 127
+
+        expected_bson = encode({"a": MaxKey()})
+        self.assertEqual(encode({"a": MyMaxKey()}), expected_bson)
+
+        # Test a class that inherits from two built in types
+        class MyBinary(Binary):
+            pass
+
+        expected_bson = encode({"a": Binary(b"bin", USER_DEFINED_SUBTYPE)})
+        self.assertEqual(encode({"a": MyBinary(b"bin", USER_DEFINED_SUBTYPE)}), expected_bson)
+
     def test_ordered_dict(self):
         d = OrderedDict([("one", 1), ("two", 2), ("three", 3), ("four", 4)])
         self.assertEqual(d, decode(encode(d), CodecOptions(document_class=OrderedDict)))  # type: ignore[type-var]
@@ -781,7 +798,9 @@ class TestBSON(unittest.TestCase):
         self.assertEqual(0, bson_re1.flags)
 
         doc1 = {"r": bson_re1}
-        doc1_bson = b"\x11\x00\x00\x00\x0br\x00[\\w-\\.]\x00\x00\x00"  # document length  # r: regex  # document terminator
+        doc1_bson = (
+            b"\x11\x00\x00\x00\x0br\x00[\\w-\\.]\x00\x00\x00"
+        )  # document length  # r: regex  # document terminator
 
         self.assertEqual(doc1_bson, encode(doc1))
         self.assertEqual(doc1, decode(doc1_bson))
@@ -792,7 +811,9 @@ class TestBSON(unittest.TestCase):
 
         doc2_with_re = {"r": re2}
         doc2_with_bson_re = {"r": bson_re2}
-        doc2_bson = b"\x11\x00\x00\x00\x0br\x00.*\x00imsux\x00\x00"  # document length  # r: regex  # document terminator
+        doc2_bson = (
+            b"\x11\x00\x00\x00\x0br\x00.*\x00imsux\x00\x00"
+        )  # document length  # r: regex  # document terminator
 
         self.assertEqual(doc2_bson, encode(doc2_with_re))
         self.assertEqual(doc2_bson, encode(doc2_with_bson_re))
@@ -923,7 +944,7 @@ class TestBSON(unittest.TestCase):
     def test_bson_encode_thread_safe(self):
         def target(i):
             for j in range(1000):
-                my_int = type("MyInt_%s_%s" % (i, j), (int,), {})
+                my_int = type(f"MyInt_{i}_{j}", (int,), {})
                 bson.encode({"my_int": my_int()})
 
         threads = [ExceptionCatchingThread(target=target, args=(i,)) for i in range(3)]
@@ -937,7 +958,7 @@ class TestBSON(unittest.TestCase):
             self.assertIsNone(t.exc)
 
     def test_raise_invalid_document(self):
-        class Wrapper(object):
+        class Wrapper:
             def __init__(self, val):
                 self.val = val
 
@@ -977,14 +998,15 @@ class TestCodecOptions(unittest.TestCase):
             "uuid_representation=UuidRepresentation.UNSPECIFIED, "
             "unicode_decode_error_handler='strict', "
             "tzinfo=None, type_registry=TypeRegistry(type_codecs=[], "
-            "fallback_encoder=None))"
+            "fallback_encoder=None), "
+            "datetime_conversion=DatetimeConversion.DATETIME)"
         )
         self.assertEqual(r, repr(CodecOptions()))
 
     def test_decode_all_defaults(self):
         # Test decode_all()'s default document_class is dict and tz_aware is
         # False.
-        doc = {"sub_document": {}, "dt": datetime.datetime.utcnow()}
+        doc = {"sub_document": {}, "dt": datetime.datetime.now(tz=datetime.timezone.utc)}
 
         decoded = bson.decode_all(bson.encode(doc))[0]
         self.assertIsInstance(decoded["sub_document"], dict)
@@ -996,7 +1018,7 @@ class TestCodecOptions(unittest.TestCase):
     def test_decode_all_no_options(self):
         # Test decode_all()'s default document_class is dict and tz_aware is
         # False.
-        doc = {"sub_document": {}, "dt": datetime.datetime.utcnow()}
+        doc = {"sub_document": {}, "dt": datetime.datetime.now(tz=datetime.timezone.utc)}
 
         decoded = bson.decode_all(bson.encode(doc), None)[0]
         self.assertIsInstance(decoded["sub_document"], dict)
@@ -1005,6 +1027,15 @@ class TestCodecOptions(unittest.TestCase):
         doc2 = {"id": Binary.from_uuid(uuid.uuid4())}
         decoded = bson.decode_all(bson.encode(doc2), None)[0]
         self.assertIsInstance(decoded["id"], Binary)
+
+    def test_decode_all_kwarg(self):
+        doc = {"a": uuid.uuid4()}
+        opts = CodecOptions(uuid_representation=UuidRepresentation.STANDARD)
+        encoded = encode(doc, codec_options=opts)
+        # Positional codec_options
+        self.assertEqual([doc], decode_all(encoded, opts))
+        # Keyword codec_options
+        self.assertEqual([doc], decode_all(encoded, codec_options=opts))
 
     def test_unicode_decode_error_handler(self):
         enc = encode({"keystr": "foobar"})
@@ -1017,7 +1048,10 @@ class TestCodecOptions(unittest.TestCase):
         # Ensure that strict mode raises an error.
         for invalid in [invalid_key, invalid_val, invalid_both]:
             self.assertRaises(
-                InvalidBSON, decode, invalid, CodecOptions(unicode_decode_error_handler="strict")
+                InvalidBSON,
+                decode,
+                invalid,
+                CodecOptions(unicode_decode_error_handler="strict"),
             )
             self.assertRaises(InvalidBSON, decode, invalid, CodecOptions())
             self.assertRaises(InvalidBSON, decode, invalid)
@@ -1038,7 +1072,10 @@ class TestCodecOptions(unittest.TestCase):
         self.assertEqual(dec, {"keystr": "foobar"})
 
         self.assertRaises(
-            InvalidBSON, decode, invalid_both, CodecOptions(unicode_decode_error_handler="junk")
+            InvalidBSON,
+            decode,
+            invalid_both,
+            CodecOptions(unicode_decode_error_handler="junk"),
         )
 
     def round_trip_pickle(self, obj, pickled_with_older):
@@ -1131,6 +1168,181 @@ class TestCodecOptions(unittest.TestCase):
         # Documents returned from decode are mutable.
         decoded["new_field"] = 1
         self.assertTrue(decoded["_id"].generation_time)
+
+
+class TestDatetimeConversion(unittest.TestCase):
+    def test_comps(self):
+        # Tests other timestamp formats.
+        # Test each of the rich comparison methods.
+        pairs = [
+            (DatetimeMS(-1), DatetimeMS(1)),
+            (DatetimeMS(0), DatetimeMS(0)),
+            (DatetimeMS(1), DatetimeMS(-1)),
+        ]
+
+        comp_ops = ["__lt__", "__le__", "__eq__", "__ne__", "__gt__", "__ge__"]
+        for lh, rh in pairs:
+            for op in comp_ops:
+                self.assertEqual(getattr(lh, op)(rh), getattr(lh._value, op)(rh._value))
+
+    def test_class_conversions(self):
+        # Test class conversions.
+        dtr1 = DatetimeMS(1234)
+        dt1 = dtr1.as_datetime()
+        self.assertEqual(dtr1, DatetimeMS(dt1))
+
+        dt2 = datetime.datetime(1969, 1, 1)
+        dtr2 = DatetimeMS(dt2)
+        self.assertEqual(dtr2.as_datetime(), dt2)
+
+        # Test encode and decode without codec options. Expect: DatetimeMS => datetime
+        dtr1 = DatetimeMS(0)
+        enc1 = encode({"x": dtr1})
+        dec1 = decode(enc1)
+        self.assertEqual(dec1["x"], datetime.datetime(1970, 1, 1))
+        self.assertNotEqual(type(dtr1), type(dec1["x"]))
+
+        # Test encode and decode with codec options. Expect: UTCDateimteRaw => DatetimeMS
+        opts1 = CodecOptions(datetime_conversion=DatetimeConversion.DATETIME_MS)
+        enc1 = encode({"x": dtr1})
+        dec1 = decode(enc1, opts1)
+        self.assertEqual(type(dtr1), type(dec1["x"]))
+        self.assertEqual(dtr1, dec1["x"])
+
+        # Expect: datetime => DatetimeMS
+        opts1 = CodecOptions(datetime_conversion=DatetimeConversion.DATETIME_MS)
+        dt1 = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        enc1 = encode({"x": dt1})
+        dec1 = decode(enc1, opts1)
+        self.assertEqual(dec1["x"], DatetimeMS(0))
+        self.assertNotEqual(dt1, type(dec1["x"]))
+
+    def test_clamping(self):
+        # Test clamping from below and above.
+        opts1 = CodecOptions(
+            datetime_conversion=DatetimeConversion.DATETIME_CLAMP,
+            tz_aware=True,
+            tzinfo=datetime.timezone.utc,
+        )
+        below = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.min) - 1)})
+        dec_below = decode(below, opts1)
+        self.assertEqual(
+            dec_below["x"], datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+        )
+
+        above = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.max) + 1)})
+        dec_above = decode(above, opts1)
+        self.assertEqual(
+            dec_above["x"],
+            datetime.datetime.max.replace(tzinfo=datetime.timezone.utc, microsecond=999000),
+        )
+
+    def test_tz_clamping(self):
+        # Naive clamping to local tz.
+        opts1 = CodecOptions(datetime_conversion=DatetimeConversion.DATETIME_CLAMP, tz_aware=False)
+        below = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.min) - 24 * 60 * 60)})
+
+        dec_below = decode(below, opts1)
+        self.assertEqual(dec_below["x"], datetime.datetime.min)
+
+        above = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.max) + 24 * 60 * 60)})
+        dec_above = decode(above, opts1)
+        self.assertEqual(
+            dec_above["x"],
+            datetime.datetime.max.replace(microsecond=999000),
+        )
+
+        # Aware clamping.
+        opts2 = CodecOptions(datetime_conversion=DatetimeConversion.DATETIME_CLAMP, tz_aware=True)
+        below = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.min) - 24 * 60 * 60)})
+        dec_below = decode(below, opts2)
+        self.assertEqual(
+            dec_below["x"], datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+        )
+
+        above = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.max) + 24 * 60 * 60)})
+        dec_above = decode(above, opts2)
+        self.assertEqual(
+            dec_above["x"],
+            datetime.datetime.max.replace(tzinfo=datetime.timezone.utc, microsecond=999000),
+        )
+
+    def test_datetime_auto(self):
+        # Naive auto, in range.
+        opts1 = CodecOptions(datetime_conversion=DatetimeConversion.DATETIME_AUTO)
+        inr = encode({"x": datetime.datetime(1970, 1, 1)}, codec_options=opts1)
+        dec_inr = decode(inr)
+        self.assertEqual(dec_inr["x"], datetime.datetime(1970, 1, 1))
+
+        # Naive auto, below range.
+        below = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.min) - 24 * 60 * 60)})
+        dec_below = decode(below, opts1)
+        self.assertEqual(
+            dec_below["x"], DatetimeMS(_datetime_to_millis(datetime.datetime.min) - 24 * 60 * 60)
+        )
+
+        # Naive auto, above range.
+        above = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.max) + 24 * 60 * 60)})
+        dec_above = decode(above, opts1)
+        self.assertEqual(
+            dec_above["x"],
+            DatetimeMS(_datetime_to_millis(datetime.datetime.max) + 24 * 60 * 60),
+        )
+
+        # Aware auto, in range.
+        opts2 = CodecOptions(
+            datetime_conversion=DatetimeConversion.DATETIME_AUTO,
+            tz_aware=True,
+            tzinfo=datetime.timezone.utc,
+        )
+        inr = encode({"x": datetime.datetime(1970, 1, 1)}, codec_options=opts2)
+        dec_inr = decode(inr)
+        self.assertEqual(dec_inr["x"], datetime.datetime(1970, 1, 1))
+
+        # Aware auto, below range.
+        below = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.min) - 24 * 60 * 60)})
+        dec_below = decode(below, opts2)
+        self.assertEqual(
+            dec_below["x"], DatetimeMS(_datetime_to_millis(datetime.datetime.min) - 24 * 60 * 60)
+        )
+
+        # Aware auto, above range.
+        above = encode({"x": DatetimeMS(_datetime_to_millis(datetime.datetime.max) + 24 * 60 * 60)})
+        dec_above = decode(above, opts2)
+        self.assertEqual(
+            dec_above["x"],
+            DatetimeMS(_datetime_to_millis(datetime.datetime.max) + 24 * 60 * 60),
+        )
+
+    def test_millis_from_datetime_ms(self):
+        # Test 65+ bit integer conversion, expect OverflowError.
+        big_ms = 2**65
+        with self.assertRaises(OverflowError):
+            encode({"x": DatetimeMS(big_ms)})
+
+        # Subclass of DatetimeMS w/ __int__ override, expect an Error.
+        class DatetimeMSOverride(DatetimeMS):
+            def __int__(self):
+                return float(self._value)
+
+        float_ms = DatetimeMSOverride(2)
+        with self.assertRaises(TypeError):
+            encode({"x": float_ms})
+
+        # Test InvalidBSON errors on conversion include _DATETIME_ERROR_SUGGESTION
+        small_ms = -2 << 51
+        with self.assertRaisesRegex(InvalidBSON, re.compile(re.escape(_DATETIME_ERROR_SUGGESTION))):
+            decode(encode({"a": DatetimeMS(small_ms)}))
+
+
+class TestLongLongToString(unittest.TestCase):
+    def test_long_long_to_string(self):
+        try:
+            from bson import _cbson
+
+            _cbson._test_long_long_to_str()
+        except ImportError:
+            print("_cbson was not imported. Check compilation logs.")
 
 
 if __name__ == "__main__":

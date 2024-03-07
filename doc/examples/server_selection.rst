@@ -2,7 +2,7 @@ Server Selector Example
 =======================
 
 Users can exert fine-grained control over the `server selection algorithm`_
-by setting the `server_selector` option on the :class:`~pymongo.MongoClient`
+by setting the ``server_selector`` option on the :class:`~pymongo.MongoClient`
 to an appropriate callable. This example shows how to use this functionality
 to prefer servers running on ``localhost``.
 
@@ -19,7 +19,7 @@ to prefer servers running on ``localhost``.
    from pymongo import MongoClient
 
 
-.. _server selection algorithm: https://docs.mongodb.com/manual/core/read-preference-mechanics/
+.. _server selection algorithm: https://mongodb.com/docs/manual/core/read-preference-mechanics/
 
 
 Example: Selecting Servers Running on ``localhost``
@@ -55,12 +55,12 @@ selector function:
 
    >>> def server_selector(server_descriptions):
    ...     servers = [
-   ...         server for server in server_descriptions
-   ...         if server.address[0] == 'localhost'
+   ...         server for server in server_descriptions if server.address[0] == "localhost"
    ...     ]
    ...     if not servers:
    ...         return server_descriptions
    ...     return servers
+   ...
 
 
 
@@ -105,4 +105,4 @@ list of known hosts. As an example, for a 3-member replica set with a
 all available secondaries.
 
 
-.. _server selection algorithm: https://docs.mongodb.com/manual/core/read-preference-mechanics/
+.. _server selection algorithm: https://mongodb.com/docs/manual/core/read-preference-mechanics/

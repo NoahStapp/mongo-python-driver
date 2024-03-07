@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tests for the dbref module."""
+from __future__ import annotations
 
 import pickle
 import sys
@@ -64,7 +65,7 @@ class TestDBRef(unittest.TestCase):
         )
         self.assertEqual(
             repr(DBRef("coll", ObjectId("1234567890abcdef12345678"))),
-            "DBRef(%s, ObjectId('1234567890abcdef12345678'))" % (repr("coll"),),
+            "DBRef({}, ObjectId('1234567890abcdef12345678'))".format(repr("coll")),
         )
         self.assertEqual(repr(DBRef("coll", 5, foo="bar")), "DBRef('coll', 5, foo='bar')")
         self.assertEqual(

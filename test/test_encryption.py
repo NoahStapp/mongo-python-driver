@@ -13,56 +13,70 @@
 # limitations under the License.
 
 """Test client side encryption spec."""
+from __future__ import annotations
 
 import base64
 import copy
 import os
 import re
 import socket
+import socketserver
 import ssl
 import sys
 import textwrap
 import traceback
 import uuid
-from typing import Any
+from threading import Thread
+from typing import Any, Dict, Mapping
 
 from pymongo.collection import Collection
+from pymongo.daemon import _spawn_daemon
 
 sys.path[0:0] = [""]
 
 from test import (
+    AWS_CREDS,
+    AZURE_CREDS,
     CA_PEM,
     CLIENT_PEM,
+    GCP_CREDS,
+    KMIP_CREDS,
+    LOCAL_MASTER_KEY,
     IntegrationTest,
     PyMongoTestCase,
     client_context,
     unittest,
 )
 from test.test_bulk import BulkTestBase
+from test.unified_format import generate_test_classes
 from test.utils import (
     AllowListEventListener,
     OvertCommandListener,
-    TestCreator,
+    SpecTestCreator,
     TopologyEventListener,
     camel_to_snake_args,
+    is_greenthread_patched,
     rs_or_single_client,
     wait_until,
 )
 from test.utils_spec_runner import SpecRunner
 
-from bson import encode, json_util
-from bson.binary import JAVA_LEGACY, STANDARD, UUID_SUBTYPE, Binary, UuidRepresentation
+from bson import DatetimeMS, Decimal128, encode, json_util
+from bson.binary import UUID_SUBTYPE, Binary, UuidRepresentation
 from bson.codec_options import CodecOptions
 from bson.errors import BSONError
 from bson.json_util import JSONOptions
 from bson.son import SON
-from pymongo import encryption
+from pymongo import ReadPreference, encryption
 from pymongo.cursor import CursorType
-from pymongo.encryption import Algorithm, ClientEncryption
-from pymongo.encryption_options import _HAVE_PYMONGOCRYPT, AutoEncryptionOpts
+from pymongo.encryption import Algorithm, ClientEncryption, QueryType
+from pymongo.encryption_options import _HAVE_PYMONGOCRYPT, AutoEncryptionOpts, RangeOpts
 from pymongo.errors import (
+    AutoReconnect,
     BulkWriteError,
     ConfigurationError,
+    DuplicateKeyError,
+    EncryptedCollectionError,
     EncryptionError,
     InvalidOperation,
     OperationFailure,
@@ -73,15 +87,26 @@ from pymongo.mongo_client import MongoClient
 from pymongo.operations import InsertOne, ReplaceOne, UpdateOne
 from pymongo.write_concern import WriteConcern
 
+KMS_PROVIDERS = {"local": {"key": b"\x00" * 96}}
+
 
 def get_client_opts(client):
     return client._MongoClient__options
 
 
-KMS_PROVIDERS = {"local": {"key": b"\x00" * 96}}
-
-
 class TestAutoEncryptionOpts(PyMongoTestCase):
+    @unittest.skipUnless(_HAVE_PYMONGOCRYPT, "pymongocrypt is not installed")
+    @unittest.skipUnless(os.environ.get("TEST_CRYPT_SHARED"), "crypt_shared lib is not installed")
+    def test_crypt_shared(self):
+        # Test that we can pick up crypt_shared lib automatically
+        client = MongoClient(
+            auto_encryption_opts=AutoEncryptionOpts(
+                KMS_PROVIDERS, "keyvault.datakeys", crypt_shared_lib_required=True
+            ),
+            connect=False,
+        )
+        self.addCleanup(client.close)
+
     @unittest.skipIf(_HAVE_PYMONGOCRYPT, "pymongocrypt is installed")
     def test_init_requires_pymongocrypt(self):
         with self.assertRaises(ConfigurationError):
@@ -132,7 +157,6 @@ class TestAutoEncryptionOpts(PyMongoTestCase):
             {"kmip": {"tls": True, "tlsInsecure": True}},
             {"kmip": {"tls": True, "tlsAllowInvalidCertificates": True}},
             {"kmip": {"tls": True, "tlsAllowInvalidHostnames": True}},
-            {"kmip": {"tls": True, "tlsDisableOCSPEndpointCheck": True}},
         ]:
             with self.assertRaisesRegex(ConfigurationError, "Insecure TLS options prohibited"):
                 opts = AutoEncryptionOpts({}, "k.d", kms_tls_options=tls_opts)
@@ -145,13 +169,10 @@ class TestAutoEncryptionOpts(PyMongoTestCase):
             self.assertEqual(opts._kms_ssl_contexts, {})
         opts = AutoEncryptionOpts({}, "k.d", kms_tls_options={"kmip": {"tls": True}, "aws": {}})
         ctx = opts._kms_ssl_contexts["kmip"]
-        # On < 3.7 we check hostnames manually.
-        if sys.version_info[:2] >= (3, 7):
-            self.assertEqual(ctx.check_hostname, True)
+        self.assertEqual(ctx.check_hostname, True)
         self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
         ctx = opts._kms_ssl_contexts["aws"]
-        if sys.version_info[:2] >= (3, 7):
-            self.assertEqual(ctx.check_hostname, True)
+        self.assertEqual(ctx.check_hostname, True)
         self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
         opts = AutoEncryptionOpts(
             {},
@@ -159,8 +180,7 @@ class TestAutoEncryptionOpts(PyMongoTestCase):
             kms_tls_options={"kmip": {"tlsCAFile": CA_PEM, "tlsCertificateKeyFile": CLIENT_PEM}},
         )
         ctx = opts._kms_ssl_contexts["kmip"]
-        if sys.version_info[:2] >= (3, 7):
-            self.assertEqual(ctx.check_hostname, True)
+        self.assertEqual(ctx.check_hostname, True)
         self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
 
 
@@ -189,7 +209,7 @@ class EncryptionIntegrationTest(IntegrationTest):
     @unittest.skipUnless(_HAVE_PYMONGOCRYPT, "pymongocrypt is not installed")
     @client_context.require_version_min(4, 2, -1)
     def setUpClass(cls):
-        super(EncryptionIntegrationTest, cls).setUpClass()
+        super().setUpClass()
 
     def assertEncrypted(self, val):
         self.assertIsInstance(val, Binary)
@@ -204,11 +224,11 @@ class EncryptionIntegrationTest(IntegrationTest):
 BASE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "client-side-encryption")
 SPEC_PATH = os.path.join(BASE, "spec")
 
-OPTS = CodecOptions(uuid_representation=STANDARD)
+OPTS = CodecOptions()
 
 # Use SON to preserve the order of fields while parsing json. Use tz_aware
 # =False to match how CodecOptions decodes dates.
-JSON_OPTS = JSONOptions(document_class=SON, uuid_representation=STANDARD, tz_aware=False)
+JSON_OPTS = JSONOptions(document_class=SON, tz_aware=False)
 
 
 def read(*paths):
@@ -277,7 +297,7 @@ class TestClientSimple(EncryptionIntegrationTest):
 
         # Collection.distinct auto decrypts.
         decrypted_ssns = encrypted_coll.distinct("ssn")
-        self.assertEqual(set(decrypted_ssns), set(d["ssn"] for d in docs))
+        self.assertEqual(set(decrypted_ssns), {d["ssn"] for d in docs})
 
         # Make sure the field is actually encrypted.
         for encrypted_doc in self.db.test.find():
@@ -314,9 +334,28 @@ class TestClientSimple(EncryptionIntegrationTest):
         with self.assertRaisesRegex(InvalidOperation, "Cannot use MongoClient after close"):
             client.admin.command("ping")
 
+    @unittest.skipIf(
+        not hasattr(os, "register_at_fork"),
+        "register_at_fork not available in this version of Python",
+    )
+    @unittest.skipIf(
+        is_greenthread_patched(),
+        "gevent and eventlet do not support POSIX-style forking.",
+    )
+    def test_fork(self):
+        opts = AutoEncryptionOpts(KMS_PROVIDERS, "keyvault.datakeys")
+        client = rs_or_single_client(auto_encryption_opts=opts)
+        self.addCleanup(client.close)
+
+        def target():
+            client.admin.command("ping")
+
+        with self.fork(target):
+            target()
+
 
 class TestEncryptedBulkWrite(BulkTestBase, EncryptionIntegrationTest):
-    def test_upsert_uuid_standard_encrypte(self):
+    def test_upsert_uuid_standard_encrypt(self):
         opts = AutoEncryptionOpts(KMS_PROVIDERS, "keyvault.datakeys")
         client = rs_or_single_client(auto_encryption_opts=opts)
         self.addCleanup(client.close)
@@ -354,7 +393,7 @@ class TestClientMaxWireVersion(IntegrationTest):
     @classmethod
     @unittest.skipUnless(_HAVE_PYMONGOCRYPT, "pymongocrypt is not installed")
     def setUpClass(cls):
-        super(TestClientMaxWireVersion, cls).setUpClass()
+        super().setUpClass()
 
     @client_context.require_version_max(4, 0, 99)
     def test_raise_max_wire_version_error(self):
@@ -423,6 +462,14 @@ class TestExplicitSimple(EncryptionIntegrationTest):
         )
         self.assertEqual(encrypted_ssn, encrypted_ssn2)
 
+        # Test encryption via UUID
+        encrypted_ssn3 = client_encryption.encrypt(
+            doc["ssn"],
+            Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic,
+            key_id=key_id.as_uuid(),
+        )
+        self.assertEqual(encrypted_ssn, encrypted_ssn3)
+
         # Test decryption.
         decrypted_ssn = client_encryption.decrypt(encrypted_ssn)
         self.assertEqual(decrypted_ssn, doc["ssn"])
@@ -442,8 +489,6 @@ class TestExplicitSimple(EncryptionIntegrationTest):
         msg = "key_id must be a bson.binary.Binary with subtype 4"
         algo = Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic
         with self.assertRaisesRegex(TypeError, msg):
-            client_encryption.encrypt("str", algo, key_id=uuid.uuid4())  # type: ignore[arg-type]
-        with self.assertRaisesRegex(TypeError, msg):
             client_encryption.encrypt("str", algo, key_id=Binary(b"123"))
 
     def test_bson_errors(self):
@@ -458,16 +503,19 @@ class TestExplicitSimple(EncryptionIntegrationTest):
             client_encryption.encrypt(
                 unencodable_value,
                 Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic,
-                key_id=Binary(uuid.uuid4().bytes, UUID_SUBTYPE),
+                key_id=Binary.from_uuid(uuid.uuid4()),
             )
 
     def test_codec_options(self):
         with self.assertRaisesRegex(TypeError, "codec_options must be"):
             ClientEncryption(
-                KMS_PROVIDERS, "keyvault.datakeys", client_context.client, None  # type: ignore[arg-type]
+                KMS_PROVIDERS,
+                "keyvault.datakeys",
+                client_context.client,
+                None,  # type: ignore[arg-type]
             )
 
-        opts = CodecOptions(uuid_representation=JAVA_LEGACY)
+        opts = CodecOptions(uuid_representation=UuidRepresentation.JAVA_LEGACY)
         client_encryption_legacy = ClientEncryption(
             KMS_PROVIDERS, "keyvault.datakeys", client_context.client, opts
         )
@@ -485,8 +533,9 @@ class TestExplicitSimple(EncryptionIntegrationTest):
         self.assertEqual(decrypted_value_legacy, value)
 
         # Encrypt the same UUID with STANDARD codec options.
+        opts = CodecOptions(uuid_representation=UuidRepresentation.STANDARD)
         client_encryption = ClientEncryption(
-            KMS_PROVIDERS, "keyvault.datakeys", client_context.client, OPTS
+            KMS_PROVIDERS, "keyvault.datakeys", client_context.client, opts
         )
         self.addCleanup(client_encryption.close)
         encrypted_standard = client_encryption.encrypt(
@@ -529,11 +578,6 @@ class TestExplicitSimple(EncryptionIntegrationTest):
 
 
 # Spec tests
-AWS_CREDS = {
-    "accessKeyId": os.environ.get("FLE_AWS_KEY", ""),
-    "secretAccessKey": os.environ.get("FLE_AWS_SECRET", ""),
-}
-
 AWS_TEMP_CREDS = {
     "accessKeyId": os.environ.get("CSFLE_AWS_TEMP_ACCESS_KEY_ID", ""),
     "secretAccessKey": os.environ.get("CSFLE_AWS_TEMP_SECRET_ACCESS_KEY", ""),
@@ -544,19 +588,6 @@ AWS_TEMP_NO_SESSION_CREDS = {
     "accessKeyId": os.environ.get("CSFLE_AWS_TEMP_ACCESS_KEY_ID", ""),
     "secretAccessKey": os.environ.get("CSFLE_AWS_TEMP_SECRET_ACCESS_KEY", ""),
 }
-
-AZURE_CREDS = {
-    "tenantId": os.environ.get("FLE_AZURE_TENANTID", ""),
-    "clientId": os.environ.get("FLE_AZURE_CLIENTID", ""),
-    "clientSecret": os.environ.get("FLE_AZURE_CLIENTSECRET", ""),
-}
-
-GCP_CREDS = {
-    "email": os.environ.get("FLE_GCP_EMAIL", ""),
-    "privateKey": os.environ.get("FLE_GCP_PRIVATEKEY", ""),
-}
-
-KMIP = {"endpoint": os.environ.get("FLE_KMIP_ENDPOINT", "localhost:5698")}
 KMS_TLS_OPTS = {"kmip": {"tlsCAFile": CA_PEM, "tlsCertificateKeyFile": CLIENT_PEM}}
 
 
@@ -564,7 +595,7 @@ class TestSpec(SpecRunner):
     @classmethod
     @unittest.skipUnless(_HAVE_PYMONGOCRYPT, "pymongocrypt is not installed")
     def setUpClass(cls):
-        super(TestSpec, cls).setUpClass()
+        super().setUpClass()
 
     def parse_auto_encrypt_opts(self, opts):
         """Parse clientOptions.autoEncryptOpts."""
@@ -593,63 +624,72 @@ class TestSpec(SpecRunner):
             if not any(AZURE_CREDS.values()):
                 self.skipTest("GCP environment credentials are not set")
         if "kmip" in kms_providers:
-            kms_providers["kmip"] = KMIP
+            kms_providers["kmip"] = KMIP_CREDS
             opts["kms_tls_options"] = KMS_TLS_OPTS
         if "key_vault_namespace" not in opts:
             opts["key_vault_namespace"] = "keyvault.datakeys"
+        if "extra_options" in opts:
+            opts.update(camel_to_snake_args(opts.pop("extra_options")))
+
         opts = dict(opts)
         return AutoEncryptionOpts(**opts)
 
     def parse_client_options(self, opts):
         """Override clientOptions parsing to support autoEncryptOpts."""
-        encrypt_opts = opts.pop("autoEncryptOpts")
+        encrypt_opts = opts.pop("autoEncryptOpts", None)
         if encrypt_opts:
             opts["auto_encryption_opts"] = self.parse_auto_encrypt_opts(encrypt_opts)
 
-        return super(TestSpec, self).parse_client_options(opts)
+        return super().parse_client_options(opts)
 
     def get_object_name(self, op):
         """Default object is collection."""
         return op.get("object", "collection")
 
     def maybe_skip_scenario(self, test):
-        super(TestSpec, self).maybe_skip_scenario(test)
+        super().maybe_skip_scenario(test)
         desc = test["description"].lower()
+        if (
+            "timeoutms applied to listcollections to get collection schema" in desc
+            and sys.platform in ("win32", "darwin")
+        ):
+            self.skipTest("PYTHON-3706 flaky test on Windows/macOS")
         if "type=symbol" in desc:
             self.skipTest("PyMongo does not support the symbol type")
 
     def setup_scenario(self, scenario_def):
         """Override a test's setup."""
         key_vault_data = scenario_def["key_vault_data"]
+        encrypted_fields = scenario_def["encrypted_fields"]
+        json_schema = scenario_def["json_schema"]
+        data = scenario_def["data"]
+        coll = client_context.client.get_database("keyvault", codec_options=OPTS)["datakeys"]
+        coll.delete_many({})
         if key_vault_data:
-            coll = client_context.client.get_database(
-                "keyvault", write_concern=WriteConcern(w="majority"), codec_options=OPTS
-            )["datakeys"]
-            coll.drop()
             coll.insert_many(key_vault_data)
 
         db_name = self.get_scenario_db_name(scenario_def)
         coll_name = self.get_scenario_coll_name(scenario_def)
-        db = client_context.client.get_database(
-            db_name, write_concern=WriteConcern(w="majority"), codec_options=OPTS
-        )
-        coll = db[coll_name]
-        coll.drop()
-        json_schema = scenario_def["json_schema"]
+        db = client_context.client.get_database(db_name, codec_options=OPTS)
+        coll = db.drop_collection(coll_name, encrypted_fields=encrypted_fields)
+        wc = WriteConcern(w="majority")
+        kwargs: Dict[str, Any] = {}
         if json_schema:
-            db.create_collection(
-                coll_name, validator={"$jsonSchema": json_schema}, codec_options=OPTS
-            )
-        else:
-            db.create_collection(coll_name)
-
-        if scenario_def["data"]:
+            kwargs["validator"] = {"$jsonSchema": json_schema}
+            kwargs["codec_options"] = OPTS
+        if not data:
+            kwargs["write_concern"] = wc
+        if encrypted_fields:
+            kwargs["encryptedFields"] = encrypted_fields
+        db.create_collection(coll_name, **kwargs)
+        coll = db[coll_name]
+        if data:
             # Load data.
-            coll.insert_many(scenario_def["data"])
+            coll.with_options(write_concern=wc).insert_many(scenario_def["data"])
 
     def allowable_errors(self, op):
         """Override expected error classes."""
-        errors = super(TestSpec, self).allowable_errors(op)
+        errors = super().allowable_errors(op)
         # An updateOne test expects encryption to error when no $ operator
         # appears but pymongo raises a client side ValueError in this case.
         if op["name"] == "updateOne":
@@ -665,21 +705,24 @@ def create_test(scenario_def, test, name):
     return run_scenario
 
 
-test_creator = TestCreator(create_test, TestSpec, SPEC_PATH)
+test_creator = SpecTestCreator(create_test, TestSpec, os.path.join(SPEC_PATH, "legacy"))
 test_creator.create_tests()
 
 
-# Prose Tests
-LOCAL_MASTER_KEY = base64.b64decode(
-    b"Mng0NCt4ZHVUYUJCa1kxNkVyNUR1QURhZ2h2UzR2d2RrZzh0cFBwM3R6NmdWMDFBMUN3YkQ"
-    b"5aXRRMkhGRGdQV09wOGVNYUMxT2k3NjZKelhaQmRCZGJkTXVyZG9uSjFk"
-)
+if _HAVE_PYMONGOCRYPT:
+    globals().update(
+        generate_test_classes(
+            os.path.join(SPEC_PATH, "unified"),
+            module=__name__,
+        )
+    )
 
+# Prose Tests
 ALL_KMS_PROVIDERS = {
     "aws": AWS_CREDS,
     "azure": AZURE_CREDS,
     "gcp": GCP_CREDS,
-    "kmip": KMIP,
+    "kmip": KMIP_CREDS,
     "local": {"key": LOCAL_MASTER_KEY},
 }
 
@@ -704,6 +747,11 @@ def create_key_vault(vault, *data_keys):
     vault.drop()
     if data_keys:
         vault.insert_many(data_keys)
+    vault.create_index(
+        "keyAltNames",
+        unique=True,
+        partialFilterExpression={"keyAltNames": {"$exists": True}},
+    )
     return vault
 
 
@@ -740,7 +788,7 @@ class TestDataKeyDoubleEncryption(EncryptionIntegrationTest):
         "No environment credentials are set",
     )
     def setUpClass(cls):
-        super(TestDataKeyDoubleEncryption, cls).setUpClass()
+        super().setUpClass()
         cls.listener = OvertCommandListener()
         cls.client = rs_or_single_client(event_listeners=[cls.listener])
         cls.client.db.coll.drop()
@@ -785,10 +833,10 @@ class TestDataKeyDoubleEncryption(EncryptionIntegrationTest):
         # Create data key.
         master_key: Any = self.MASTER_KEYS[provider_name]
         datakey_id = self.client_encryption.create_data_key(
-            provider_name, master_key=master_key, key_alt_names=["%s_altname" % (provider_name,)]
+            provider_name, master_key=master_key, key_alt_names=[f"{provider_name}_altname"]
         )
         self.assertBinaryUUID(datakey_id)
-        cmd = self.listener.results["started"][-1]
+        cmd = self.listener.started_events[-1]
         self.assertEqual("insert", cmd.command_name)
         self.assertEqual({"w": "majority"}, cmd.command.get("writeConcern"))
         docs = list(self.vault.find({"_id": datakey_id}))
@@ -797,29 +845,25 @@ class TestDataKeyDoubleEncryption(EncryptionIntegrationTest):
 
         # Encrypt by key_id.
         encrypted = self.client_encryption.encrypt(
-            "hello %s" % (provider_name,),
+            f"hello {provider_name}",
             Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic,
             key_id=datakey_id,
         )
         self.assertEncrypted(encrypted)
         self.client_encrypted.db.coll.insert_one({"_id": provider_name, "value": encrypted})
         doc_decrypted = self.client_encrypted.db.coll.find_one({"_id": provider_name})
-        self.assertEqual(doc_decrypted["value"], "hello %s" % (provider_name,))  # type: ignore
+        self.assertEqual(doc_decrypted["value"], f"hello {provider_name}")  # type: ignore
 
         # Encrypt by key_alt_name.
         encrypted_altname = self.client_encryption.encrypt(
-            "hello %s" % (provider_name,),
+            f"hello {provider_name}",
             Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic,
-            key_alt_name="%s_altname" % (provider_name,),
+            key_alt_name=f"{provider_name}_altname",
         )
         self.assertEqual(encrypted_altname, encrypted)
 
         # Explicitly encrypting an auto encrypted field.
-        msg = (
-            r"Cannot encrypt element of type binData because schema "
-            r"requires that type is one of: \[ string \]"
-        )
-        with self.assertRaisesRegex(EncryptionError, msg):
+        with self.assertRaisesRegex(EncryptionError, r"encrypt element of type"):
             self.client_encrypted.db.coll.insert_one({"encrypted_placeholder": encrypted})
 
     def test_data_key_local(self):
@@ -936,7 +980,7 @@ class TestCorpus(EncryptionIntegrationTest):
     @classmethod
     @unittest.skipUnless(any(AWS_CREDS.values()), "AWS environment credentials are not set")
     def setUpClass(cls):
-        super(TestCorpus, cls).setUpClass()
+        super().setUpClass()
 
     @staticmethod
     def kms_providers():
@@ -983,9 +1027,7 @@ class TestCorpus(EncryptionIntegrationTest):
         )
         self.addCleanup(vault.drop)
 
-        client_encrypted = rs_or_single_client(
-            auto_encryption_opts=opts, uuidRepresentation="standard"
-        )
+        client_encrypted = rs_or_single_client(auto_encryption_opts=opts)
         self.addCleanup(client_encrypted.close)
 
         client_encryption = ClientEncryption(
@@ -1019,17 +1061,17 @@ class TestCorpus(EncryptionIntegrationTest):
                 self.assertIn(kms, ("local", "aws", "azure", "gcp", "kmip"))
                 if identifier == "id":
                     if kms == "local":
-                        kwargs = dict(key_id=LOCAL_KEY_ID)
+                        kwargs = {"key_id": LOCAL_KEY_ID}
                     elif kms == "aws":
-                        kwargs = dict(key_id=AWS_KEY_ID)
+                        kwargs = {"key_id": AWS_KEY_ID}
                     elif kms == "azure":
-                        kwargs = dict(key_id=AZURE_KEY_ID)
+                        kwargs = {"key_id": AZURE_KEY_ID}
                     elif kms == "gcp":
-                        kwargs = dict(key_id=GCP_KEY_ID)
+                        kwargs = {"key_id": GCP_KEY_ID}
                     else:
-                        kwargs = dict(key_id=KMIP_KEY_ID)
+                        kwargs = {"key_id": KMIP_KEY_ID}
                 else:
-                    kwargs = dict(key_alt_name=kms)
+                    kwargs = {"key_alt_name": kms}
 
                 self.assertIn(value["algo"], ("det", "rand"))
                 if value["algo"] == "det":
@@ -1039,15 +1081,17 @@ class TestCorpus(EncryptionIntegrationTest):
 
                 try:
                     encrypted_val = client_encryption.encrypt(
-                        value["value"], algo, **kwargs  # type: ignore[arg-type]
+                        value["value"],
+                        algo,
+                        **kwargs,  # type: ignore[arg-type]
                     )
                     if not value["allowed"]:
-                        self.fail("encrypt should have failed: %r: %r" % (key, value))
+                        self.fail(f"encrypt should have failed: {key!r}: {value!r}")
                     corpus_copied[key]["value"] = encrypted_val
                 except Exception:
                     if value["allowed"]:
                         tb = traceback.format_exc()
-                        self.fail("encrypt failed: %r: %r, traceback: %s" % (key, value, tb))
+                        self.fail(f"encrypt failed: {key!r}: {value!r}, traceback: {tb}")
 
         client_encrypted.db.coll.insert_one(corpus_copied)
         corpus_decrypted = client_encrypted.db.coll.find_one()
@@ -1114,7 +1158,7 @@ class TestBsonSizeBatches(EncryptionIntegrationTest):
 
     @classmethod
     def setUpClass(cls):
-        super(TestBsonSizeBatches, cls).setUpClass()
+        super().setUpClass()
         db = client_context.client.db
         cls.coll = db.coll
         cls.coll.drop()
@@ -1145,7 +1189,7 @@ class TestBsonSizeBatches(EncryptionIntegrationTest):
     def tearDownClass(cls):
         cls.coll_encrypted.drop()
         cls.client_encrypted.close()
-        super(TestBsonSizeBatches, cls).tearDownClass()
+        super().tearDownClass()
 
     def test_01_insert_succeeds_under_2MiB(self):
         doc = {"_id": "over_2mib_under_16mib", "unencrypted": "a" * _2_MiB}
@@ -1215,10 +1259,15 @@ class TestCustomEndpoint(EncryptionIntegrationTest):
         "No environment credentials are set",
     )
     def setUpClass(cls):
-        super(TestCustomEndpoint, cls).setUpClass()
+        super().setUpClass()
 
     def setUp(self):
-        kms_providers = {"aws": AWS_CREDS, "azure": AZURE_CREDS, "gcp": GCP_CREDS, "kmip": KMIP}
+        kms_providers = {
+            "aws": AWS_CREDS,
+            "azure": AZURE_CREDS,
+            "gcp": GCP_CREDS,
+            "kmip": KMIP_CREDS,
+        }
         self.client_encryption = ClientEncryption(
             kms_providers=kms_providers,
             key_vault_namespace="keyvault.datakeys",
@@ -1297,9 +1346,9 @@ class TestCustomEndpoint(EncryptionIntegrationTest):
             "key": ("arn:aws:kms:us-east-1:579766882180:key/89fcc2c4-08b0-4bd9-9f25-e30687b580d0"),
             "endpoint": "kms.us-east-1.amazonaws.com:12345",
         }
-        with self.assertRaises(EncryptionError) as ctx:
+        with self.assertRaisesRegex(EncryptionError, "kms.us-east-1.amazonaws.com:12345") as ctx:
             self.client_encryption.create_data_key("aws", master_key=master_key)
-        self.assertIsInstance(ctx.exception.cause, socket.error)
+        self.assertIsInstance(ctx.exception.cause, AutoReconnect)
 
     @unittest.skipUnless(any(AWS_CREDS.values()), "AWS environment credentials are not set")
     def test_05_aws_endpoint_wrong_region(self):
@@ -1395,7 +1444,7 @@ class TestCustomEndpoint(EncryptionIntegrationTest):
             self.client_encryption_invalid.create_data_key("kmip", key)
 
     def test_11_kmip_master_key_endpoint(self):
-        key = {"keyId": "1", "endpoint": KMIP["endpoint"]}
+        key = {"keyId": "1", "endpoint": KMIP_CREDS["endpoint"]}
         self.run_test_expected_success("kmip", key)
         # Override invalid endpoint:
         data_key_id = self.client_encryption_invalid.create_data_key("kmip", master_key=key)
@@ -1410,7 +1459,7 @@ class TestCustomEndpoint(EncryptionIntegrationTest):
             self.client_encryption.create_data_key("kmip", key)
 
 
-class AzureGCPEncryptionTestMixin(object):
+class AzureGCPEncryptionTestMixin:
     DEK = None
     KMS_PROVIDER_MAP = None
     KEYVAULT_DB = "keyvault"
@@ -1433,7 +1482,7 @@ class AzureGCPEncryptionTestMixin(object):
         ciphertext = client_encryption.encrypt(
             "string0",
             algorithm=Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic,
-            key_id=Binary.from_uuid(self.DEK["_id"], STANDARD),
+            key_id=self.DEK["_id"],
         )
 
         self.assertEqual(bytes(ciphertext), base64.b64decode(expectation))
@@ -1464,7 +1513,7 @@ class AzureGCPEncryptionTestMixin(object):
         expected_document = json_util.loads(expectation_extjson, json_options=JSON_OPTS)
 
         coll.insert_one(payload)
-        event = insert_listener.results["started"][0]
+        event = insert_listener.started_events[0]
         inserted_doc = event.command["documents"][0]
 
         for key, value in expected_document.items():
@@ -1482,7 +1531,7 @@ class TestAzureEncryption(AzureGCPEncryptionTestMixin, EncryptionIntegrationTest
         cls.KMS_PROVIDER_MAP = {"azure": AZURE_CREDS}
         cls.DEK = json_data(BASE, "custom", "azure-dek.json")
         cls.SCHEMA_MAP = json_data(BASE, "custom", "azure-gcp-schema.json")
-        super(TestAzureEncryption, cls).setUpClass()
+        super().setUpClass()
 
     def test_explicit(self):
         return self._test_explicit(
@@ -1508,7 +1557,7 @@ class TestGCPEncryption(AzureGCPEncryptionTestMixin, EncryptionIntegrationTest):
         cls.KMS_PROVIDER_MAP = {"gcp": GCP_CREDS}
         cls.DEK = json_data(BASE, "custom", "gcp-dek.json")
         cls.SCHEMA_MAP = json_data(BASE, "custom", "azure-gcp-schema.json")
-        super(TestGCPEncryption, cls).setUpClass()
+        super().setUpClass()
 
     def test_explicit(self):
         return self._test_explicit(
@@ -1597,7 +1646,7 @@ class TestDeadlockProse(EncryptionIntegrationTest):
             ),
         )
 
-        cev = self.client_listener.results["started"]
+        cev = self.client_listener.started_events
         self.assertEqual(len(cev), 4)
         self.assertEqual(cev[0].command_name, "listCollections")
         self.assertEqual(cev[0].database_name, "db")
@@ -1618,7 +1667,7 @@ class TestDeadlockProse(EncryptionIntegrationTest):
             ),
         )
 
-        cev = self.client_listener.results["started"]
+        cev = self.client_listener.started_events
         self.assertEqual(len(cev), 3)
         self.assertEqual(cev[0].command_name, "listCollections")
         self.assertEqual(cev[0].database_name, "db")
@@ -1627,7 +1676,7 @@ class TestDeadlockProse(EncryptionIntegrationTest):
         self.assertEqual(cev[2].command_name, "find")
         self.assertEqual(cev[2].database_name, "db")
 
-        cev = self.client_keyvault_listener.results["started"]
+        cev = self.client_keyvault_listener.started_events
         self.assertEqual(len(cev), 1)
         self.assertEqual(cev[0].command_name, "find")
         self.assertEqual(cev[0].database_name, "keyvault")
@@ -1642,7 +1691,7 @@ class TestDeadlockProse(EncryptionIntegrationTest):
             ),
         )
 
-        cev = self.client_listener.results["started"]
+        cev = self.client_listener.started_events
         self.assertEqual(len(cev), 2)
         self.assertEqual(cev[0].command_name, "find")
         self.assertEqual(cev[0].database_name, "db")
@@ -1659,12 +1708,12 @@ class TestDeadlockProse(EncryptionIntegrationTest):
             ),
         )
 
-        cev = self.client_listener.results["started"]
+        cev = self.client_listener.started_events
         self.assertEqual(len(cev), 1)
         self.assertEqual(cev[0].command_name, "find")
         self.assertEqual(cev[0].database_name, "db")
 
-        cev = self.client_keyvault_listener.results["started"]
+        cev = self.client_keyvault_listener.started_events
         self.assertEqual(len(cev), 1)
         self.assertEqual(cev[0].command_name, "find")
         self.assertEqual(cev[0].database_name, "keyvault")
@@ -1679,7 +1728,7 @@ class TestDeadlockProse(EncryptionIntegrationTest):
             ),
         )
 
-        cev = self.client_listener.results["started"]
+        cev = self.client_listener.started_events
         self.assertEqual(len(cev), 5)
         self.assertEqual(cev[0].command_name, "listCollections")
         self.assertEqual(cev[0].database_name, "db")
@@ -1702,7 +1751,7 @@ class TestDeadlockProse(EncryptionIntegrationTest):
             ),
         )
 
-        cev = self.client_listener.results["started"]
+        cev = self.client_listener.started_events
         self.assertEqual(len(cev), 3)
         self.assertEqual(cev[0].command_name, "listCollections")
         self.assertEqual(cev[0].database_name, "db")
@@ -1711,7 +1760,7 @@ class TestDeadlockProse(EncryptionIntegrationTest):
         self.assertEqual(cev[2].command_name, "find")
         self.assertEqual(cev[2].database_name, "db")
 
-        cev = self.client_keyvault_listener.results["started"]
+        cev = self.client_keyvault_listener.started_events
         self.assertEqual(len(cev), 1)
         self.assertEqual(cev[0].command_name, "find")
         self.assertEqual(cev[0].database_name, "keyvault")
@@ -1726,7 +1775,7 @@ class TestDeadlockProse(EncryptionIntegrationTest):
             ),
         )
 
-        cev = self.client_listener.results["started"]
+        cev = self.client_listener.started_events
         self.assertEqual(len(cev), 2)
         self.assertEqual(cev[0].command_name, "find")
         self.assertEqual(cev[0].database_name, "db")
@@ -1743,12 +1792,12 @@ class TestDeadlockProse(EncryptionIntegrationTest):
             ),
         )
 
-        cev = self.client_listener.results["started"]
+        cev = self.client_listener.started_events
         self.assertEqual(len(cev), 1)
         self.assertEqual(cev[0].command_name, "find")
         self.assertEqual(cev[0].database_name, "db")
 
-        cev = self.client_keyvault_listener.results["started"]
+        cev = self.client_keyvault_listener.started_events
         self.assertEqual(len(cev), 1)
         self.assertEqual(cev[0].command_name, "find")
         self.assertEqual(cev[0].database_name, "keyvault")
@@ -1756,8 +1805,86 @@ class TestDeadlockProse(EncryptionIntegrationTest):
         self.assertEqual(len(self.topology_listener.results["opened"]), 1)
 
 
+# https://github.com/mongodb/specifications/blob/master/source/client-side-encryption/tests/README.rst#14-decryption-events
+class TestDecryptProse(EncryptionIntegrationTest):
+    def setUp(self):
+        self.client = client_context.client
+        self.client.db.drop_collection("decryption_events")
+        create_key_vault(self.client.keyvault.datakeys)
+        kms_providers_map = {"local": {"key": LOCAL_MASTER_KEY}}
+
+        self.client_encryption = ClientEncryption(
+            kms_providers_map, "keyvault.datakeys", self.client, CodecOptions()
+        )
+        keyID = self.client_encryption.create_data_key("local")
+        self.cipher_text = self.client_encryption.encrypt(
+            "hello", key_id=keyID, algorithm=Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic
+        )
+        self.malformed_cipher_text = self.cipher_text[:-1] + (self.cipher_text[-1] ^ 1).to_bytes(
+            1, "big"
+        )
+        self.malformed_cipher_text = Binary(self.malformed_cipher_text, 6)
+        opts = AutoEncryptionOpts(
+            key_vault_namespace="keyvault.datakeys", kms_providers=kms_providers_map
+        )
+        self.listener = AllowListEventListener("aggregate")
+        self.encrypted_client = rs_or_single_client(
+            auto_encryption_opts=opts, retryReads=False, event_listeners=[self.listener]
+        )
+        self.addCleanup(self.encrypted_client.close)
+
+    def test_01_command_error(self):
+        with self.fail_point(
+            {
+                "mode": {"times": 1},
+                "data": {"errorCode": 123, "failCommands": ["aggregate"]},
+            }
+        ):
+            with self.assertRaises(OperationFailure):
+                self.encrypted_client.db.decryption_events.aggregate([])
+        self.assertEqual(len(self.listener.failed_events), 1)
+        for event in self.listener.failed_events:
+            self.assertEqual(event.failure["code"], 123)
+
+    def test_02_network_error(self):
+        with self.fail_point(
+            {
+                "mode": {"times": 1},
+                "data": {"errorCode": 123, "closeConnection": True, "failCommands": ["aggregate"]},
+            }
+        ):
+            with self.assertRaises(AutoReconnect):
+                self.encrypted_client.db.decryption_events.aggregate([])
+        self.assertEqual(len(self.listener.failed_events), 1)
+        self.assertEqual(self.listener.failed_events[0].command_name, "aggregate")
+
+    def test_03_decrypt_error(self):
+        self.encrypted_client.db.decryption_events.insert_one(
+            {"encrypted": self.malformed_cipher_text}
+        )
+        with self.assertRaises(EncryptionError):
+            next(self.encrypted_client.db.decryption_events.aggregate([]))
+        event = self.listener.succeeded_events[0]
+        self.assertEqual(len(self.listener.failed_events), 0)
+        self.assertEqual(
+            event.reply["cursor"]["firstBatch"][0]["encrypted"], self.malformed_cipher_text
+        )
+
+    def test_04_decrypt_success(self):
+        self.encrypted_client.db.decryption_events.insert_one({"encrypted": self.cipher_text})
+        next(self.encrypted_client.db.decryption_events.aggregate([]))
+        event = self.listener.succeeded_events[0]
+        self.assertEqual(len(self.listener.failed_events), 0)
+        self.assertEqual(event.reply["cursor"]["firstBatch"][0]["encrypted"], self.cipher_text)
+
+
 # https://github.com/mongodb/specifications/blob/master/source/client-side-encryption/tests/README.rst#bypass-spawning-mongocryptd
 class TestBypassSpawningMongocryptdProse(EncryptionIntegrationTest):
+    @unittest.skipIf(
+        os.environ.get("TEST_CRYPT_SHARED"),
+        "this prose test does not work when crypt_shared is on a system dynamic "
+        "library search path.",
+    )
     def test_mongocryptd_bypass_spawn(self):
         # Lower the mongocryptd timeout to reduce the test run time.
         self._original_timeout = encryption._MONGOCRYPTD_TIMEOUT_MS
@@ -1804,12 +1931,78 @@ class TestBypassSpawningMongocryptdProse(EncryptionIntegrationTest):
         with self.assertRaises(ServerSelectionTimeoutError):
             mongocryptd_client.admin.command("ping")
 
+    @unittest.skipUnless(os.environ.get("TEST_CRYPT_SHARED"), "crypt_shared lib is not installed")
+    def test_via_loading_shared_library(self):
+        create_key_vault(
+            client_context.client.keyvault.datakeys, json_data("external", "external-key.json")
+        )
+        schemas = {"db.coll": json_data("external", "external-schema.json")}
+        opts = AutoEncryptionOpts(
+            kms_providers={"local": {"key": LOCAL_MASTER_KEY}},
+            key_vault_namespace="keyvault.datakeys",
+            schema_map=schemas,
+            mongocryptd_uri="mongodb://localhost:47021/db?serverSelectionTimeoutMS=1000",
+            mongocryptd_spawn_args=[
+                "--pidfilepath=bypass-spawning-mongocryptd.pid",
+                "--port=47021",
+            ],
+            crypt_shared_lib_required=True,
+        )
+        client_encrypted = rs_or_single_client(auto_encryption_opts=opts)
+        self.addCleanup(client_encrypted.close)
+        client_encrypted.db.coll.drop()
+        client_encrypted.db.coll.insert_one({"encrypted": "test"})
+        self.assertEncrypted(client_context.client.db.coll.find_one({})["encrypted"])
+        no_mongocryptd_client = MongoClient(
+            host="mongodb://localhost:47021/db?serverSelectionTimeoutMS=1000"
+        )
+        self.addCleanup(no_mongocryptd_client.close)
+        with self.assertRaises(ServerSelectionTimeoutError):
+            no_mongocryptd_client.db.command("ping")
+
+    # https://github.com/mongodb/specifications/blob/master/source/client-side-encryption/tests/README.rst#20-bypass-creating-mongocryptd-client-when-shared-library-is-loaded
+    @unittest.skipUnless(os.environ.get("TEST_CRYPT_SHARED"), "crypt_shared lib is not installed")
+    def test_client_via_loading_shared_library(self):
+        connection_established = False
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                nonlocal connection_established
+                connection_established = True
+
+        server = socketserver.TCPServer(("localhost", 47021), Handler)
+
+        def listener():
+            with server:
+                server.serve_forever(poll_interval=0.05)  # Short poll timeout to speed up the test
+
+        listener_t = Thread(target=listener)
+        listener_t.start()
+        create_key_vault(
+            client_context.client.keyvault.datakeys, json_data("external", "external-key.json")
+        )
+        schemas = {"db.coll": json_data("external", "external-schema.json")}
+        opts = AutoEncryptionOpts(
+            kms_providers={"local": {"key": LOCAL_MASTER_KEY}},
+            key_vault_namespace="keyvault.datakeys",
+            schema_map=schemas,
+            mongocryptd_uri="mongodb://localhost:47021",
+            crypt_shared_lib_required=False,
+        )
+        client_encrypted = rs_or_single_client(auto_encryption_opts=opts)
+        self.addCleanup(client_encrypted.close)
+        client_encrypted.db.coll.drop()
+        client_encrypted.db.coll.insert_one({"encrypted": "test"})
+        server.shutdown()
+        listener_t.join()
+        self.assertFalse(connection_established, "a connection was established on port 47021")
+
 
 # https://github.com/mongodb/specifications/tree/master/source/client-side-encryption/tests#kms-tls-tests
 class TestKmsTLSProse(EncryptionIntegrationTest):
     @unittest.skipUnless(any(AWS_CREDS.values()), "AWS environment credentials are not set")
     def setUp(self):
-        super(TestKmsTLSProse, self).setUp()
+        super().setUp()
         self.patch_system_certs(CA_PEM)
         self.client_encrypted = ClientEncryption(
             {"aws": AWS_CREDS}, "keyvault.datakeys", self.client, OPTS
@@ -1820,7 +2013,7 @@ class TestKmsTLSProse(EncryptionIntegrationTest):
         key = {
             "region": "us-east-1",
             "key": "arn:aws:kms:us-east-1:579766882180:key/89fcc2c4-08b0-4bd9-9f25-e30687b580d0",
-            "endpoint": "mongodb://127.0.0.1:8000",
+            "endpoint": "mongodb://127.0.0.1:9000",
         }
         # Some examples:
         # certificate verify failed: certificate has expired (_ssl.c:1129)
@@ -1832,12 +2025,15 @@ class TestKmsTLSProse(EncryptionIntegrationTest):
         key = {
             "region": "us-east-1",
             "key": "arn:aws:kms:us-east-1:579766882180:key/89fcc2c4-08b0-4bd9-9f25-e30687b580d0",
-            "endpoint": "mongodb://127.0.0.1:8001",
+            "endpoint": "mongodb://127.0.0.1:9001",
         }
         # Some examples:
         # certificate verify failed: IP address mismatch, certificate is not valid for '127.0.0.1'. (_ssl.c:1129)"
         # hostname '127.0.0.1' doesn't match 'wronghost.com'
-        with self.assertRaisesRegex(EncryptionError, "IP address mismatch|wronghost"):
+        # 127.0.0.1:9001: ('Certificate does not contain any `subjectAltName`s.',)
+        with self.assertRaisesRegex(
+            EncryptionError, "IP address mismatch|wronghost|IPAddressMismatch|Certificate"
+        ):
             self.client_encrypted.create_data_key("aws", master_key=key)
 
 
@@ -1845,11 +2041,11 @@ class TestKmsTLSProse(EncryptionIntegrationTest):
 class TestKmsTLSOptions(EncryptionIntegrationTest):
     @unittest.skipUnless(any(AWS_CREDS.values()), "AWS environment credentials are not set")
     def setUp(self):
-        super(TestKmsTLSOptions, self).setUp()
+        super().setUp()
         # 1, create client with only tlsCAFile.
         providers: dict = copy.deepcopy(ALL_KMS_PROVIDERS)
-        providers["azure"]["identityPlatformEndpoint"] = "127.0.0.1:8002"
-        providers["gcp"]["endpoint"] = "127.0.0.1:8002"
+        providers["azure"]["identityPlatformEndpoint"] = "127.0.0.1:9002"
+        providers["gcp"]["endpoint"] = "127.0.0.1:9002"
         kms_tls_opts_ca_only = {
             "aws": {"tlsCAFile": CA_PEM},
             "azure": {"tlsCAFile": CA_PEM},
@@ -1870,18 +2066,18 @@ class TestKmsTLSOptions(EncryptionIntegrationTest):
         self.addCleanup(self.client_encryption_with_tls.close)
         # 3, update endpoints to expired host.
         providers: dict = copy.deepcopy(providers)
-        providers["azure"]["identityPlatformEndpoint"] = "127.0.0.1:8000"
-        providers["gcp"]["endpoint"] = "127.0.0.1:8000"
-        providers["kmip"]["endpoint"] = "127.0.0.1:8000"
+        providers["azure"]["identityPlatformEndpoint"] = "127.0.0.1:9000"
+        providers["gcp"]["endpoint"] = "127.0.0.1:9000"
+        providers["kmip"]["endpoint"] = "127.0.0.1:9000"
         self.client_encryption_expired = ClientEncryption(
             providers, "keyvault.datakeys", self.client, OPTS, kms_tls_options=kms_tls_opts_ca_only
         )
         self.addCleanup(self.client_encryption_expired.close)
         # 3, update endpoints to invalid host.
         providers: dict = copy.deepcopy(providers)
-        providers["azure"]["identityPlatformEndpoint"] = "127.0.0.1:8001"
-        providers["gcp"]["endpoint"] = "127.0.0.1:8001"
-        providers["kmip"]["endpoint"] = "127.0.0.1:8001"
+        providers["azure"]["identityPlatformEndpoint"] = "127.0.0.1:9001"
+        providers["gcp"]["endpoint"] = "127.0.0.1:9001"
+        providers["kmip"]["endpoint"] = "127.0.0.1:9001"
         self.client_encryption_invalid_hostname = ClientEncryption(
             providers, "keyvault.datakeys", self.client, OPTS, kms_tls_options=kms_tls_opts_ca_only
         )
@@ -1890,7 +2086,7 @@ class TestKmsTLSOptions(EncryptionIntegrationTest):
         # [SSL: TLSV13_ALERT_CERTIFICATE_REQUIRED] tlsv13 alert certificate required (_ssl.c:2623)
         self.cert_error = (
             "certificate required|SSL handshake failed|"
-            "KMS connection closed|Connection reset by peer"
+            "KMS connection closed|Connection reset by peer|ECONNRESET|EPIPE"
         )
         # On Python 3.10+ this error might be:
         # EOF occurred in violation of protocol (_ssl.c:2384)
@@ -1900,12 +2096,38 @@ class TestKmsTLSOptions(EncryptionIntegrationTest):
         # [WinError 10054] An existing connection was forcibly closed by the remote host
         if sys.platform == "win32":
             self.cert_error += "|forcibly closed"
+        # 4, Test named KMS providers.
+        providers = {
+            "aws:no_client_cert": AWS_CREDS,
+            "azure:no_client_cert": {"identityPlatformEndpoint": "127.0.0.1:9002", **AZURE_CREDS},
+            "gcp:no_client_cert": {"endpoint": "127.0.0.1:9002", **GCP_CREDS},
+            "kmip:no_client_cert": KMIP_CREDS,
+            "aws:with_tls": AWS_CREDS,
+            "azure:with_tls": {"identityPlatformEndpoint": "127.0.0.1:9002", **AZURE_CREDS},
+            "gcp:with_tls": {"endpoint": "127.0.0.1:9002", **GCP_CREDS},
+            "kmip:with_tls": KMIP_CREDS,
+        }
+        no_cert = {"tlsCAFile": CA_PEM}
+        with_cert = {"tlsCAFile": CA_PEM, "tlsCertificateKeyFile": CLIENT_PEM}
+        kms_tls_opts_4 = {
+            "aws:no_client_cert": no_cert,
+            "azure:no_client_cert": no_cert,
+            "gcp:no_client_cert": no_cert,
+            "kmip:no_client_cert": no_cert,
+            "aws:with_tls": with_cert,
+            "azure:with_tls": with_cert,
+            "gcp:with_tls": with_cert,
+            "kmip:with_tls": with_cert,
+        }
+        self.client_encryption_with_names = ClientEncryption(
+            providers, "keyvault.datakeys", self.client, OPTS, kms_tls_options=kms_tls_opts_4
+        )
 
     def test_01_aws(self):
         key = {
             "region": "us-east-1",
             "key": "arn:aws:kms:us-east-1:579766882180:key/89fcc2c4-08b0-4bd9-9f25-e30687b580d0",
-            "endpoint": "127.0.0.1:8002",
+            "endpoint": "127.0.0.1:9002",
         }
         with self.assertRaisesRegex(EncryptionError, self.cert_error):
             self.client_encryption_no_client_cert.create_data_key("aws", key)
@@ -1915,14 +2137,17 @@ class TestKmsTLSOptions(EncryptionIntegrationTest):
         # Some examples:
         # certificate verify failed: certificate has expired (_ssl.c:1129)
         # amazon1-2018 Python 3.6: certificate verify failed (_ssl.c:852)
-        key["endpoint"] = "127.0.0.1:8000"
+        key["endpoint"] = "127.0.0.1:9000"
         with self.assertRaisesRegex(EncryptionError, "expired|certificate verify failed"):
             self.client_encryption_expired.create_data_key("aws", key)
         # Some examples:
         # certificate verify failed: IP address mismatch, certificate is not valid for '127.0.0.1'. (_ssl.c:1129)"
         # hostname '127.0.0.1' doesn't match 'wronghost.com'
-        key["endpoint"] = "127.0.0.1:8001"
-        with self.assertRaisesRegex(EncryptionError, "IP address mismatch|wronghost"):
+        # 127.0.0.1:9001: ('Certificate does not contain any `subjectAltName`s.',)
+        key["endpoint"] = "127.0.0.1:9001"
+        with self.assertRaisesRegex(
+            EncryptionError, "IP address mismatch|wronghost|IPAddressMismatch|Certificate"
+        ):
             self.client_encryption_invalid_hostname.create_data_key("aws", key)
 
     def test_02_azure(self):
@@ -1937,7 +2162,9 @@ class TestKmsTLSOptions(EncryptionIntegrationTest):
         with self.assertRaisesRegex(EncryptionError, "expired|certificate verify failed"):
             self.client_encryption_expired.create_data_key("azure", key)
         # Invalid cert hostname error.
-        with self.assertRaisesRegex(EncryptionError, "IP address mismatch|wronghost"):
+        with self.assertRaisesRegex(
+            EncryptionError, "IP address mismatch|wronghost|IPAddressMismatch|Certificate"
+        ):
             self.client_encryption_invalid_hostname.create_data_key("azure", key)
 
     def test_03_gcp(self):
@@ -1952,7 +2179,9 @@ class TestKmsTLSOptions(EncryptionIntegrationTest):
         with self.assertRaisesRegex(EncryptionError, "expired|certificate verify failed"):
             self.client_encryption_expired.create_data_key("gcp", key)
         # Invalid cert hostname error.
-        with self.assertRaisesRegex(EncryptionError, "IP address mismatch|wronghost"):
+        with self.assertRaisesRegex(
+            EncryptionError, "IP address mismatch|wronghost|IPAddressMismatch|Certificate"
+        ):
             self.client_encryption_invalid_hostname.create_data_key("gcp", key)
 
     def test_04_kmip(self):
@@ -1964,8 +2193,874 @@ class TestKmsTLSOptions(EncryptionIntegrationTest):
         with self.assertRaisesRegex(EncryptionError, "expired|certificate verify failed"):
             self.client_encryption_expired.create_data_key("kmip")
         # Invalid cert hostname error.
-        with self.assertRaisesRegex(EncryptionError, "IP address mismatch|wronghost"):
+        with self.assertRaisesRegex(
+            EncryptionError, "IP address mismatch|wronghost|IPAddressMismatch|Certificate"
+        ):
             self.client_encryption_invalid_hostname.create_data_key("kmip")
+
+    def test_05_tlsDisableOCSPEndpointCheck_is_permitted(self):
+        providers = {"aws": {"accessKeyId": "foo", "secretAccessKey": "bar"}}
+        options = {"aws": {"tlsDisableOCSPEndpointCheck": True}}
+        encryption = ClientEncryption(
+            providers, "keyvault.datakeys", self.client, OPTS, kms_tls_options=options
+        )
+        self.addCleanup(encryption.close)
+        ctx = encryption._io_callbacks.opts._kms_ssl_contexts["aws"]
+        if not hasattr(ctx, "check_ocsp_endpoint"):
+            raise self.skipTest("OCSP not enabled")
+        self.assertFalse(ctx.check_ocsp_endpoint)
+
+    def test_06_named_kms_providers_apply_tls_options_aws(self):
+        key = {
+            "region": "us-east-1",
+            "key": "arn:aws:kms:us-east-1:579766882180:key/89fcc2c4-08b0-4bd9-9f25-e30687b580d0",
+            "endpoint": "127.0.0.1:9002",
+        }
+        # Missing client cert error.
+        with self.assertRaisesRegex(EncryptionError, self.cert_error):
+            self.client_encryption_with_names.create_data_key("aws:no_client_cert", key)
+        # "parse error" here means that the TLS handshake succeeded.
+        with self.assertRaisesRegex(EncryptionError, "parse error"):
+            self.client_encryption_with_names.create_data_key("aws:with_tls", key)
+
+    def test_06_named_kms_providers_apply_tls_options_azure(self):
+        key = {"keyVaultEndpoint": "doesnotexist.local", "keyName": "foo"}
+        # Missing client cert error.
+        with self.assertRaisesRegex(EncryptionError, self.cert_error):
+            self.client_encryption_with_names.create_data_key("azure:no_client_cert", key)
+        # "HTTP status=404" here means that the TLS handshake succeeded.
+        with self.assertRaisesRegex(EncryptionError, "HTTP status=404"):
+            self.client_encryption_with_names.create_data_key("azure:with_tls", key)
+
+    def test_06_named_kms_providers_apply_tls_options_gcp(self):
+        key = {"projectId": "foo", "location": "bar", "keyRing": "baz", "keyName": "foo"}
+        # Missing client cert error.
+        with self.assertRaisesRegex(EncryptionError, self.cert_error):
+            self.client_encryption_with_names.create_data_key("gcp:no_client_cert", key)
+        # "HTTP status=404" here means that the TLS handshake succeeded.
+        with self.assertRaisesRegex(EncryptionError, "HTTP status=404"):
+            self.client_encryption_with_names.create_data_key("gcp:with_tls", key)
+
+    def test_06_named_kms_providers_apply_tls_options_kmip(self):
+        # Missing client cert error.
+        with self.assertRaisesRegex(EncryptionError, self.cert_error):
+            self.client_encryption_with_names.create_data_key("kmip:no_client_cert")
+        self.client_encryption_with_names.create_data_key("kmip:with_tls")
+
+
+# https://github.com/mongodb/specifications/blob/50e26fe/source/client-side-encryption/tests/README.rst#unique-index-on-keyaltnames
+class TestUniqueIndexOnKeyAltNamesProse(EncryptionIntegrationTest):
+    def setUp(self):
+        self.client = client_context.client
+        create_key_vault(self.client.keyvault.datakeys)
+        kms_providers_map = {"local": {"key": LOCAL_MASTER_KEY}}
+        self.client_encryption = ClientEncryption(
+            kms_providers_map, "keyvault.datakeys", self.client, CodecOptions()
+        )
+        self.def_key_id = self.client_encryption.create_data_key("local", key_alt_names=["def"])
+
+    def test_01_create_key(self):
+        self.client_encryption.create_data_key("local", key_alt_names=["abc"])
+        with self.assertRaisesRegex(EncryptionError, "E11000 duplicate key error collection"):
+            self.client_encryption.create_data_key("local", key_alt_names=["abc"])
+        with self.assertRaisesRegex(EncryptionError, "E11000 duplicate key error collection"):
+            self.client_encryption.create_data_key("local", key_alt_names=["def"])
+
+    def test_02_add_key_alt_name(self):
+        key_id = self.client_encryption.create_data_key("local")
+        self.client_encryption.add_key_alt_name(key_id, "abc")
+        key_doc = self.client_encryption.add_key_alt_name(key_id, "abc")
+        assert key_doc["keyAltNames"] == ["abc"]
+        with self.assertRaisesRegex(DuplicateKeyError, "E11000 duplicate key error collection"):
+            self.client_encryption.add_key_alt_name(key_id, "def")
+        key_doc = self.client_encryption.add_key_alt_name(self.def_key_id, "def")
+        assert key_doc["keyAltNames"] == ["def"]
+
+
+# https://github.com/mongodb/specifications/blob/d4c9432/source/client-side-encryption/tests/README.rst#explicit-encryption
+class TestExplicitQueryableEncryption(EncryptionIntegrationTest):
+    @client_context.require_no_standalone
+    @client_context.require_version_min(7, 0, -1)
+    def setUp(self):
+        super().setUp()
+        self.encrypted_fields = json_data("etc", "data", "encryptedFields.json")
+        self.key1_document = json_data("etc", "data", "keys", "key1-document.json")
+        self.key1_id = self.key1_document["_id"]
+        self.db = self.client.test_queryable_encryption
+        self.client.drop_database(self.db)
+        self.db.command("create", "explicit_encryption", encryptedFields=self.encrypted_fields)
+        key_vault = create_key_vault(self.client.keyvault.datakeys, self.key1_document)
+        self.addCleanup(key_vault.drop)
+        self.key_vault_client = self.client
+        self.client_encryption = ClientEncryption(
+            {"local": {"key": LOCAL_MASTER_KEY}}, key_vault.full_name, self.key_vault_client, OPTS
+        )
+        self.addCleanup(self.client_encryption.close)
+        opts = AutoEncryptionOpts(
+            {"local": {"key": LOCAL_MASTER_KEY}},
+            key_vault.full_name,
+            bypass_query_analysis=True,
+        )
+        self.encrypted_client = rs_or_single_client(auto_encryption_opts=opts)
+        self.addCleanup(self.encrypted_client.close)
+
+    def test_01_insert_encrypted_indexed_and_find(self):
+        val = "encrypted indexed value"
+        insert_payload = self.client_encryption.encrypt(
+            val, Algorithm.INDEXED, self.key1_id, contention_factor=0
+        )
+        self.encrypted_client[self.db.name].explicit_encryption.insert_one(
+            {"encryptedIndexed": insert_payload}
+        )
+
+        find_payload = self.client_encryption.encrypt(
+            val, Algorithm.INDEXED, self.key1_id, query_type=QueryType.EQUALITY, contention_factor=0
+        )
+        docs = list(
+            self.encrypted_client[self.db.name].explicit_encryption.find(
+                {"encryptedIndexed": find_payload}
+            )
+        )
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0]["encryptedIndexed"], val)
+
+    def test_02_insert_encrypted_indexed_and_find_contention(self):
+        val = "encrypted indexed value"
+        contention = 10
+        for _ in range(contention):
+            insert_payload = self.client_encryption.encrypt(
+                val, Algorithm.INDEXED, self.key1_id, contention_factor=contention
+            )
+            self.encrypted_client[self.db.name].explicit_encryption.insert_one(
+                {"encryptedIndexed": insert_payload}
+            )
+
+        find_payload = self.client_encryption.encrypt(
+            val, Algorithm.INDEXED, self.key1_id, query_type=QueryType.EQUALITY, contention_factor=0
+        )
+        docs = list(
+            self.encrypted_client[self.db.name].explicit_encryption.find(
+                {"encryptedIndexed": find_payload}
+            )
+        )
+        self.assertLessEqual(len(docs), 10)
+        for doc in docs:
+            self.assertEqual(doc["encryptedIndexed"], val)
+
+        # Find with contention_factor will return all 10 documents.
+        find_payload = self.client_encryption.encrypt(
+            val,
+            Algorithm.INDEXED,
+            self.key1_id,
+            query_type=QueryType.EQUALITY,
+            contention_factor=contention,
+        )
+        docs = list(
+            self.encrypted_client[self.db.name].explicit_encryption.find(
+                {"encryptedIndexed": find_payload}
+            )
+        )
+        self.assertEqual(len(docs), 10)
+        for doc in docs:
+            self.assertEqual(doc["encryptedIndexed"], val)
+
+    def test_03_insert_encrypted_unindexed(self):
+        val = "encrypted unindexed value"
+        insert_payload = self.client_encryption.encrypt(val, Algorithm.UNINDEXED, self.key1_id)
+        self.encrypted_client[self.db.name].explicit_encryption.insert_one(
+            {"_id": 1, "encryptedUnindexed": insert_payload}
+        )
+
+        docs = list(self.encrypted_client[self.db.name].explicit_encryption.find({"_id": 1}))
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0]["encryptedUnindexed"], val)
+
+    def test_04_roundtrip_encrypted_indexed(self):
+        val = "encrypted indexed value"
+        payload = self.client_encryption.encrypt(
+            val, Algorithm.INDEXED, self.key1_id, contention_factor=0
+        )
+        decrypted = self.client_encryption.decrypt(payload)
+        self.assertEqual(decrypted, val)
+
+    def test_05_roundtrip_encrypted_unindexed(self):
+        val = "encrypted indexed value"
+        payload = self.client_encryption.encrypt(val, Algorithm.UNINDEXED, self.key1_id)
+        decrypted = self.client_encryption.decrypt(payload)
+        self.assertEqual(decrypted, val)
+
+
+# https://github.com/mongodb/specifications/blob/072601/source/client-side-encryption/tests/README.rst#rewrap
+class TestRewrapWithSeparateClientEncryption(EncryptionIntegrationTest):
+    MASTER_KEYS: Mapping[str, Mapping[str, Any]] = {
+        "aws": {
+            "region": "us-east-1",
+            "key": "arn:aws:kms:us-east-1:579766882180:key/89fcc2c4-08b0-4bd9-9f25-e30687b580d0",
+        },
+        "azure": {
+            "keyVaultEndpoint": "key-vault-csfle.vault.azure.net",
+            "keyName": "key-name-csfle",
+        },
+        "gcp": {
+            "projectId": "devprod-drivers",
+            "location": "global",
+            "keyRing": "key-ring-csfle",
+            "keyName": "key-name-csfle",
+        },
+        "kmip": {},
+        "local": {},
+    }
+
+    def test_rewrap(self):
+        for src_provider in self.MASTER_KEYS:
+            for dst_provider in self.MASTER_KEYS:
+                with self.subTest(src_provider=src_provider, dst_provider=dst_provider):
+                    self.run_test(src_provider, dst_provider)
+
+    def run_test(self, src_provider, dst_provider):
+        # Step 1. Drop the collection ``keyvault.datakeys``.
+        self.client.keyvault.drop_collection("datakeys")
+
+        # Step 2. Create a ``ClientEncryption`` object named ``client_encryption1``
+        client_encryption1 = ClientEncryption(
+            key_vault_client=self.client,
+            key_vault_namespace="keyvault.datakeys",
+            kms_providers=ALL_KMS_PROVIDERS,
+            kms_tls_options=KMS_TLS_OPTS,
+            codec_options=OPTS,
+        )
+        self.addCleanup(client_encryption1.close)
+
+        # Step 3. Call ``client_encryption1.create_data_key`` with ``src_provider``.
+        key_id = client_encryption1.create_data_key(
+            master_key=self.MASTER_KEYS[src_provider], kms_provider=src_provider
+        )
+
+        # Step 4. Call ``client_encryption1.encrypt`` with the value "test"
+        cipher_text = client_encryption1.encrypt(
+            "test", key_id=key_id, algorithm=Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic
+        )
+
+        # Step 5. Create a ``ClientEncryption`` object named ``client_encryption2``
+        client2 = rs_or_single_client()
+        self.addCleanup(client2.close)
+        client_encryption2 = ClientEncryption(
+            key_vault_client=client2,
+            key_vault_namespace="keyvault.datakeys",
+            kms_providers=ALL_KMS_PROVIDERS,
+            kms_tls_options=KMS_TLS_OPTS,
+            codec_options=OPTS,
+        )
+        self.addCleanup(client_encryption1.close)
+
+        # Step 6. Call ``client_encryption2.rewrap_many_data_key`` with an empty ``filter``.
+        rewrap_many_data_key_result = client_encryption2.rewrap_many_data_key(
+            {}, provider=dst_provider, master_key=self.MASTER_KEYS[dst_provider]
+        )
+
+        self.assertEqual(rewrap_many_data_key_result.bulk_write_result.modified_count, 1)
+
+        # 7. Call ``client_encryption1.decrypt`` with the ``cipher_text``. Assert the return value is "test".
+        decrypt_result1 = client_encryption1.decrypt(cipher_text)
+        self.assertEqual(decrypt_result1, "test")
+
+        # 8. Call ``client_encryption2.decrypt`` with the ``cipher_text``. Assert the return value is "test".
+        decrypt_result2 = client_encryption2.decrypt(cipher_text)
+        self.assertEqual(decrypt_result2, "test")
+
+        # 8. Case 2. Provider is not optional when master_key is given.
+        with self.assertRaises(ConfigurationError):
+            rewrap_many_data_key_result = client_encryption2.rewrap_many_data_key(
+                {}, master_key=self.MASTER_KEYS[dst_provider]
+            )
+
+
+# https://github.com/mongodb/specifications/blob/5cf3ed/source/client-side-encryption/tests/README.rst#on-demand-aws-credentials
+class TestOnDemandAWSCredentials(EncryptionIntegrationTest):
+    def setUp(self):
+        super().setUp()
+        self.master_key = {
+            "region": "us-east-1",
+            "key": ("arn:aws:kms:us-east-1:579766882180:key/89fcc2c4-08b0-4bd9-9f25-e30687b580d0"),
+        }
+
+    @unittest.skipIf(any(AWS_CREDS.values()), "AWS environment credentials are set")
+    def test_01_failure(self):
+        self.client_encryption = ClientEncryption(
+            kms_providers={"aws": {}},
+            key_vault_namespace="keyvault.datakeys",
+            key_vault_client=client_context.client,
+            codec_options=OPTS,
+        )
+        with self.assertRaises(EncryptionError):
+            self.client_encryption.create_data_key("aws", self.master_key)
+
+    @unittest.skipUnless(any(AWS_CREDS.values()), "AWS environment credentials are not set")
+    def test_02_success(self):
+        self.client_encryption = ClientEncryption(
+            kms_providers={"aws": {}},
+            key_vault_namespace="keyvault.datakeys",
+            key_vault_client=client_context.client,
+            codec_options=OPTS,
+        )
+        self.client_encryption.create_data_key("aws", self.master_key)
+
+
+class TestQueryableEncryptionDocsExample(EncryptionIntegrationTest):
+    # Queryable Encryption is not supported on Standalone topology.
+    @client_context.require_no_standalone
+    @client_context.require_version_min(7, 0, -1)
+    def setUp(self):
+        super().setUp()
+
+    def test_queryable_encryption(self):
+        # MongoClient to use in testing that handles auth/tls/etc,
+        # and cleanup.
+        def MongoClient(**kwargs):
+            c = rs_or_single_client(**kwargs)
+            self.addCleanup(c.close)
+            return c
+
+        # Drop data from prior test runs.
+        self.client.keyvault.datakeys.drop()
+        self.client.drop_database("docs_examples")
+
+        kms_providers_map = {"local": {"key": LOCAL_MASTER_KEY}}
+
+        # Create two data keys.
+        key_vault_client = MongoClient()
+        client_encryption = ClientEncryption(
+            kms_providers_map, "keyvault.datakeys", key_vault_client, CodecOptions()
+        )
+        key1_id = client_encryption.create_data_key("local")
+        key2_id = client_encryption.create_data_key("local")
+
+        # Create an encryptedFieldsMap.
+        encrypted_fields_map = {
+            "docs_examples.encrypted": {
+                "fields": [
+                    {
+                        "path": "encrypted_indexed",
+                        "bsonType": "string",
+                        "keyId": key1_id,
+                        "queries": [
+                            {
+                                "queryType": "equality",
+                            },
+                        ],
+                    },
+                    {
+                        "path": "encrypted_unindexed",
+                        "bsonType": "string",
+                        "keyId": key2_id,
+                    },
+                ],
+            },
+        }
+
+        # Create an Queryable Encryption collection.
+        opts = AutoEncryptionOpts(
+            kms_providers_map, "keyvault.datakeys", encrypted_fields_map=encrypted_fields_map
+        )
+        encrypted_client = MongoClient(auto_encryption_opts=opts)
+
+        # Create a Queryable Encryption collection "docs_examples.encrypted".
+        # Because docs_examples.encrypted is in encrypted_fields_map, it is
+        # created with Queryable Encryption support.
+        db = encrypted_client.docs_examples
+        encrypted_coll = db.create_collection("encrypted")
+
+        # Auto encrypt an insert and find.
+
+        # Encrypt an insert.
+        encrypted_coll.insert_one(
+            {
+                "_id": 1,
+                "encrypted_indexed": "indexed_value",
+                "encrypted_unindexed": "unindexed_value",
+            }
+        )
+
+        # Encrypt a find.
+        res = encrypted_coll.find_one({"encrypted_indexed": "indexed_value"})
+        assert res is not None
+        assert res["encrypted_indexed"] == "indexed_value"
+        assert res["encrypted_unindexed"] == "unindexed_value"
+
+        # Find documents without decryption.
+        unencrypted_client = MongoClient()
+        unencrypted_coll = unencrypted_client.docs_examples.encrypted
+        res = unencrypted_coll.find_one({"_id": 1})
+        assert res is not None
+        assert isinstance(res["encrypted_indexed"], Binary)
+        assert isinstance(res["encrypted_unindexed"], Binary)
+
+        client_encryption.close()
+
+
+# https://github.com/mongodb/specifications/blob/master/source/client-side-encryption/tests/README.rst#range-explicit-encryption
+class TestRangeQueryProse(EncryptionIntegrationTest):
+    @client_context.require_no_standalone
+    @client_context.require_version_min(7, 0, -1)
+    def setUp(self):
+        super().setUp()
+        self.key1_document = json_data("etc", "data", "keys", "key1-document.json")
+        self.key1_id = self.key1_document["_id"]
+        self.client.drop_database(self.db)
+        key_vault = create_key_vault(self.client.keyvault.datakeys, self.key1_document)
+        self.addCleanup(key_vault.drop)
+        self.key_vault_client = self.client
+        self.client_encryption = ClientEncryption(
+            {"local": {"key": LOCAL_MASTER_KEY}}, key_vault.full_name, self.key_vault_client, OPTS
+        )
+        self.addCleanup(self.client_encryption.close)
+        opts = AutoEncryptionOpts(
+            {"local": {"key": LOCAL_MASTER_KEY}},
+            key_vault.full_name,
+            bypass_query_analysis=True,
+        )
+        self.encrypted_client = rs_or_single_client(auto_encryption_opts=opts)
+        self.db = self.encrypted_client.db
+        self.addCleanup(self.encrypted_client.close)
+
+    def run_expression_find(
+        self, name, expression, expected_elems, range_opts, use_expr=False, key_id=None
+    ):
+        find_payload = self.client_encryption.encrypt_expression(
+            expression=expression,
+            key_id=key_id or self.key1_id,
+            algorithm=Algorithm.RANGEPREVIEW,
+            query_type=QueryType.RANGEPREVIEW,
+            contention_factor=0,
+            range_opts=range_opts,
+        )
+        if use_expr:
+            find_payload = {"$expr": find_payload}
+        sorted_find = sorted(
+            self.encrypted_client.db.explicit_encryption.find(find_payload), key=lambda x: x["_id"]
+        )
+        for elem, expected in zip(sorted_find, expected_elems):
+            self.assertEqual(elem[f"encrypted{name}"], expected)
+
+    def run_test_cases(self, name, range_opts, cast_func):
+        encrypted_fields = json_data("etc", "data", f"range-encryptedFields-{name}.json")
+        self.db.drop_collection("explicit_encryption", encrypted_fields=encrypted_fields)
+        self.db.create_collection("explicit_encryption", encryptedFields=encrypted_fields)
+
+        def encrypt_and_cast(i):
+            return self.client_encryption.encrypt(
+                cast_func(i),
+                key_id=self.key1_id,
+                algorithm=Algorithm.RANGEPREVIEW,
+                contention_factor=0,
+                range_opts=range_opts,
+            )
+
+        for elem in [{f"encrypted{name}": encrypt_and_cast(i)} for i in [0, 6, 30, 200]]:
+            self.encrypted_client.db.explicit_encryption.insert_one(elem)
+
+        # Case 1.
+        insert_payload = self.client_encryption.encrypt(
+            cast_func(6),
+            key_id=self.key1_id,
+            algorithm=Algorithm.RANGEPREVIEW,
+            contention_factor=0,
+            range_opts=range_opts,
+        )
+        self.assertEqual(self.client_encryption.decrypt(insert_payload), cast_func(6))
+
+        # Case 2.
+        expression = {
+            "$and": [
+                {f"encrypted{name}": {"$gte": cast_func(6)}},
+                {f"encrypted{name}": {"$lte": cast_func(200)}},
+            ]
+        }
+        self.run_expression_find(name, expression, [cast_func(i) for i in [6, 30, 200]], range_opts)
+        # Case 2, with UUID key_id
+        self.run_expression_find(
+            name,
+            expression,
+            [cast_func(i) for i in [6, 30, 200]],
+            range_opts,
+            key_id=self.key1_id.as_uuid(),
+        )
+
+        # Case 3.
+        self.run_expression_find(
+            name,
+            {
+                "$and": [
+                    {f"encrypted{name}": {"$gte": cast_func(0)}},
+                    {f"encrypted{name}": {"$lte": cast_func(6)}},
+                ]
+            },
+            [cast_func(i) for i in [0, 6]],
+            range_opts,
+        )
+
+        # Case 4.
+        self.run_expression_find(
+            name,
+            {
+                "$and": [
+                    {f"encrypted{name}": {"$gt": cast_func(30)}},
+                ]
+            },
+            [cast_func(i) for i in [200]],
+            range_opts,
+        )
+
+        # Case 5.
+        self.run_expression_find(
+            name,
+            {"$and": [{"$lt": [f"$encrypted{name}", cast_func(30)]}]},
+            [cast_func(i) for i in [0, 6]],
+            range_opts,
+            use_expr=True,
+        )
+
+        # The spec says to skip the following tests for no precision decimal or double types.
+        if name not in ("DoubleNoPrecision", "DecimalNoPrecision"):
+            # Case 6.
+            with self.assertRaisesRegex(
+                EncryptionError,
+                "greater than or equal to the minimum value and less than or equal to the maximum value",
+            ):
+                self.client_encryption.encrypt(
+                    cast_func(201),
+                    key_id=self.key1_id,
+                    algorithm=Algorithm.RANGEPREVIEW,
+                    contention_factor=0,
+                    range_opts=range_opts,
+                )
+
+            # Case 7.
+            with self.assertRaisesRegex(
+                EncryptionError, "expected matching 'min' and value type. Got range option"
+            ):
+                self.client_encryption.encrypt(
+                    6 if cast_func != int else float(6),
+                    key_id=self.key1_id,
+                    algorithm=Algorithm.RANGEPREVIEW,
+                    contention_factor=0,
+                    range_opts=range_opts,
+                )
+
+            # Case 8.
+            # The spec says we must additionally not run this case with any precision type, not just the ones above.
+            if "Precision" not in name:
+                with self.assertRaisesRegex(
+                    EncryptionError,
+                    "expected 'precision' to be set with double or decimal128 index, but got:",
+                ):
+                    self.client_encryption.encrypt(
+                        cast_func(6),
+                        key_id=self.key1_id,
+                        algorithm=Algorithm.RANGEPREVIEW,
+                        contention_factor=0,
+                        range_opts=RangeOpts(
+                            min=cast_func(0), max=cast_func(200), sparsity=1, precision=2
+                        ),
+                    )
+
+    def test_double_no_precision(self):
+        self.run_test_cases("DoubleNoPrecision", RangeOpts(sparsity=1), float)
+
+    def test_double_precision(self):
+        self.run_test_cases(
+            "DoublePrecision",
+            RangeOpts(min=0.0, max=200.0, sparsity=1, precision=2),
+            float,
+        )
+
+    def test_decimal_no_precision(self):
+        self.run_test_cases(
+            "DecimalNoPrecision", RangeOpts(sparsity=1), lambda x: Decimal128(str(x))
+        )
+
+    def test_decimal_precision(self):
+        self.run_test_cases(
+            "DecimalPrecision",
+            RangeOpts(min=Decimal128("0.0"), max=Decimal128("200.0"), sparsity=1, precision=2),
+            lambda x: Decimal128(str(x)),
+        )
+
+    def test_datetime(self):
+        self.run_test_cases(
+            "Date",
+            RangeOpts(min=DatetimeMS(0), max=DatetimeMS(200), sparsity=1),
+            lambda x: DatetimeMS(x).as_datetime(),
+        )
+
+    def test_int(self):
+        self.run_test_cases("Int", RangeOpts(min=0, max=200, sparsity=1), int)
+
+
+# https://github.com/mongodb/specifications/blob/master/source/client-side-encryption/tests/README.rst#automatic-data-encryption-keys
+class TestAutomaticDecryptionKeys(EncryptionIntegrationTest):
+    @client_context.require_no_standalone
+    @client_context.require_version_min(7, 0, -1)
+    def setUp(self):
+        super().setUp()
+        self.key1_document = json_data("etc", "data", "keys", "key1-document.json")
+        self.key1_id = self.key1_document["_id"]
+        self.client.drop_database(self.db)
+        self.key_vault = create_key_vault(self.client.keyvault.datakeys, self.key1_document)
+        self.addCleanup(self.key_vault.drop)
+        self.client_encryption = ClientEncryption(
+            {"local": {"key": LOCAL_MASTER_KEY}},
+            self.key_vault.full_name,
+            self.client,
+            OPTS,
+        )
+        self.addCleanup(self.client_encryption.close)
+
+    def test_01_simple_create(self):
+        coll, _ = self.client_encryption.create_encrypted_collection(
+            database=self.db,
+            name="testing1",
+            encrypted_fields={"fields": [{"path": "ssn", "bsonType": "string", "keyId": None}]},
+            kms_provider="local",
+        )
+        with self.assertRaises(WriteError) as exc:
+            coll.insert_one({"ssn": "123-45-6789"})
+        self.assertEqual(exc.exception.code, 121)
+
+    def test_02_no_fields(self):
+        with self.assertRaisesRegex(
+            TypeError,
+            "create_encrypted_collection.* missing 1 required positional argument: 'encrypted_fields'",
+        ):
+            self.client_encryption.create_encrypted_collection(  # type:ignore[call-arg]
+                database=self.db,
+                name="testing1",
+            )
+
+    def test_03_invalid_keyid(self):
+        with self.assertRaisesRegex(
+            EncryptedCollectionError,
+            "create.encryptedFields.fields.keyId' is the wrong type 'bool', expected type 'binData",
+        ):
+            self.client_encryption.create_encrypted_collection(
+                database=self.db,
+                name="testing1",
+                encrypted_fields={
+                    "fields": [{"path": "ssn", "bsonType": "string", "keyId": False}]
+                },
+                kms_provider="local",
+            )
+
+    def test_04_insert_encrypted(self):
+        coll, ef = self.client_encryption.create_encrypted_collection(
+            database=self.db,
+            name="testing1",
+            encrypted_fields={"fields": [{"path": "ssn", "bsonType": "string", "keyId": None}]},
+            kms_provider="local",
+        )
+        key1_id = ef["fields"][0]["keyId"]
+        encrypted_value = self.client_encryption.encrypt(
+            "123-45-6789",
+            key_id=key1_id,
+            algorithm=Algorithm.UNINDEXED,
+        )
+        coll.insert_one({"ssn": encrypted_value})
+
+    def test_copy_encrypted_fields(self):
+        encrypted_fields = {
+            "fields": [
+                {
+                    "path": "ssn",
+                    "bsonType": "string",
+                    "keyId": None,
+                }
+            ]
+        }
+        _, ef = self.client_encryption.create_encrypted_collection(
+            database=self.db,
+            name="testing1",
+            kms_provider="local",
+            encrypted_fields=encrypted_fields,
+        )
+        self.assertIsNotNone(ef["fields"][0]["keyId"])
+        self.assertIsNone(encrypted_fields["fields"][0]["keyId"])
+
+    def test_options_forward(self):
+        coll, ef = self.client_encryption.create_encrypted_collection(
+            database=self.db,
+            name="testing1",
+            kms_provider="local",
+            encrypted_fields={"fields": [{"path": "ssn", "bsonType": "string", "keyId": None}]},
+            read_preference=ReadPreference.NEAREST,
+        )
+        self.assertEqual(coll.read_preference, ReadPreference.NEAREST)
+        self.assertEqual(coll.name, "testing1")
+
+    def test_mixed_null_keyids(self):
+        key = self.client_encryption.create_data_key(kms_provider="local")
+        coll, ef = self.client_encryption.create_encrypted_collection(
+            database=self.db,
+            name="testing1",
+            encrypted_fields={
+                "fields": [
+                    {"path": "ssn", "bsonType": "string", "keyId": None},
+                    {"path": "dob", "bsonType": "string", "keyId": key},
+                    {"path": "secrets", "bsonType": "string"},
+                    {"path": "address", "bsonType": "string", "keyId": None},
+                ]
+            },
+            kms_provider="local",
+        )
+        encrypted_values = [
+            self.client_encryption.encrypt(
+                val,
+                key_id=key,
+                algorithm=Algorithm.UNINDEXED,
+            )
+            for val, key in zip(
+                ["123-45-6789", "11/22/1963", "My secret", "New Mexico, 87104"],
+                [field["keyId"] for field in ef["fields"]],
+            )
+        ]
+        coll.insert_one(
+            {
+                "ssn": encrypted_values[0],
+                "dob": encrypted_values[1],
+                "secrets": encrypted_values[2],
+                "address": encrypted_values[3],
+            }
+        )
+
+    def test_create_datakey_fails(self):
+        key = self.client_encryption.create_data_key(kms_provider="local")
+        encrypted_fields = {
+            "fields": [
+                {"path": "address", "bsonType": "string", "keyId": key},
+                {"path": "dob", "bsonType": "string", "keyId": None},
+            ]
+        }
+        # Make sure the exception's encrypted_fields object includes the previous keys in the error message even when
+        # generating keys fails.
+        with self.assertRaises(
+            EncryptedCollectionError,
+        ) as exc:
+            self.client_encryption.create_encrypted_collection(
+                database=self.db,
+                name="testing1",
+                encrypted_fields=encrypted_fields,
+                kms_provider="does not exist",
+            )
+        self.assertEqual(exc.exception.encrypted_fields, encrypted_fields)
+
+    def test_create_failure(self):
+        key = self.client_encryption.create_data_key(kms_provider="local")
+        # Make sure the exception's encrypted_fields object includes the previous keys in the error message even when
+        # it is the creation of the collection that fails.
+        with self.assertRaises(
+            EncryptedCollectionError,
+        ) as exc:
+            self.client_encryption.create_encrypted_collection(
+                database=self.db,
+                name=1,  # type:ignore[arg-type]
+                encrypted_fields={
+                    "fields": [
+                        {"path": "address", "bsonType": "string", "keyId": key},
+                        {"path": "dob", "bsonType": "string", "keyId": None},
+                    ]
+                },
+                kms_provider="local",
+            )
+        for field in exc.exception.encrypted_fields["fields"]:
+            self.assertIsInstance(field["keyId"], Binary)
+
+    def test_collection_name_collision(self):
+        encrypted_fields = {
+            "fields": [
+                {"path": "address", "bsonType": "string", "keyId": None},
+            ]
+        }
+        self.db.create_collection("testing1")
+        with self.assertRaises(
+            EncryptedCollectionError,
+        ) as exc:
+            self.client_encryption.create_encrypted_collection(
+                database=self.db,
+                name="testing1",
+                encrypted_fields=encrypted_fields,
+                kms_provider="local",
+            )
+        self.assertIsInstance(exc.exception.encrypted_fields["fields"][0]["keyId"], Binary)
+        self.db.drop_collection("testing1", encrypted_fields=encrypted_fields)
+        self.client_encryption.create_encrypted_collection(
+            database=self.db,
+            name="testing1",
+            encrypted_fields=encrypted_fields,
+            kms_provider="local",
+        )
+        with self.assertRaises(
+            EncryptedCollectionError,
+        ) as exc:
+            self.client_encryption.create_encrypted_collection(
+                database=self.db,
+                name="testing1",
+                encrypted_fields=encrypted_fields,
+                kms_provider="local",
+            )
+        self.assertIsInstance(exc.exception.encrypted_fields["fields"][0]["keyId"], Binary)
+
+
+def start_mongocryptd(port) -> None:
+    args = ["mongocryptd", f"--port={port}", "--idleShutdownTimeoutSecs=60"]
+    _spawn_daemon(args)
+
+
+class TestNoSessionsSupport(EncryptionIntegrationTest):
+    mongocryptd_client: MongoClient
+    MONGOCRYPTD_PORT = 27020
+
+    @classmethod
+    @unittest.skipIf(os.environ.get("TEST_CRYPT_SHARED"), "crypt_shared lib is installed")
+    def setUpClass(cls):
+        super().setUpClass()
+        start_mongocryptd(cls.MONGOCRYPTD_PORT)
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+
+    def setUp(self) -> None:
+        self.listener = OvertCommandListener()
+        self.mongocryptd_client = MongoClient(
+            f"mongodb://localhost:{self.MONGOCRYPTD_PORT}", event_listeners=[self.listener]
+        )
+        self.addCleanup(self.mongocryptd_client.close)
+
+        hello = self.mongocryptd_client.db.command("hello")
+        self.assertNotIn("logicalSessionTimeoutMinutes", hello)
+
+    def test_implicit_session_ignored_when_unsupported(self):
+        self.listener.reset()
+        with self.assertRaises(OperationFailure):
+            self.mongocryptd_client.db.test.find_one()
+
+        self.assertNotIn("lsid", self.listener.started_events[0].command)
+
+        with self.assertRaises(OperationFailure):
+            self.mongocryptd_client.db.test.insert_one({"x": 1})
+
+        self.assertNotIn("lsid", self.listener.started_events[1].command)
+
+    def test_explicit_session_errors_when_unsupported(self):
+        self.listener.reset()
+        with self.mongocryptd_client.start_session() as s:
+            with self.assertRaisesRegex(
+                ConfigurationError, r"Sessions are not supported by this MongoDB deployment"
+            ):
+                self.mongocryptd_client.db.test.find_one(session=s)
+            with self.assertRaisesRegex(
+                ConfigurationError, r"Sessions are not supported by this MongoDB deployment"
+            ):
+                self.mongocryptd_client.db.test.insert_one({"x": 1}, session=s)
 
 
 if __name__ == "__main__":

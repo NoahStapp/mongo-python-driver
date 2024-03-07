@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import unittest
 from collections import namedtuple
@@ -137,14 +138,14 @@ operations = [
     # Legacy methods
     Operation(
         "bulk_write_insert",
-        lambda coll: coll.bulk_write([InsertOne({}), InsertOne({})]),
+        lambda coll: coll.bulk_write([InsertOne[dict]({}), InsertOne[dict]({})]),
         request=OpMsg({"insert": "coll"}, flags=0),
         reply={"ok": 1, "n": 2},
     ),
     Operation(
         "bulk_write_insert-w0",
         lambda coll: coll.with_options(write_concern=WriteConcern(w=0)).bulk_write(
-            [InsertOne({}), InsertOne({})]
+            [InsertOne[dict]({}), InsertOne[dict]({})]
         ),
         request=OpMsg({"insert": "coll"}, flags=0),
         reply={"ok": 1, "n": 2},
@@ -152,7 +153,7 @@ operations = [
     Operation(
         "bulk_write_insert-w0-unordered",
         lambda coll: coll.with_options(write_concern=WriteConcern(w=0)).bulk_write(
-            [InsertOne({}), InsertOne({})], ordered=False
+            [InsertOne[dict]({}), InsertOne[dict]({})], ordered=False
         ),
         request=OpMsg({"insert": "coll"}, flags=OP_MSG_FLAGS["moreToCome"]),
         reply=None,
@@ -304,7 +305,7 @@ def operation_test(op):
 
 def create_tests(ops):
     for op in ops:
-        test_name = "test_op_msg_%s" % (op.name,)
+        test_name = f"test_op_msg_{op.name}"
         setattr(TestOpMsg, test_name, operation_test(op))
 
 

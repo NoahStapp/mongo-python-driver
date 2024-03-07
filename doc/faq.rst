@@ -1,8 +1,6 @@
 Frequently Asked Questions
 ==========================
 
-.. contents::
-
 Is PyMongo thread-safe?
 -----------------------
 
@@ -38,10 +36,33 @@ created by ``fork()`` only has one thread, so any locks that were taken out by
 other threads in the parent will never be released in the child. The next time
 the child process attempts to acquire one of these locks, deadlock occurs.
 
+Starting in version 4.3, PyMongo utilizes :py:func:`os.register_at_fork` to
+reset its locks and other shared state in the child process after a
+:py:func:`os.fork` to reduce the frequency of deadlocks. However deadlocks
+are still possible because libraries that PyMongo depends on, like `OpenSSL`_
+and `getaddrinfo(3)`_ (on some platforms), are not fork() safe in a
+multithreaded application. Linux also imposes the restriction that:
+
+    After a `fork()`_ in a multithreaded program, the child can
+    safely call only async-signal-safe functions (see
+    `signal-safety(7)`_) until such time as it calls `execve(2)`_.
+
+PyMongo relies on functions that are *not* `async-signal-safe`_ and hence the
+child process can experience deadlocks or crashes when attempting to call
+a non `async-signal-safe`_ function. For examples of deadlocks or crashes
+that could occur see `PYTHON-3406`_.
+
 For a long but interesting read about the problems of Python locks in
 multithreaded contexts with ``fork()``, see http://bugs.python.org/issue6721.
 
 .. _not fork-safe: http://bugs.python.org/issue6721
+.. _OpenSSL: https://github.com/openssl/openssl/issues/19066
+.. _fork(): https://man7.org/linux/man-pages/man2/fork.2.html
+.. _signal-safety(7): https://man7.org/linux/man-pages/man7/signal-safety.7.html
+.. _async-signal-safe: https://man7.org/linux/man-pages/man7/signal-safety.7.html
+.. _execve(2): https://man7.org/linux/man-pages/man2/execve.2.html
+.. _getaddrinfo(3): https://man7.org/linux/man-pages/man3/gai_strerror.3.html
+.. _PYTHON-3406: https://jira.mongodb.org/browse/PYTHON-3406
 
 .. _connection-pooling:
 
@@ -104,7 +125,7 @@ drop below the minimum, more sockets are opened until the minimum is reached.
 
 The maximum number of milliseconds that a connection can remain idle in the
 pool before being removed and replaced can be set with ``maxIdleTimeMS``, which
-defaults to `None` (no limit).
+defaults to ``None`` (no limit).
 
 The default configuration for a :class:`~pymongo.mongo_client.MongoClient`
 works for most applications::
@@ -145,7 +166,7 @@ they are returned to the pool.
 Does PyMongo support Python 3?
 ------------------------------
 
-PyMongo supports CPython 3.6.2+ and PyPy3.6+. See the :doc:`python3` for details.
+PyMongo supports CPython 3.7+ and PyPy3.8+. See the :doc:`python3` for details.
 
 Does PyMongo support asynchronous frameworks like Gevent, asyncio, Tornado, or Twisted?
 ---------------------------------------------------------------------------------------
@@ -174,7 +195,7 @@ instance of :class:`~bson.objectid.ObjectId`. For example::
 
   >>> my_doc = {'x': 1}
   >>> collection.insert_one(my_doc)
-  <pymongo.results.InsertOneResult object at 0x7f3fc25bd640>
+  InsertOneResult(ObjectId('560db337fba522189f171720'), acknowledged=True)
   >>> my_doc
   {'x': 1, '_id': ObjectId('560db337fba522189f171720')}
 
@@ -223,8 +244,7 @@ Key order in subdocuments -- why does my query work in the shell but not PyMongo
 
   collection = MongoClient().test.collection
   collection.drop()
-  collection.insert_one({'_id': 1.0,
-                         'subdocument': SON([('b', 1.0), ('a', 1.0)])})
+  collection.insert_one({"_id": 1.0, "subdocument": SON([("b", 1.0), ("a", 1.0)])})
 
 The key-value pairs in a BSON document can have any order (except that ``_id``
 is always first). The mongo shell preserves key order when reading and writing
@@ -264,7 +284,7 @@ collection, configured to use :class:`~bson.son.SON` instead of dict:
   >>> from bson import CodecOptions, SON
   >>> opts = CodecOptions(document_class=SON)
   >>> opts
-  CodecOptions(document_class=...SON..., tz_aware=False, uuid_representation=UuidRepresentation.UNSPECIFIED, unicode_decode_error_handler='strict', tzinfo=None, type_registry=TypeRegistry(type_codecs=[], fallback_encoder=None))
+  CodecOptions(document_class=...SON..., tz_aware=False, uuid_representation=UuidRepresentation.UNSPECIFIED, unicode_decode_error_handler='strict', tzinfo=None, type_registry=TypeRegistry(type_codecs=[], fallback_encoder=None), datetime_conversion=DatetimeConversion.DATETIME)
   >>> collection_son = collection.with_options(codec_options=opts)
 
 Now, documents and subdocuments in query results are represented with
@@ -314,7 +334,7 @@ when it is serialized to BSON and used as a query. Thus you can create a
 subdocument that exactly matches the subdocument in the collection.
 
 .. seealso:: `MongoDB Manual entry on subdocument matching
-   <https://docs.mongodb.com/manual/tutorial/query-embedded-documents/>`_.
+   <https://mongodb.com/docs/manual/tutorial/query-embedded-documents/>`_.
 
 What does *CursorNotFound* cursor id not valid at server mean?
 --------------------------------------------------------------
@@ -468,16 +488,16 @@ How can I use something like Python's ``json`` module to encode my documents to 
 -------------------------------------------------------------------------------------
 :mod:`~bson.json_util` is PyMongo's built in, flexible tool for using
 Python's :mod:`json` module with BSON documents and `MongoDB Extended JSON
-<https://docs.mongodb.com/manual/reference/mongodb-extended-json/>`_. The
+<https://mongodb.com/docs/manual/reference/mongodb-extended-json/>`_. The
 :mod:`json` module won't work out of the box with all documents from PyMongo
 as PyMongo supports some special types (like :class:`~bson.objectid.ObjectId`
 and :class:`~bson.dbref.DBRef`) that are not supported in JSON.
 
 `python-bsonjs <https://pypi.python.org/pypi/python-bsonjs>`_ is a fast
 BSON to MongoDB Extended JSON converter built on top of
-`libbson <https://github.com/mongodb/libbson>`_. `python-bsonjs` does not
+`libbson <https://github.com/mongodb/libbson>`_. ``python-bsonjs`` does not
 depend on PyMongo and can offer a nice performance improvement over
-:mod:`~bson.json_util`. `python-bsonjs` works best with PyMongo when using
+:mod:`~bson.json_util`. ``python-bsonjs`` works best with PyMongo when using
 :class:`~bson.raw_bson.RawBSONDocument`.
 
 Why do I get OverflowError decoding dates stored by another language's driver?
@@ -489,9 +509,43 @@ limited to years between :data:`datetime.MINYEAR` (usually 1) and
 driver) can store BSON datetimes with year values far outside those supported
 by :class:`datetime.datetime`.
 
-There are a few ways to work around this issue. One option is to filter
-out documents with values outside of the range supported by
-:class:`datetime.datetime`::
+There are a few ways to work around this issue. Starting with PyMongo 4.3,
+:func:`bson.decode` can decode BSON datetimes in one of four ways, and can
+be specified using the ``datetime_conversion`` parameter of
+:class:`~bson.codec_options.CodecOptions`.
+
+The default option is
+:attr:`~bson.codec_options.DatetimeConversion.DATETIME`, which will
+attempt to decode as a :class:`datetime.datetime`, allowing
+:class:`~builtin.OverflowError` to occur upon out-of-range dates.
+:attr:`~bson.codec_options.DatetimeConversion.DATETIME_AUTO` alters
+this behavior to instead return :class:`~bson.datetime_ms.DatetimeMS` when
+representations are out-of-range, while returning :class:`~datetime.datetime`
+objects as before:
+
+.. doctest::
+
+    >>> from datetime import datetime
+    >>> from bson.datetime_ms import DatetimeMS
+    >>> from bson.codec_options import DatetimeConversion
+    >>> from pymongo import MongoClient
+    >>> client = MongoClient(datetime_conversion=DatetimeConversion.DATETIME_AUTO)
+    >>> client.db.collection.insert_one({"x": datetime(1970, 1, 1)})
+    InsertOneResult(ObjectId('...'), acknowledged=True)
+    >>> client.db.collection.insert_one({"x": DatetimeMS(2**62)})
+    InsertOneResult(ObjectId('...'), acknowledged=True)
+    >>> for x in client.db.collection.find():
+    ...     print(x)
+    ...
+    {'_id': ObjectId('...'), 'x': datetime.datetime(1970, 1, 1, 0, 0)}
+    {'_id': ObjectId('...'), 'x': DatetimeMS(4611686018427387904)}
+
+For other options, please refer to
+:class:`~bson.codec_options.DatetimeConversion`.
+
+Another option that does not involve setting ``datetime_conversion`` is to to
+filter out documents values outside of the range supported by
+:class:`~datetime.datetime`:
 
   >>> from datetime import datetime
   >>> coll = client.test.dates

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tools for mocking parts of PyMongo to test other parts."""
+from __future__ import annotations
 
 import contextlib
 import weakref
@@ -38,23 +39,23 @@ class MockPool(Pool):
         Pool.__init__(self, (client_context.host, client_context.port), *args, **kwargs)
 
     @contextlib.contextmanager
-    def get_socket(self, handler=None):
+    def checkout(self, handler=None):
         client = self.client
-        host_and_port = "%s:%s" % (self.mock_host, self.mock_port)
+        host_and_port = f"{self.mock_host}:{self.mock_port}"
         if host_and_port in client.mock_down_hosts:
             raise AutoReconnect("mock error")
 
         assert host_and_port in (
             client.mock_standalones + client.mock_members + client.mock_mongoses
-        ), ("bad host: %s" % host_and_port)
+        ), "bad host: %s" % host_and_port
 
-        with Pool.get_socket(self, handler) as sock_info:
-            sock_info.mock_host = self.mock_host
-            sock_info.mock_port = self.mock_port
-            yield sock_info
+        with Pool.checkout(self, handler) as conn:
+            conn.mock_host = self.mock_host
+            conn.mock_port = self.mock_port
+            yield conn
 
 
-class DummyMonitor(object):
+class DummyMonitor:
     def __init__(self, server_description, topology, pool, topology_settings):
         self._server_description = server_description
         self.opened = False
@@ -85,7 +86,7 @@ class MockMonitor(Monitor):
     def _check_once(self):
         client = self.client
         address = self._server_description.address
-        response, rtt = client.mock_hello("%s:%d" % address)
+        response, rtt = client.mock_hello("%s:%d" % address)  # type: ignore[str-format]
         return ServerDescription(address, Hello(response), rtt)
 
 
@@ -99,7 +100,7 @@ class MockClient(MongoClient):
         arbiters=None,
         down_hosts=None,
         *args,
-        **kwargs
+        **kwargs,
     ):
         """A MongoClient connected to the default server, with a mock topology.
 
@@ -144,7 +145,7 @@ class MockClient(MongoClient):
         client_options = client_context.default_client_options.copy()
         client_options.update(kwargs)
 
-        super(MockClient, self).__init__(*args, **client_options)
+        super().__init__(*args, **client_options)
 
     def kill_host(self, host):
         """Host is like 'a:1'."""

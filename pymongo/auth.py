@@ -13,33 +13,54 @@
 # limitations under the License.
 
 """Authentication helpers."""
+from __future__ import annotations
 
 import functools
 import hashlib
 import hmac
 import os
 import socket
+import typing
 from base64 import standard_b64decode, standard_b64encode
 from collections import namedtuple
-from typing import Callable, Mapping
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Mapping,
+    MutableMapping,
+    Optional,
+    cast,
+)
 from urllib.parse import quote
 
 from bson.binary import Binary
-from bson.son import SON
 from pymongo.auth_aws import _authenticate_aws
+from pymongo.auth_oidc import (
+    _authenticate_oidc,
+    _get_authenticator,
+    _OIDCAWSCallback,
+    _OIDCAzureCallback,
+    _OIDCProperties,
+)
 from pymongo.errors import ConfigurationError, OperationFailure
 from pymongo.saslprep import saslprep
+
+if TYPE_CHECKING:
+    from pymongo.hello import Hello
+    from pymongo.pool import Connection
 
 HAVE_KERBEROS = True
 _USE_PRINCIPAL = False
 try:
-    import winkerberos as kerberos
+    import winkerberos as kerberos  # type:ignore[import]
 
     if tuple(map(int, kerberos.__version__.split(".")[:2])) >= (0, 5):
         _USE_PRINCIPAL = True
 except ImportError:
     try:
-        import kerberos
+        import kerberos  # type:ignore[import]
     except ImportError:
         HAVE_KERBEROS = False
 
@@ -48,6 +69,7 @@ MECHANISMS = frozenset(
     [
         "GSSAPI",
         "MONGODB-CR",
+        "MONGODB-OIDC",
         "MONGODB-X509",
         "MONGODB-AWS",
         "PLAIN",
@@ -59,26 +81,26 @@ MECHANISMS = frozenset(
 """The authentication mechanisms supported by PyMongo."""
 
 
-class _Cache(object):
+class _Cache:
     __slots__ = ("data",)
 
     _hash_val = hash("_Cache")
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.data = None
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         # Two instances must always compare equal.
         if isinstance(other, _Cache):
             return True
         return NotImplemented
 
-    def __ne__(self, other):
+    def __ne__(self, other: object) -> bool:
         if isinstance(other, _Cache):
             return False
         return NotImplemented
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return self._hash_val
 
 
@@ -99,10 +121,17 @@ _AWSProperties = namedtuple("_AWSProperties", ["aws_session_token"])
 """Mechanism properties for MONGODB-AWS authentication."""
 
 
-def _build_credentials_tuple(mech, source, user, passwd, extra, database):
+def _build_credentials_tuple(
+    mech: str,
+    source: Optional[str],
+    user: str,
+    passwd: str,
+    extra: Mapping[str, Any],
+    database: Optional[str],
+) -> MongoCredential:
     """Build and return a mechanism specific credentials tuple."""
-    if mech not in ("MONGODB-X509", "MONGODB-AWS") and user is None:
-        raise ConfigurationError("%s requires a username." % (mech,))
+    if mech not in ("MONGODB-X509", "MONGODB-AWS", "MONGODB-OIDC") and user is None:
+        raise ConfigurationError(f"{mech} requires a username.")
     if mech == "GSSAPI":
         if source is not None and source != "$external":
             raise ValueError("authentication source must be $external or None for GSSAPI")
@@ -137,6 +166,60 @@ def _build_credentials_tuple(mech, source, user, passwd, extra, database):
         aws_props = _AWSProperties(aws_session_token=aws_session_token)
         # user can be None for temporary link-local EC2 credentials.
         return MongoCredential(mech, "$external", user, passwd, aws_props, None)
+    elif mech == "MONGODB-OIDC":
+        properties = extra.get("authmechanismproperties", {})
+        callback = properties.get("OIDC_CALLBACK")
+        human_callback = properties.get("OIDC_HUMAN_CALLBACK")
+        provider_name = properties.get("PROVIDER_NAME")
+        token_audience = properties.get("TOKEN_AUDIENCE", "")
+        default_allowed = [
+            "*.mongodb.net",
+            "*.mongodb-dev.net",
+            "*.mongodb-qa.net",
+            "*.mongodbgov.net",
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        ]
+        allowed_hosts = properties.get("ALLOWED_HOSTS", default_allowed)
+        msg = "authentication with MONGODB-OIDC requires providing either a callback or a provider_name"
+        if passwd is not None:
+            msg = "password is not supported by MONGODB-OIDC"
+            raise ConfigurationError(msg)
+        if callback or human_callback:
+            if provider_name is not None:
+                raise ConfigurationError(msg)
+            if callback and human_callback:
+                msg = "cannot set both OIDC_CALLBACK and OIDC_HUMAN_CALLBACK"
+                raise ConfigurationError(msg)
+        elif provider_name is not None:
+            if provider_name == "aws":
+                if user is not None:
+                    msg = "AWS provider for MONGODB-OIDC does not support username"
+                    raise ConfigurationError(msg)
+                callback = _OIDCAWSCallback()
+            elif provider_name == "azure":
+                passwd = None
+                if not token_audience:
+                    raise ConfigurationError(
+                        "Azure provider for MONGODB-OIDC requires a TOKEN_AUDIENCE auth mechanism property"
+                    )
+                callback = _OIDCAzureCallback(token_audience, user)
+            else:
+                raise ConfigurationError(
+                    f"unrecognized provider_name for MONGODB-OIDC: {provider_name}"
+                )
+        else:
+            raise ConfigurationError(msg)
+
+        oidc_props = _OIDCProperties(
+            callback=callback,
+            human_callback=human_callback,
+            provider_name=provider_name,
+            allowed_hosts=allowed_hosts,
+        )
+        return MongoCredential(mech, "$external", user, passwd, oidc_props, _Cache())
+
     elif mech == "PLAIN":
         source_database = source or database or "$external"
         return MongoCredential(mech, source_database, user, passwd, None, None)
@@ -147,35 +230,38 @@ def _build_credentials_tuple(mech, source, user, passwd, extra, database):
         return MongoCredential(mech, source_database, user, passwd, None, _Cache())
 
 
-def _xor(fir, sec):
-    """XOR two byte strings together (python 3.x)."""
+def _xor(fir: bytes, sec: bytes) -> bytes:
+    """XOR two byte strings together."""
     return b"".join([bytes([x ^ y]) for x, y in zip(fir, sec)])
 
 
-def _parse_scram_response(response):
+def _parse_scram_response(response: bytes) -> Dict[bytes, bytes]:
     """Split a scram response into key, value pairs."""
-    return dict(item.split(b"=", 1) for item in response.split(b","))
+    return dict(
+        typing.cast(typing.Tuple[bytes, bytes], item.split(b"=", 1))
+        for item in response.split(b",")
+    )
 
 
-def _authenticate_scram_start(credentials, mechanism):
+def _authenticate_scram_start(
+    credentials: MongoCredential, mechanism: str
+) -> tuple[bytes, bytes, MutableMapping[str, Any]]:
     username = credentials.username
     user = username.encode("utf-8").replace(b"=", b"=3D").replace(b",", b"=2C")
     nonce = standard_b64encode(os.urandom(32))
     first_bare = b"n=" + user + b",r=" + nonce
 
-    cmd = SON(
-        [
-            ("saslStart", 1),
-            ("mechanism", mechanism),
-            ("payload", Binary(b"n,," + first_bare)),
-            ("autoAuthorize", 1),
-            ("options", {"skipEmptyExchange": True}),
-        ]
-    )
+    cmd = {
+        "saslStart": 1,
+        "mechanism": mechanism,
+        "payload": Binary(b"n,," + first_bare),
+        "autoAuthorize": 1,
+        "options": {"skipEmptyExchange": True},
+    }
     return nonce, first_bare, cmd
 
 
-def _authenticate_scram(credentials, sock_info, mechanism):
+def _authenticate_scram(credentials: MongoCredential, conn: Connection, mechanism: str) -> None:
     """Authenticate using SCRAM."""
     username = credentials.username
     if mechanism == "SCRAM-SHA-256":
@@ -192,14 +278,17 @@ def _authenticate_scram(credentials, sock_info, mechanism):
     # Make local
     _hmac = hmac.HMAC
 
-    ctx = sock_info.auth_ctx
+    ctx = conn.auth_ctx
     if ctx and ctx.speculate_succeeded():
+        assert isinstance(ctx, _ScramContext)
+        assert ctx.scram_data is not None
         nonce, first_bare = ctx.scram_data
         res = ctx.speculative_authenticate
     else:
         nonce, first_bare, cmd = _authenticate_scram_start(credentials, mechanism)
-        res = sock_info.command(source, cmd)
+        res = conn.command(source, cmd)
 
+    assert res is not None
     server_first = res["payload"]
     parsed = _parse_scram_response(server_first)
     iterations = int(parsed[b"i"])
@@ -231,14 +320,12 @@ def _authenticate_scram(credentials, sock_info, mechanism):
 
     server_sig = standard_b64encode(_hmac(server_key, auth_msg, digestmod).digest())
 
-    cmd = SON(
-        [
-            ("saslContinue", 1),
-            ("conversationId", res["conversationId"]),
-            ("payload", Binary(client_final)),
-        ]
-    )
-    res = sock_info.command(source, cmd)
+    cmd = {
+        "saslContinue": 1,
+        "conversationId": res["conversationId"],
+        "payload": Binary(client_final),
+    }
+    res = conn.command(source, cmd)
 
     parsed = _parse_scram_response(res["payload"])
     if not hmac.compare_digest(parsed[b"v"], server_sig):
@@ -247,19 +334,17 @@ def _authenticate_scram(credentials, sock_info, mechanism):
     # A third empty challenge may be required if the server does not support
     # skipEmptyExchange: SERVER-44857.
     if not res["done"]:
-        cmd = SON(
-            [
-                ("saslContinue", 1),
-                ("conversationId", res["conversationId"]),
-                ("payload", Binary(b"")),
-            ]
-        )
-        res = sock_info.command(source, cmd)
+        cmd = {
+            "saslContinue": 1,
+            "conversationId": res["conversationId"],
+            "payload": Binary(b""),
+        }
+        res = conn.command(source, cmd)
         if not res["done"]:
             raise OperationFailure("SASL conversation failed to complete.")
 
 
-def _password_digest(username, password):
+def _password_digest(username: str, password: str) -> str:
     """Get a password digest to use for authentication."""
     if not isinstance(password, str):
         raise TypeError("password must be an instance of str")
@@ -268,22 +353,22 @@ def _password_digest(username, password):
     if not isinstance(username, str):
         raise TypeError("username must be an instance of str")
 
-    md5hash = hashlib.md5()
-    data = "%s:mongo:%s" % (username, password)
+    md5hash = hashlib.md5()  # noqa: S324
+    data = f"{username}:mongo:{password}"
     md5hash.update(data.encode("utf-8"))
     return md5hash.hexdigest()
 
 
-def _auth_key(nonce, username, password):
+def _auth_key(nonce: str, username: str, password: str) -> str:
     """Get an auth key to use for authentication."""
     digest = _password_digest(username, password)
-    md5hash = hashlib.md5()
-    data = "%s%s%s" % (nonce, username, digest)
+    md5hash = hashlib.md5()  # noqa: S324
+    data = f"{nonce}{username}{digest}"
     md5hash.update(data.encode("utf-8"))
     return md5hash.hexdigest()
 
 
-def _canonicalize_hostname(hostname):
+def _canonicalize_hostname(hostname: str) -> str:
     """Canonicalize hostname following MIT-krb5 behavior."""
     # https://github.com/krb5/krb5/blob/d406afa363554097ac48646a29249c04f498c88e/src/util/k5test.py#L505-L520
     af, socktype, proto, canonname, sockaddr = socket.getaddrinfo(
@@ -298,7 +383,7 @@ def _canonicalize_hostname(hostname):
     return name[0].lower()
 
 
-def _authenticate_gssapi(credentials, sock_info):
+def _authenticate_gssapi(credentials: MongoCredential, conn: Connection) -> None:
     """Authenticate using GSSAPI."""
     if not HAVE_KERBEROS:
         raise ConfigurationError(
@@ -311,7 +396,7 @@ def _authenticate_gssapi(credentials, sock_info):
         props = credentials.mechanism_properties
         # Starting here and continuing through the while loop below - establish
         # the security context. See RFC 4752, Section 3.1, first paragraph.
-        host = sock_info.address[0]
+        host = conn.address[0]
         if props.canonicalize_host_name:
             host = _canonicalize_hostname(host)
         service = props.service_name + "@" + host
@@ -358,15 +443,13 @@ def _authenticate_gssapi(credentials, sock_info):
             # Since mongo accepts base64 strings as the payload we don't
             # have to use bson.binary.Binary.
             payload = kerberos.authGSSClientResponse(ctx)
-            cmd = SON(
-                [
-                    ("saslStart", 1),
-                    ("mechanism", "GSSAPI"),
-                    ("payload", payload),
-                    ("autoAuthorize", 1),
-                ]
-            )
-            response = sock_info.command("$external", cmd)
+            cmd = {
+                "saslStart": 1,
+                "mechanism": "GSSAPI",
+                "payload": payload,
+                "autoAuthorize": 1,
+            }
+            response = conn.command("$external", cmd)
 
             # Limit how many times we loop to catch protocol / library issues
             for _ in range(10):
@@ -376,14 +459,12 @@ def _authenticate_gssapi(credentials, sock_info):
 
                 payload = kerberos.authGSSClientResponse(ctx) or ""
 
-                cmd = SON(
-                    [
-                        ("saslContinue", 1),
-                        ("conversationId", response["conversationId"]),
-                        ("payload", payload),
-                    ]
-                )
-                response = sock_info.command("$external", cmd)
+                cmd = {
+                    "saslContinue": 1,
+                    "conversationId": response["conversationId"],
+                    "payload": payload,
+                }
+                response = conn.command("$external", cmd)
 
                 if result == kerberos.AUTH_GSS_COMPLETE:
                     break
@@ -399,89 +480,84 @@ def _authenticate_gssapi(credentials, sock_info):
                 raise OperationFailure("Unknown kerberos failure during GSS_Wrap step.")
 
             payload = kerberos.authGSSClientResponse(ctx)
-            cmd = SON(
-                [
-                    ("saslContinue", 1),
-                    ("conversationId", response["conversationId"]),
-                    ("payload", payload),
-                ]
-            )
-            sock_info.command("$external", cmd)
+            cmd = {
+                "saslContinue": 1,
+                "conversationId": response["conversationId"],
+                "payload": payload,
+            }
+            conn.command("$external", cmd)
 
         finally:
             kerberos.authGSSClientClean(ctx)
 
     except kerberos.KrbError as exc:
-        raise OperationFailure(str(exc))
+        raise OperationFailure(str(exc)) from None
 
 
-def _authenticate_plain(credentials, sock_info):
+def _authenticate_plain(credentials: MongoCredential, conn: Connection) -> None:
     """Authenticate using SASL PLAIN (RFC 4616)"""
     source = credentials.source
     username = credentials.username
     password = credentials.password
-    payload = ("\x00%s\x00%s" % (username, password)).encode("utf-8")
-    cmd = SON(
-        [
-            ("saslStart", 1),
-            ("mechanism", "PLAIN"),
-            ("payload", Binary(payload)),
-            ("autoAuthorize", 1),
-        ]
-    )
-    sock_info.command(source, cmd)
+    payload = (f"\x00{username}\x00{password}").encode()
+    cmd = {
+        "saslStart": 1,
+        "mechanism": "PLAIN",
+        "payload": Binary(payload),
+        "autoAuthorize": 1,
+    }
+    conn.command(source, cmd)
 
 
-def _authenticate_x509(credentials, sock_info):
+def _authenticate_x509(credentials: MongoCredential, conn: Connection) -> None:
     """Authenticate using MONGODB-X509."""
-    ctx = sock_info.auth_ctx
+    ctx = conn.auth_ctx
     if ctx and ctx.speculate_succeeded():
         # MONGODB-X509 is done after the speculative auth step.
         return
 
-    cmd = _X509Context(credentials).speculate_command()
-    sock_info.command("$external", cmd)
+    cmd = _X509Context(credentials, conn.address).speculate_command()
+    conn.command("$external", cmd)
 
 
-def _authenticate_mongo_cr(credentials, sock_info):
+def _authenticate_mongo_cr(credentials: MongoCredential, conn: Connection) -> None:
     """Authenticate using MONGODB-CR."""
     source = credentials.source
     username = credentials.username
     password = credentials.password
     # Get a nonce
-    response = sock_info.command(source, {"getnonce": 1})
+    response = conn.command(source, {"getnonce": 1})
     nonce = response["nonce"]
     key = _auth_key(nonce, username, password)
 
     # Actually authenticate
-    query = SON([("authenticate", 1), ("user", username), ("nonce", nonce), ("key", key)])
-    sock_info.command(source, query)
+    query = {"authenticate": 1, "user": username, "nonce": nonce, "key": key}
+    conn.command(source, query)
 
 
-def _authenticate_default(credentials, sock_info):
-    if sock_info.max_wire_version >= 7:
-        if sock_info.negotiated_mechs:
-            mechs = sock_info.negotiated_mechs
+def _authenticate_default(credentials: MongoCredential, conn: Connection) -> None:
+    if conn.max_wire_version >= 7:
+        if conn.negotiated_mechs:
+            mechs = conn.negotiated_mechs
         else:
             source = credentials.source
-            cmd = sock_info.hello_cmd()
+            cmd = conn.hello_cmd()
             cmd["saslSupportedMechs"] = source + "." + credentials.username
-            mechs = sock_info.command(source, cmd, publish_events=False).get(
-                "saslSupportedMechs", []
-            )
+            mechs = conn.command(source, cmd, publish_events=False).get("saslSupportedMechs", [])
         if "SCRAM-SHA-256" in mechs:
-            return _authenticate_scram(credentials, sock_info, "SCRAM-SHA-256")
+            return _authenticate_scram(credentials, conn, "SCRAM-SHA-256")
         else:
-            return _authenticate_scram(credentials, sock_info, "SCRAM-SHA-1")
+            return _authenticate_scram(credentials, conn, "SCRAM-SHA-1")
     else:
-        return _authenticate_scram(credentials, sock_info, "SCRAM-SHA-1")
+        return _authenticate_scram(credentials, conn, "SCRAM-SHA-1")
 
 
-_AUTH_MAP: Mapping[str, Callable] = {
+_AUTH_MAP: Mapping[str, Callable[..., None]] = {
     "GSSAPI": _authenticate_gssapi,
     "MONGODB-CR": _authenticate_mongo_cr,
     "MONGODB-X509": _authenticate_x509,
     "MONGODB-AWS": _authenticate_aws,
+    "MONGODB-OIDC": _authenticate_oidc,  # type:ignore[dict-item]
     "PLAIN": _authenticate_plain,
     "SCRAM-SHA-1": functools.partial(_authenticate_scram, mechanism="SCRAM-SHA-1"),
     "SCRAM-SHA-256": functools.partial(_authenticate_scram, mechanism="SCRAM-SHA-256"),
@@ -489,35 +565,40 @@ _AUTH_MAP: Mapping[str, Callable] = {
 }
 
 
-class _AuthContext(object):
-    def __init__(self, credentials):
+class _AuthContext:
+    def __init__(self, credentials: MongoCredential, address: tuple[str, int]) -> None:
         self.credentials = credentials
-        self.speculative_authenticate = None
+        self.speculative_authenticate: Optional[Mapping[str, Any]] = None
+        self.address = address
 
     @staticmethod
-    def from_credentials(creds):
+    def from_credentials(
+        creds: MongoCredential, address: tuple[str, int]
+    ) -> Optional[_AuthContext]:
         spec_cls = _SPECULATIVE_AUTH_MAP.get(creds.mechanism)
         if spec_cls:
-            return spec_cls(creds)
+            return cast(_AuthContext, spec_cls(creds, address))
         return None
 
-    def speculate_command(self):
+    def speculate_command(self) -> Optional[MutableMapping[str, Any]]:
         raise NotImplementedError
 
-    def parse_response(self, hello):
+    def parse_response(self, hello: Hello[Mapping[str, Any]]) -> None:
         self.speculative_authenticate = hello.speculative_authenticate
 
-    def speculate_succeeded(self):
+    def speculate_succeeded(self) -> bool:
         return bool(self.speculative_authenticate)
 
 
 class _ScramContext(_AuthContext):
-    def __init__(self, credentials, mechanism):
-        super(_ScramContext, self).__init__(credentials)
-        self.scram_data = None
+    def __init__(
+        self, credentials: MongoCredential, address: tuple[str, int], mechanism: str
+    ) -> None:
+        super().__init__(credentials, address)
+        self.scram_data: Optional[tuple[bytes, bytes]] = None
         self.mechanism = mechanism
 
-    def speculate_command(self):
+    def speculate_command(self) -> Optional[MutableMapping[str, Any]]:
         nonce, first_bare, cmd = _authenticate_scram_start(self.credentials, self.mechanism)
         # The 'db' field is included only on the speculative command.
         cmd["db"] = self.credentials.source
@@ -527,23 +608,39 @@ class _ScramContext(_AuthContext):
 
 
 class _X509Context(_AuthContext):
-    def speculate_command(self):
-        cmd = SON([("authenticate", 1), ("mechanism", "MONGODB-X509")])
+    def speculate_command(self) -> MutableMapping[str, Any]:
+        cmd = {"authenticate": 1, "mechanism": "MONGODB-X509"}
         if self.credentials.username is not None:
             cmd["user"] = self.credentials.username
         return cmd
 
 
-_SPECULATIVE_AUTH_MAP: Mapping[str, Callable] = {
+class _OIDCContext(_AuthContext):
+    def speculate_command(self) -> Optional[MutableMapping[str, Any]]:
+        authenticator = _get_authenticator(self.credentials, self.address)
+        cmd = authenticator.get_spec_auth_cmd()
+        if cmd is None:
+            return None
+        cmd["db"] = self.credentials.source
+        return cmd
+
+
+_SPECULATIVE_AUTH_MAP: Mapping[str, Any] = {
     "MONGODB-X509": _X509Context,
     "SCRAM-SHA-1": functools.partial(_ScramContext, mechanism="SCRAM-SHA-1"),
     "SCRAM-SHA-256": functools.partial(_ScramContext, mechanism="SCRAM-SHA-256"),
+    "MONGODB-OIDC": _OIDCContext,
     "DEFAULT": functools.partial(_ScramContext, mechanism="SCRAM-SHA-256"),
 }
 
 
-def authenticate(credentials, sock_info):
-    """Authenticate sock_info."""
+def authenticate(
+    credentials: MongoCredential, conn: Connection, reauthenticate: bool = False
+) -> None:
+    """Authenticate connection."""
     mechanism = credentials.mechanism
     auth_func = _AUTH_MAP[mechanism]
-    auth_func(credentials, sock_info)
+    if mechanism == "MONGODB-OIDC":
+        _authenticate_oidc(credentials, conn, reauthenticate)
+    else:
+        auth_func(credentials, conn)

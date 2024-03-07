@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import itertools
 import unittest
 
 from mockupdb import MockupDB, OpMsg, going
-from operations import operations
+from operations import operations  # type: ignore[import]
 
 from pymongo import MongoClient, ReadPreference
 from pymongo.read_preferences import (
@@ -46,7 +47,6 @@ class TestMongosCommandReadMode(unittest.TestCase):
         secondary_collection = collection.with_options(read_preference=ReadPreference.SECONDARY)
 
         with going(secondary_collection.aggregate, []):
-
             command = server.receives(
                 OpMsg(
                     {
@@ -110,7 +110,7 @@ def generate_mongos_read_mode_tests():
             # Skip something like command('foo', read_preference=SECONDARY).
             continue
         test = create_mongos_read_mode_test(mode, operation)
-        test_name = "test_%s_with_mode_%s" % (operation.name.replace(" ", "_"), mode)
+        test_name = "test_{}_with_mode_{}".format(operation.name.replace(" ", "_"), mode)
         test.__name__ = test_name
         setattr(TestMongosCommandReadMode, test_name, test)
 

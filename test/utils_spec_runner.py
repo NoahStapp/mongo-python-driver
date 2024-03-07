@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Utilities for testing driver specs."""
+from __future__ import annotations
 
 import functools
 import threading
@@ -32,7 +33,7 @@ from test.utils import (
 )
 from typing import List
 
-from bson import decode, encode
+from bson import ObjectId, decode, encode
 from bson.binary import Binary
 from bson.int64 import Int64
 from bson.son import SON
@@ -49,10 +50,10 @@ from pymongo.write_concern import WriteConcern
 
 class SpecRunnerThread(threading.Thread):
     def __init__(self, name):
-        super(SpecRunnerThread, self).__init__()
+        super().__init__()
         self.name = name
         self.exc = None
-        self.setDaemon(True)
+        self.daemon = True
         self.cond = threading.Condition()
         self.ops = []
         self.stopped = False
@@ -88,7 +89,7 @@ class SpecRunner(IntegrationTest):
 
     @classmethod
     def setUpClass(cls):
-        super(SpecRunner, cls).setUpClass()
+        super().setUpClass()
         cls.mongos_clients = []
 
         # Speed up the tests by decreasing the heartbeat frequency.
@@ -98,10 +99,10 @@ class SpecRunner(IntegrationTest):
     @classmethod
     def tearDownClass(cls):
         cls.knobs.disable()
-        super(SpecRunner, cls).tearDownClass()
+        super().tearDownClass()
 
     def setUp(self):
-        super(SpecRunner, self).setUp()
+        super().setUp()
         self.targets = {}
         self.listener = None  # type: ignore
         self.pool_listener = None
@@ -170,7 +171,7 @@ class SpecRunner(IntegrationTest):
     def assertErrorLabelsOmit(self, exc, omit_labels):
         for label in omit_labels:
             self.assertFalse(
-                exc.has_error_label(label), msg="error labels should not contain %s" % (label,)
+                exc.has_error_label(label), msg=f"error labels should not contain {label}"
             )
 
     def kill_all_sessions(self):
@@ -229,7 +230,20 @@ class SpecRunner(IntegrationTest):
 
             return True
         else:
-            self.assertEqual(result, expected_result)
+
+            def _helper(expected_result, result):
+                if isinstance(expected_result, abc.Mapping):
+                    for i in expected_result.keys():
+                        self.assertEqual(expected_result[i], result[i])
+
+                elif isinstance(expected_result, list):
+                    for i, k in zip(expected_result, result):
+                        _helper(i, k)
+                else:
+                    self.assertEqual(expected_result, result)
+
+            _helper(expected_result, result)
+            return None
 
     def get_object_name(self, op):
         """Allow subclasses to override handling of 'object'
@@ -294,8 +308,8 @@ class SpecRunner(IntegrationTest):
             args = {"sessions": sessions, "collection": collection}
             args.update(arguments)
             arguments = args
-        result = cmd(**dict(arguments))
 
+        result = cmd(**dict(arguments))
         # Cleanup open change stream cursors.
         if name == "watch":
             self.addCleanup(result.close)
@@ -324,23 +338,24 @@ class SpecRunner(IntegrationTest):
         if expect_error(op):
             with self.assertRaises(self.allowable_errors(op), msg=op["name"]) as context:
                 self.run_operation(sessions, collection, op.copy())
-
+            exc = context.exception
             if expect_error_message(expected_result):
-                if isinstance(context.exception, BulkWriteError):
-                    errmsg = str(context.exception.details).lower()
+                if isinstance(exc, BulkWriteError):
+                    errmsg = str(exc.details).lower()
                 else:
-                    errmsg = str(context.exception).lower()
+                    errmsg = str(exc).lower()
                 self.assertIn(expected_result["errorContains"].lower(), errmsg)
             if expect_error_code(expected_result):
-                self.assertEqual(
-                    expected_result["errorCodeName"], context.exception.details.get("codeName")
-                )
+                self.assertEqual(expected_result["errorCodeName"], exc.details.get("codeName"))
             if expect_error_labels_contain(expected_result):
-                self.assertErrorLabelsContain(
-                    context.exception, expected_result["errorLabelsContain"]
-                )
+                self.assertErrorLabelsContain(exc, expected_result["errorLabelsContain"])
             if expect_error_labels_omit(expected_result):
-                self.assertErrorLabelsOmit(context.exception, expected_result["errorLabelsOmit"])
+                self.assertErrorLabelsOmit(exc, expected_result["errorLabelsOmit"])
+            if expect_timeout_error(expected_result):
+                self.assertIsInstance(exc, PyMongoError)
+                if not exc.timeout:
+                    # Re-raise the exception for better diagnostics.
+                    raise exc
 
             # Reraise the exception if we're in the with_transaction
             # callback.
@@ -360,16 +375,16 @@ class SpecRunner(IntegrationTest):
 
     # TODO: factor with test_command_monitoring.py
     def check_events(self, test, listener, session_ids):
-        res = listener.results
+        events = listener.started_events
         if not len(test["expectations"]):
             return
 
         # Give a nicer message when there are missing or extra events
-        cmds = decode_raw([event.command for event in res["started"]])
-        self.assertEqual(len(res["started"]), len(test["expectations"]), cmds)
+        cmds = decode_raw([event.command for event in events])
+        self.assertEqual(len(events), len(test["expectations"]), cmds)
         for i, expectation in enumerate(test["expectations"]):
             event_type = next(iter(expectation))
-            event = res["started"][i]
+            event = events[i]
 
             # The tests substitute 42 for any number other than 0.
             if event.command_name == "getMore" and event.command["getMore"]:
@@ -412,12 +427,12 @@ class SpecRunner(IntegrationTest):
                     for key, val in expected.items():
                         if val is None:
                             if key in actual:
-                                self.fail("Unexpected key [%s] in %r" % (key, actual))
+                                self.fail(f"Unexpected key [{key}] in {actual!r}")
                         elif key not in actual:
-                            self.fail("Expected key [%s] in %r" % (key, actual))
+                            self.fail(f"Expected key [{key}] in {actual!r}")
                         else:
                             self.assertEqual(
-                                val, decode_raw(actual[key]), "Key [%s] in %s" % (key, actual)
+                                val, decode_raw(actual[key]), f"Key [{key}] in {actual}"
                             )
                 else:
                     self.assertEqual(actual, expected)
@@ -440,7 +455,8 @@ class SpecRunner(IntegrationTest):
 
     def run_test_ops(self, sessions, collection, test):
         """Added to allow retryable writes spec to override a test's
-        operation."""
+        operation.
+        """
         self.run_operations(sessions, collection, test["operations"])
 
     def parse_client_options(self, opts):
@@ -453,13 +469,20 @@ class SpecRunner(IntegrationTest):
         """Allow specs to override a test's setup."""
         db_name = self.get_scenario_db_name(scenario_def)
         coll_name = self.get_scenario_coll_name(scenario_def)
-        db = client_context.client.get_database(db_name, write_concern=WriteConcern(w="majority"))
-        coll = db[coll_name]
-        coll.drop()
-        db.create_collection(coll_name)
-        if scenario_def["data"]:
-            # Load data.
-            coll.insert_many(scenario_def["data"])
+        documents = scenario_def["data"]
+
+        # Setup the collection with as few majority writes as possible.
+        db = client_context.client.get_database(db_name)
+        coll_exists = bool(db.list_collection_names(filter={"name": coll_name}))
+        if coll_exists:
+            db[coll_name].delete_many({})
+        # Only use majority wc only on the final write.
+        wc = WriteConcern(w="majority")
+        if documents:
+            db.get_collection(coll_name, write_concern=wc).insert_many(documents)
+        elif not coll_exists:
+            # Ensure collection exists.
+            db.create_collection(coll_name, write_concern=wc)
 
     def run_scenario(self, scenario_def, test):
         self.maybe_skip_scenario(test)
@@ -599,6 +622,13 @@ def expect_error_labels_omit(expected_result):
     return False
 
 
+def expect_timeout_error(expected_result):
+    if isinstance(expected_result, dict):
+        return expected_result["isTimeoutError"]
+
+    return False
+
+
 def expect_error(op):
     expected_result = op.get("result")
     return (
@@ -607,6 +637,7 @@ def expect_error(op):
         or expect_error_code(expected_result)
         or expect_error_labels_contain(expected_result)
         or expect_error_labels_omit(expected_result)
+        or expect_timeout_error(expected_result)
     )
 
 
@@ -626,6 +657,11 @@ def decode_raw(val):
 TYPES = {
     "binData": Binary,
     "long": Int64,
+    "int": int,
+    "string": str,
+    "objectId": ObjectId,
+    "object": dict,
+    "array": list,
 }
 
 
@@ -636,7 +672,11 @@ def wrap_types(val):
     if isinstance(val, abc.Mapping):
         typ = val.get("$$type")
         if typ:
-            return CompareType(TYPES[typ])
+            if isinstance(typ, str):
+                types = TYPES[typ]
+            else:
+                types = tuple(TYPES[t] for t in typ)
+            return CompareType(types)
         d = {}
         for key in val:
             d[key] = wrap_types(val[key])

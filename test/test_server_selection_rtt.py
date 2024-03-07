@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test the topology module."""
+from __future__ import annotations
 
 import json
 import os
@@ -57,7 +58,7 @@ def create_tests():
 
             # Construct test from scenario.
             new_test = create_test(scenario_def)
-            test_name = "test_%s_%s" % (dirname, os.path.splitext(filename)[0])
+            test_name = f"test_{dirname}_{os.path.splitext(filename)[0]}"
 
             new_test.__name__ = test_name
             setattr(TestAllScenarios, new_test.__name__, new_test)

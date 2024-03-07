@@ -3,11 +3,10 @@
 PyMongo 4 Migration Guide
 =========================
 
-.. contents::
-
 .. testsetup::
 
   from pymongo import MongoClient, ReadPreference
+
   client = MongoClient()
   database = client.my_database
   collection = database.my_collection
@@ -65,6 +64,8 @@ get the same behavior.
 MongoClient
 -----------
 
+.. _pymongo4-migration-direct-connection:
+
 ``directConnection`` defaults to False
 ......................................
 
@@ -73,6 +74,28 @@ MongoClient
 allowing for the automatic discovery of replica sets. This means that if you
 want a direct connection to a single server you must pass
 ``directConnection=True`` as a URI option or keyword argument.
+
+If you see any :exc:`~pymongo.errors.ServerSelectionTimeoutError`'s after upgrading from PyMongo 3 to 4.x, you likely
+need to add ``directConnection=True`` when creating the client.
+Here are some example errors:
+
+.. code-block::
+
+        pymongo.errors.ServerSelectionTimeoutError: mongo_node2: [Errno 8] nodename nor servname
+        provided, or not known,mongo_node1:27017
+
+.. code-block::
+
+        ServerSelectionTimeoutError: No servers match selector "Primary()", Timeout: 30s,
+        Topology Description: ...
+
+
+Additionally, the "isWritablePrimary" attribute of a hello command sent back by the server will
+always be True if ``directConnection=False``::
+
+   >>> client.admin.command('hello')['isWritablePrimary']
+   True
+
 
 The waitQueueMultiple parameter is removed
 ..........................................
@@ -88,7 +111,7 @@ The socketKeepAlive parameter is removed
 
 Removed the ``socketKeepAlive`` keyword argument to
 :class:`~pymongo.mongo_client.MongoClient`. PyMongo now always enables TCP
-keepalive. For more information see the `documentation <https://docs.mongodb.com/manual/faq/diagnostics/#does-tcp-keepalive-time-affect-mongodb-deployments->`_.
+keepalive. For more information see the `documentation <https://mongodb.com/docs/manual/faq/diagnostics/#does-tcp-keepalive-time-affect-mongodb-deployments->`_.
 
 Renamed URI options
 ...................
@@ -138,7 +161,7 @@ instead. For example::
 
     client.admin.command('fsync', lock=True)
 
-.. _fsync command: https://docs.mongodb.com/manual/reference/command/fsync/
+.. _fsync command: https://mongodb.com/docs/manual/reference/command/fsync/
 
 MongoClient.unlock is removed
 .............................
@@ -149,7 +172,7 @@ Removed :meth:`pymongo.mongo_client.MongoClient.unlock`. Run the
 
      client.admin.command('fsyncUnlock')
 
-.. _fsyncUnlock command: https://docs.mongodb.com/manual/reference/command/fsyncUnlock/
+.. _fsyncUnlock command: https://mongodb.com/docs/manual/reference/command/fsyncUnlock/
 
 MongoClient.is_locked is removed
 ................................
@@ -160,7 +183,7 @@ Removed :attr:`pymongo.mongo_client.MongoClient.is_locked`. Run the
 
     is_locked = client.admin.command('currentOp').get('fsyncLock')
 
-.. _currentOp command: https://docs.mongodb.com/manual/reference/command/currentOp/
+.. _currentOp command: https://mongodb.com/docs/manual/reference/command/currentOp/
 
 MongoClient.database_names is removed
 .....................................
@@ -196,7 +219,7 @@ can be changed to this::
     max_message_size = doc['maxMessageSizeBytes']
     max_write_batch_size = doc['maxWriteBatchSize']
 
-.. _hello command: https://docs.mongodb.com/manual/reference/command/hello/
+.. _hello command: https://mongodb.com/docs/manual/reference/command/hello/
 
 MongoClient.event_listeners and other configuration option helpers are removed
 ..............................................................................
@@ -229,12 +252,30 @@ can be changed to this::
     client.options.pool_options.min_pool_size
     client.options.pool_options.max_idle_time_seconds
 
+.. _tz_aware_default_change:
+
 ``tz_aware`` defaults to ``False``
 ..................................
 
-``tz_aware``, an argument for :class:`~bson.json_util.JSONOptions`,
-now defaults to ``False`` instead of ``True``. ``json_util.loads`` now
-decodes datetime as naive by default.
+The ``tz_aware`` argument to :class:`~bson.json_util.JSONOptions`
+now defaults to ``False`` instead of ``True``. :meth:`bson.json_util.loads`
+now decodes datetime as naive by default::
+
+    >>> from bson import json_util
+    >>> s = '{"dt": {"$date": "2022-05-09T17:54:00Z"}}'
+    >>> json_util.loads(s)
+    {'dt': datetime.datetime(2022, 5, 9, 17, 54)}
+
+To retain the PyMongo 3 behavior set ``tz_aware=True``, for example::
+
+    >>> from bson import json_util
+    >>> opts = json_util.JSONOptions(tz_aware=True)
+    >>> s = '{"dt": {"$date": "2022-05-09T17:54:00Z"}}'
+    >>> json_util.loads(s, json_options=opts)
+    {'dt': datetime.datetime(2022, 5, 9, 17, 54, tzinfo=<bson.tz_util.FixedOffset object at 0x7fd1ebc1add0>)}
+
+This change was made to match the default behavior of
+:class:`~bson.codec_options.CodecOptions` and :class:`bson.decode`.
 
 MongoClient cannot execute operations after ``close()``
 .......................................................
@@ -309,7 +350,7 @@ can be changed to this::
 
     ops = list(client.admin.aggregate([{'$currentOp': {}}]))
 
-.. _$currentOp aggregation pipeline stage: https://docs.mongodb.com/manual/reference/operator/aggregation/currentOp/
+.. _$currentOp aggregation pipeline stage: https://mongodb.com/docs/manual/reference/operator/aggregation/currentOp/
 
 Database.add_user is removed
 ............................
@@ -332,8 +373,8 @@ Or change roles::
 
   db.command("updateUser", "user", roles=["readWrite"])
 
-.. _createUser command: https://docs.mongodb.com/manual/reference/command/createUser/
-.. _updateUser command: https://docs.mongodb.com/manual/reference/command/updateUser/
+.. _createUser command: https://mongodb.com/docs/manual/reference/command/createUser/
+.. _updateUser command: https://mongodb.com/docs/manual/reference/command/updateUser/
 
 Database.remove_user is removed
 ...............................
@@ -343,7 +384,7 @@ PyMongo 3.6. Use the `dropUser command`_ instead::
 
   db.command("dropUser", "user")
 
-.. _dropUser command: https://docs.mongodb.com/manual/reference/command/createUser/
+.. _dropUser command: https://mongodb.com/docs/manual/reference/command/createUser/
 
 Database.profiling_level is removed
 ...................................
@@ -358,7 +399,7 @@ Can be changed to this::
   profile = db.command('profile', -1)
   level = profile['was']
 
-.. _profile command: https://docs.mongodb.com/manual/reference/command/profile/
+.. _profile command: https://mongodb.com/docs/manual/reference/command/profile/
 
 Database.set_profiling_level is removed
 .......................................
@@ -384,7 +425,7 @@ Can be changed to this::
 
   profiling_info = list(db['system.profile'].find())
 
-.. _'system.profile' collection: https://docs.mongodb.com/manual/reference/database-profiler/
+.. _'system.profile' collection: https://mongodb.com/docs/manual/reference/database-profiler/
 
 Database.__bool__ raises NotImplementedError
 ............................................
@@ -542,10 +583,10 @@ Can be changed to this::
    |             | ``{'$geoWithin': {'$centerSphere': [[<x>,<y>], <radius>]}}`` |
    +-------------+--------------------------------------------------------------+
 
-.. _$expr: https://docs.mongodb.com/manual/reference/operator/query/expr/
-.. _$geoWithin: https://docs.mongodb.com/manual/reference/operator/query/geoWithin/
-.. _$center: https://docs.mongodb.com/manual/reference/operator/query/center/
-.. _$centerSphere: https://docs.mongodb.com/manual/reference/operator/query/centerSphere/
+.. _$expr: https://mongodb.com/docs/manual/reference/operator/query/expr/
+.. _$geoWithin: https://mongodb.com/docs/manual/reference/operator/query/geoWithin/
+.. _$center: https://mongodb.com/docs/manual/reference/operator/query/center/
+.. _$centerSphere: https://mongodb.com/docs/manual/reference/operator/query/centerSphere/
 
 Collection.initialize_ordered_bulk_op and initialize_unordered_bulk_op is removed
 .................................................................................
@@ -600,7 +641,7 @@ deprecated in PyMongo 3.5. MongoDB 4.2 removed the `group command`_.
 Use :meth:`~pymongo.collection.Collection.aggregate` with the ``$group`` stage
 instead.
 
-.. _group command: https://docs.mongodb.com/manual/reference/command/group/
+.. _group command: https://mongodb.com/docs/manual/reference/command/group/
 
 Collection.map_reduce and Collection.inline_map_reduce are removed
 ..................................................................
@@ -611,10 +652,10 @@ Migrate to :meth:`~pymongo.collection.Collection.aggregate` or run the
 `mapReduce command`_ directly with :meth:`~pymongo.database.Database.command`
 instead. For more guidance on this migration see:
 
-- https://docs.mongodb.com/manual/reference/map-reduce-to-aggregation-pipeline/
-- https://docs.mongodb.com/manual/reference/aggregation-commands-comparison/
+- https://mongodb.com/docs/manual/reference/map-reduce-to-aggregation-pipeline/
+- https://mongodb.com/docs/manual/reference/aggregation-commands-comparison/
 
-.. _mapReduce command: https://docs.mongodb.com/manual/reference/command/mapReduce/
+.. _mapReduce command: https://mongodb.com/docs/manual/reference/command/mapReduce/
 
 Collection.ensure_index is removed
 ..................................
@@ -651,7 +692,7 @@ can be changed to this::
 
   >>> result = database.command('reIndex', 'my_collection')
 
-.. _reIndex command: https://docs.mongodb.com/manual/reference/command/reIndex/
+.. _reIndex command: https://mongodb.com/docs/manual/reference/command/reIndex/
 
 The modifiers parameter is removed
 ..................................
@@ -829,7 +870,7 @@ GridFS changes
 disable_md5 parameter is removed
 ................................
 
-Removed the `disable_md5` option for :class:`~gridfs.GridFSBucket` and
+Removed the ``disable_md5`` option for :class:`~gridfs.GridFSBucket` and
 :class:`~gridfs.GridFS`. GridFS no longer generates checksums.
 Applications that desire a file digest should implement it outside GridFS
 and store it with other file metadata. For example::
@@ -837,12 +878,11 @@ and store it with other file metadata. For example::
   import hashlib
   my_db = MongoClient().test
   fs = GridFSBucket(my_db)
-  grid_in = fs.open_upload_stream("test_file")
-  file_data = b'...'
-  sha356 = hashlib.sha256(file_data).hexdigest()
-  grid_in.write(file_data)
-  grid_in.sha356 = sha356  # Set the custom 'sha356' field
-  grid_in.close()
+  with fs.open_upload_stream("test_file") as grid_in:
+      file_data = b'...'
+      sha356 = hashlib.sha256(file_data).hexdigest()
+      grid_in.write(file_data)
+      grid_in.sha356 = sha356  # Set the custom 'sha356' field
 
 Note that for large files, the checksum may need to be computed in chunks
 to avoid the excessive memory needed to load the entire file at once.
@@ -865,7 +905,7 @@ Removed :meth:`pymongo.mongo_client.MongoClient.close_cursor` and
 with :meth:`pymongo.cursor.Cursor.close` or
 :meth:`pymongo.command_cursor.CommandCursor.close`.
 
-.. _killCursors command: https://docs.mongodb.com/manual/reference/command/killCursors/
+.. _killCursors command: https://mongodb.com/docs/manual/reference/command/killCursors/
 
 Database.eval, Database.system_js, and SystemJS are removed
 ...........................................................
@@ -902,7 +942,7 @@ Collection.parallel_scan is removed
 Removed :meth:`~pymongo.collection.Collection.parallel_scan`. MongoDB 4.2
 removed the `parallelCollectionScan command`_.  There is no replacement.
 
-.. _parallelCollectionScan command: https://docs.mongodb.com/manual/reference/command/parallelCollectionScan/
+.. _parallelCollectionScan command: https://mongodb.com/docs/manual/reference/command/parallelCollectionScan/
 
 pymongo.message helpers are removed
 ...................................
@@ -934,12 +974,19 @@ subdocument containing a ``$ref`` field would be decoded as a
 Encoding a UUID raises an error by default
 ..........................................
 
-The default uuid_representation for :class:`~bson.codec_options.CodecOptions`,
+The default ``uuid_representation`` for :class:`~bson.codec_options.CodecOptions`,
 :class:`~bson.json_util.JSONOptions`, and
 :class:`~pymongo.mongo_client.MongoClient` has been changed from
 :data:`bson.binary.UuidRepresentation.PYTHON_LEGACY` to
 :data:`bson.binary.UuidRepresentation.UNSPECIFIED`. Attempting to encode a
 :class:`uuid.UUID` instance to BSON or JSON now produces an error by default.
+If you were using UUIDs previously, you will need to set your ``uuid_representation`` to
+:data:`bson.binary.UuidRepresentation.PYTHON_LEGACY` to avoid data corruption. If you do not have UUIDs,
+then you should set :data:`bson.binary.UuidRepresentation.STANDARD`. If you do not explicitly set a value,
+you will receive an error like this when attempting to encode a :class:`uuid.UUID`::
+
+    ValueError: cannot encode native uuid.UUID with UuidRepresentation.UNSPECIFIED. UUIDs can be manually converted...
+
 See :ref:`handling-uuid-data-example` for details.
 
 Additional BSON classes implement ``__slots__``

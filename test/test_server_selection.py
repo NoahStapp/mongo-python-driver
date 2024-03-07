@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test the topology module's Server Selection Spec implementation."""
+from __future__ import annotations
 
 import os
 import sys
@@ -20,9 +21,11 @@ import sys
 from pymongo import MongoClient, ReadPreference
 from pymongo.errors import ServerSelectionTimeoutError
 from pymongo.hello import HelloCompat
+from pymongo.operations import _Op
 from pymongo.server_selectors import writable_server_selector
 from pymongo.settings import TopologySettings
 from pymongo.topology import Topology
+from pymongo.typings import strip_optional
 
 sys.path[0:0] = [""]
 
@@ -47,7 +50,7 @@ _TEST_PATH = os.path.join(
 )
 
 
-class SelectionStoreSelector(object):
+class SelectionStoreSelector:
     """No-op selector that keeps track of what was passed to it."""
 
     def __init__(self):
@@ -85,7 +88,10 @@ class TestCustomServerSelectorFunction(IntegrationTest):
             )
 
         wait_until(all_hosts_started, "receive heartbeat from all hosts")
-        expected_port = max([n.address[1] for n in client._topology._description.readable_servers])
+
+        expected_port = max(
+            [strip_optional(n.address[1]) for n in client._topology._description.readable_servers]
+        )
 
         # Insert 1 record and access it 10 times.
         coll.insert_one({"name": "John Doe"})
@@ -93,13 +99,13 @@ class TestCustomServerSelectorFunction(IntegrationTest):
             coll.find_one({"name": "John Doe"})
 
         # Confirm all find commands are run against appropriate host.
-        for command in listener.results["started"]:
+        for command in listener.started_events:
             if command.command_name == "find":
                 self.assertEqual(command.connection_id[1], expected_port)
 
     def test_invalid_server_selector(self):
         # Client initialization must fail if server_selector is not callable.
-        for selector_candidate in [list(), 10, "string", {}]:
+        for selector_candidate in [[], 10, "string", {}]:
             with self.assertRaisesRegex(ValueError, "must be a callable"):
                 MongoClient(connect=False, server_selector=selector_candidate)
 
@@ -153,7 +159,7 @@ class TestCustomServerSelectorFunction(IntegrationTest):
 
         # Invoke server selection and assert no filtering based on latency
         # prior to custom server selection logic kicking in.
-        server = topology.select_server(ReadPreference.NEAREST)
+        server = topology.select_server(ReadPreference.NEAREST, _Op.TEST)
         assert selector.selection is not None
         self.assertEqual(len(selector.selection), len(topology.description.server_descriptions()))
 
@@ -188,7 +194,7 @@ class TestCustomServerSelectorFunction(IntegrationTest):
 
         # Invoke server selection and assert no calls to our custom selector.
         with self.assertRaisesRegex(ServerSelectionTimeoutError, "No primary available for writes"):
-            topology.select_server(writable_server_selector, server_selection_timeout=0.1)
+            topology.select_server(writable_server_selector, _Op.TEST, server_selection_timeout=0.1)
         self.assertEqual(selector.call_count, 0)
 
 

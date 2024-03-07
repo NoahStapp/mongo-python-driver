@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Run the SRV support tests."""
+from __future__ import annotations
 
 import sys
 from time import sleep
@@ -32,7 +33,7 @@ from pymongo.srv_resolver import _HAVE_DNSPYTHON
 WAIT_TIME = 0.1
 
 
-class SrvPollingKnobs(object):
+class SrvPollingKnobs:
     def __init__(
         self,
         ttl_time=None,
@@ -86,7 +87,6 @@ class SrvPollingKnobs(object):
 
 
 class TestSrvPolling(unittest.TestCase):
-
     BASE_SRV_RESPONSE = [
         ("localhost.test.build.10gen.cc", 27017),
         ("localhost.test.build.10gen.cc", 27018),
@@ -130,7 +130,14 @@ class TestSrvPolling(unittest.TestCase):
         (WAIT_TIME * 10) seconds. Also check that the resolver is called at
         least once.
         """
-        sleep(WAIT_TIME * 10)
+
+        def predicate():
+            if set(expected_nodelist) == set(self.get_nodelist(client)):
+                return pymongo.srv_resolver._SrvResolver.get_hosts_and_min_ttl.call_count >= 1
+            return False
+
+        wait_until(predicate, "Node list equals expected nodelist", timeout=100 * WAIT_TIME)
+
         nodelist = self.get_nodelist(client)
         if set(expected_nodelist) != set(nodelist):
             msg = "Client nodelist %s changed unexpectedly (expected %s)"

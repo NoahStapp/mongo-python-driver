@@ -13,11 +13,12 @@
 # limitations under the License.
 
 """Test the pymongo ocsp_support module."""
+from __future__ import annotations
 
 import random
 import sys
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from os import urandom
 from time import sleep
 from typing import Any
@@ -61,7 +62,7 @@ class TestOcspCache(unittest.TestCase):
         )
 
     def _create_mock_response(self, this_update_delta_seconds, next_update_delta_seconds):
-        now = datetime.utcnow()
+        now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
         this_update = now + timedelta(seconds=this_update_delta_seconds)
         if next_update_delta_seconds is not None:
             next_update = now + timedelta(seconds=next_update_delta_seconds)

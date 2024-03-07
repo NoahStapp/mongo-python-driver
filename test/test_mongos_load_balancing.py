@@ -13,9 +13,12 @@
 # limitations under the License.
 
 """Test MongoClient's mongos load balancing using a mock."""
+from __future__ import annotations
 
 import sys
 import threading
+
+from pymongo.operations import _Op
 
 sys.path[0:0] = [""]
 
@@ -36,7 +39,7 @@ def setUpModule():
 
 class SimpleOp(threading.Thread):
     def __init__(self, client):
-        super(SimpleOp, self).__init__()
+        super().__init__()
         self.client = client
         self.passed = False
 
@@ -58,9 +61,10 @@ def do_simple_op(client, nthreads):
 
 
 def writable_addresses(topology):
-    return set(
-        server.description.address for server in topology.select_servers(writable_server_selector)
-    )
+    return {
+        server.description.address
+        for server in topology.select_servers(writable_server_selector, _Op.TEST)
+    }
 
 
 class TestMongosLoadBalancing(MockClientTest):
@@ -71,7 +75,7 @@ class TestMongosLoadBalancing(MockClientTest):
             mongoses=["a:1", "b:2", "c:3"],
             host="a:1,b:2,c:3",
             connect=False,
-            **kwargs
+            **kwargs,
         )
         self.addCleanup(mock_client.close)
 
@@ -134,7 +138,7 @@ class TestMongosLoadBalancing(MockClientTest):
         topology = client._topology
 
         # All are within a 30-ms latency window, see self.mock_client().
-        self.assertEqual(set([("a", 1), ("b", 2), ("c", 3)]), writable_addresses(topology))
+        self.assertEqual({("a", 1), ("b", 2), ("c", 3)}, writable_addresses(topology))
 
         # No error
         client.admin.command("ping")
@@ -144,7 +148,7 @@ class TestMongosLoadBalancing(MockClientTest):
         # No error
         client.db.command("ping")
         # Our chosen mongos goes down.
-        client.kill_host("%s:%s" % next(iter(client.nodes)))
+        client.kill_host("{}:{}".format(*next(iter(client.nodes))))
         try:
             client.db.command("ping")
         except:
@@ -175,13 +179,13 @@ class TestMongosLoadBalancing(MockClientTest):
         self.assertEqual(TOPOLOGY_TYPE.Sharded, topology.description.topology_type)
 
         # a and b are within the 15-ms latency window, see self.mock_client().
-        self.assertEqual(set([("a", 1), ("b", 2)]), writable_addresses(topology))
+        self.assertEqual({("a", 1), ("b", 2)}, writable_addresses(topology))
 
         client.mock_rtts["a:1"] = 0.045
 
         # Discover only b is within latency window.
         wait_until(
-            lambda: set([("b", 2)]) == writable_addresses(topology),
+            lambda: {("b", 2)} == writable_addresses(topology),
             'discover server "a" is too far',
         )
 

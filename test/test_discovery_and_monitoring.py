@@ -13,21 +13,25 @@
 # limitations under the License.
 
 """Test the topology module."""
+from __future__ import annotations
 
 import asyncio
 import os
+import socketserver
 import sys
 import threading
-import time
+
+from pymongo.monitoring import ServerHeartbeatFailedEvent, ServerHeartbeatStartedEvent
 
 sys.path[0:0] = [""]
 
 from test import IntegrationTest, unittest
 from test.pymongo_mocks import DummyMonitor
+from test.unified_format import generate_test_classes
 from test.utils import (
     CMAPListener,
     HeartbeatEventListener,
-    TestCreator,
+    HeartbeatEventsListListener,
     assertion_context,
     client_context,
     get_pool,
@@ -36,10 +40,10 @@ from test.utils import (
     single_client,
     wait_until,
 )
-from test.utils_spec_runner import SpecRunner, SpecRunnerThread
+from unittest.mock import patch
 
 from bson import Timestamp, json_util
-from pymongo import common, monitoring
+from pymongo import MongoClient, common, monitoring
 from pymongo.errors import (
     AutoReconnect,
     ConfigurationError,
@@ -56,7 +60,7 @@ from pymongo.topology_description import TOPOLOGY_TYPE
 from pymongo.uri_parser import parse_uri
 
 # Location of JSON test specifications.
-_TEST_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "discovery_and_monitoring")
+SDAM_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "discovery_and_monitoring")
 
 
 def create_mock_topology(uri, monitor_class=DummyMonitor):
@@ -97,7 +101,7 @@ def got_app_error(topology, app_error):
     when = app_error["when"]
     max_wire_version = app_error["maxWireVersion"]
     # XXX: We could get better test coverage by mocking the errors on the
-    # Pool/SocketInfo.
+    # Pool/Connection.
     try:
         if error_type == "command":
             _check_command_response(app_error["response"], max_wire_version)
@@ -107,15 +111,15 @@ def got_app_error(topology, app_error):
         elif error_type == "timeout":
             raise NetworkTimeout("mock network timeout error")
         else:
-            raise AssertionError("unknown error type: %s" % (error_type,))
-        assert False
+            raise AssertionError(f"unknown error type: {error_type}")
+        raise AssertionError
     except (AutoReconnect, NotPrimaryError, OperationFailure) as e:
         if when == "beforeHandshakeCompletes":
             completed_handshake = False
         elif when == "afterHandshakeCompletes":
             completed_handshake = True
         else:
-            assert False, "Unknown when field %s" % (when,)
+            raise AssertionError(f"Unknown when field {when}")
 
         topology.handle_error(
             server_address,
@@ -204,7 +208,7 @@ def create_test(scenario_def):
         for i, phase in enumerate(scenario_def["phases"]):
             # Including the phase description makes failures easier to debug.
             description = phase.get("description", str(i))
-            with assertion_context("phase: %s" % (description,)):
+            with assertion_context(f"phase: {description}"):
                 for response in phase.get("responses", []):
                     got_hello(c, common.partition_node(response[0]), response[1])
 
@@ -217,8 +221,11 @@ def create_test(scenario_def):
 
 
 def create_tests():
-    for dirpath, _, filenames in os.walk(_TEST_PATH):
+    for dirpath, _, filenames in os.walk(SDAM_PATH):
         dirname = os.path.split(dirpath)[-1]
+        # SDAM unified tests are handled separately.
+        if dirname == "unified":
+            continue
 
         for filename in filenames:
             if os.path.splitext(filename)[1] != ".json":
@@ -228,7 +235,7 @@ def create_tests():
 
             # Construct test from scenario.
             new_test = create_test(scenario_def)
-            test_name = "test_%s_%s" % (dirname, os.path.splitext(filename)[0])
+            test_name = f"test_{dirname}_{os.path.splitext(filename)[0]}"
 
             new_test.__name__ = test_name
             setattr(TestAllScenarios, new_test.__name__, new_test)
@@ -274,7 +281,7 @@ class TestIgnoreStaleErrors(IntegrationTest):
         client.admin.command("ping")
         pool = get_pool(client)
         starting_generation = pool.gen.get_overall()
-        wait_until(lambda: len(pool.sockets) == N_THREADS, "created sockets")
+        wait_until(lambda: len(pool.conns) == N_THREADS, "created conns")
 
         async def mock_command(*args, **kwargs):
             # Synchronize all threads to ensure they use the same generation.
@@ -344,108 +351,99 @@ class TestPoolManagement(IntegrationTest):
             listener.wait_for_event(monitoring.PoolReadyEvent, 1)
 
 
-class TestIntegration(SpecRunner):
-    # Location of JSON test specifications.
-    TEST_PATH = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "discovery_and_monitoring_integration"
-    )
+class TestServerMonitoringMode(IntegrationTest):
+    @client_context.require_no_serverless
+    @client_context.require_no_load_balancer
+    def setUp(self):
+        super().setUp()
 
-    def _event_count(self, event):
-        if event == "ServerMarkedUnknownEvent":
+    def test_rtt_connection_is_enabled_stream(self):
+        client = rs_or_single_client(serverMonitoringMode="stream")
+        self.addCleanup(client.close)
+        client.admin.command("ping")
 
-            def marked_unknown(e):
-                return (
-                    isinstance(e, monitoring.ServerDescriptionChangedEvent)
-                    and not e.new_description.is_server_type_known
-                )
+        def predicate():
+            for _, server in client._topology._servers.items():
+                monitor = server._monitor
+                if not monitor._stream:
+                    return False
+                if client_context.version >= (4, 4):
+                    if monitor._rtt_monitor._executor._thread is None:
+                        return False
+                else:
+                    if monitor._rtt_monitor._executor._thread is not None:
+                        return False
+            return True
 
-            assert self.server_listener is not None
-            return len(self.server_listener.matching(marked_unknown))
-        # Only support CMAP events for now.
-        self.assertTrue(event.startswith("Pool") or event.startswith("Conn"))
-        event_type = getattr(monitoring, event)
-        assert self.pool_listener is not None
-        return self.pool_listener.event_count(event_type)
+        wait_until(predicate, "find all RTT monitors")
 
-    def assert_event_count(self, event, count):
-        """Run the assertEventCount test operation.
+    def test_rtt_connection_is_disabled_poll(self):
+        client = rs_or_single_client(serverMonitoringMode="poll")
+        self.addCleanup(client.close)
+        self.assert_rtt_connection_is_disabled(client)
 
-        Assert the given event was published exactly `count` times.
-        """
-        self.assertEqual(self._event_count(event), count, "expected %s not %r" % (count, event))
+    def test_rtt_connection_is_disabled_auto(self):
+        envs = [
+            {"AWS_EXECUTION_ENV": "AWS_Lambda_python3.9"},
+            {"FUNCTIONS_WORKER_RUNTIME": "python"},
+            {"K_SERVICE": "gcpservicename"},
+            {"FUNCTION_NAME": "gcpfunctionname"},
+            {"VERCEL": "1"},
+        ]
+        for env in envs:
+            with patch.dict("os.environ", env):
+                client = rs_or_single_client(serverMonitoringMode="auto")
+                self.addCleanup(client.close)
+                self.assert_rtt_connection_is_disabled(client)
 
-    def wait_for_event(self, event, count):
-        """Run the waitForEvent test operation.
+    def assert_rtt_connection_is_disabled(self, client):
+        client.admin.command("ping")
+        for _, server in client._topology._servers.items():
+            monitor = server._monitor
+            self.assertFalse(monitor._stream)
+            self.assertIsNone(monitor._rtt_monitor._executor._thread)
 
-        Wait for a number of events to be published, or fail.
-        """
-        wait_until(
-            lambda: self._event_count(event) >= count, "find %s %s event(s)" % (count, event)
+
+class MockTCPHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.server.events.append("client connected")
+        if self.request.recv(1024).strip():
+            self.server.events.append("client hello received")
+        self.request.close()
+
+
+class TestHeartbeatStartOrdering(unittest.TestCase):
+    def start_server(self, events):
+        server = socketserver.TCPServer(("localhost", 9999), MockTCPHandler)
+        server.events = events
+        server.handle_request()
+        server.server_close()
+
+    def test_heartbeat_start_ordering(self):
+        events = []
+        listener = HeartbeatEventsListListener(events)
+        server_thread = threading.Thread(target=self.start_server, args=(events,))
+        server_thread.start()
+        _c = MongoClient(
+            "mongodb://localhost:9999", serverSelectionTimeoutMS=500, event_listeners=(listener,)
+        )
+        server_thread.join()
+        listener.wait_for_event(ServerHeartbeatStartedEvent, 1)
+        listener.wait_for_event(ServerHeartbeatFailedEvent, 1)
+
+        self.assertEqual(
+            events,
+            [
+                "serverHeartbeatStartedEvent",
+                "client connected",
+                "client hello received",
+                "serverHeartbeatFailedEvent",
+            ],
         )
 
-    def configure_fail_point(self, fail_point):
-        """Run the configureFailPoint test operation."""
-        self.set_fail_point(fail_point)
-        self.addCleanup(
-            self.set_fail_point,
-            {"configureFailPoint": fail_point["configureFailPoint"], "mode": "off"},
-        )
 
-    def run_admin_command(self, command, **kwargs):
-        """Run the runAdminCommand test operation."""
-        self.client.admin.command(command, **kwargs)
-
-    def record_primary(self):
-        """Run the recordPrimary test operation."""
-        self._previous_primary = self.scenario_client.primary
-
-    def wait_for_primary_change(self, timeout_ms):
-        """Run the waitForPrimaryChange test operation."""
-
-        def primary_changed():
-            primary = self.scenario_client.primary
-            if primary is None:
-                return False
-            return primary != self._previous_primary
-
-        timeout = timeout_ms / 1000.0
-        wait_until(primary_changed, "change primary", timeout=timeout)
-
-    def wait(self, ms):
-        """Run the "wait" test operation."""
-        time.sleep(ms / 1000.0)
-
-    def start_thread(self, name):
-        """Run the 'startThread' thread operation."""
-        thread = SpecRunnerThread(name)
-        thread.start()
-        self.targets[name] = thread
-
-    def run_on_thread(self, sessions, collection, name, operation):
-        """Run the 'runOnThread' operation."""
-        thread = self.targets[name]
-        thread.schedule(lambda: self._run_op(sessions, collection, operation, False))
-
-    def wait_for_thread(self, name):
-        """Run the 'waitForThread' operation."""
-        thread = self.targets[name]
-        thread.stop()
-        thread.join(60)
-        if thread.exc:
-            raise thread.exc
-        self.assertFalse(thread.is_alive(), "Thread %s is still running" % (name,))
-
-
-def create_spec_test(scenario_def, test, name):
-    @client_context.require_test_commands
-    def run_scenario(self):
-        self.run_scenario(scenario_def, test)
-
-    return run_scenario
-
-
-test_creator = TestCreator(create_spec_test, TestIntegration, TestIntegration.TEST_PATH)
-test_creator.create_tests()
+# Generate unified tests.
+globals().update(generate_test_classes(os.path.join(SDAM_PATH, "unified"), module=__name__))
 
 
 if __name__ == "__main__":

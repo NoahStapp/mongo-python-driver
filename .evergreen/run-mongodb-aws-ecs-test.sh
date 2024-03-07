@@ -20,32 +20,15 @@ fi
 # Now we can safely enable xtrace
 set -o xtrace
 
-if command -v virtualenv ; then
-    VIRTUALENV=$(command -v virtualenv)
-else
-    if ! python3 -m pip --version ; then
-        echo "Installing pip..."
-        apt-get update
-        apt install python3-pip -y
-    fi
-    echo "Installing virtualenv..."
-    python3 -m pip install --user virtualenv
-    VIRTUALENV='python3 -m virtualenv'
-fi
+# Install python with pip.
+PYTHON_VER="python3.9"
+apt-get update
+apt-get install $PYTHON_VER python3-pip build-essential $PYTHON_VER-dev -y
 
-authtest () {
-    echo "Running MONGODB-AWS ECS authentication tests with $PYTHON"
-    $PYTHON --version
-
-    $VIRTUALENV -p $PYTHON --never-download venvaws
-    . venvaws/bin/activate
-
-    cd src
-    python -m pip install '.[aws]'
-    python test/auth_aws/test_auth_aws.py
-    cd -
-    deactivate
-    rm -rf venvaws
-}
-
-PYTHON=$(command -v python3) authtest
+export PYTHON_BINARY=$PYTHON_VER
+export TEST_AUTH_AWS=1
+export AUTH="auth"
+export SET_XTRACE_ON=1
+cd src
+$PYTHON_BINARY -m pip install -q --user tox
+bash .evergreen/tox.sh -m test-eg

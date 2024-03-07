@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test Atlas Data Lake."""
+from __future__ import annotations
 
 import os
 import sys
@@ -23,7 +24,7 @@ from test import IntegrationTest, client_context, unittest
 from test.crud_v2_format import TestCrudV2
 from test.utils import (
     OvertCommandListener,
-    TestCreator,
+    SpecTestCreator,
     rs_client_noauth,
     rs_or_single_client,
 )
@@ -32,15 +33,17 @@ from test.utils import (
 _TEST_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "data_lake")
 
 
-class TestDataLakeMustConnect(IntegrationTest):
+class TestDataLakeMustConnect(unittest.TestCase):
     def test_connected_to_data_lake(self):
-        data_lake = os.environ.get("DATA_LAKE")
+        data_lake = os.environ.get("TEST_DATA_LAKE")
         if not data_lake:
-            self.skipTest("DATA_LAKE is not set")
+            self.skipTest("TEST_DATA_LAKE is not set")
 
         self.assertTrue(
-            client_context.is_data_lake,
-            "client context.is_data_lake must be True when DATA_LAKE is set",
+            client_context.is_data_lake and client_context.connected,
+            "client context must be connected to data lake when DATA_LAKE is set. Failed attempts:\n{}".format(
+                client_context.connection_attempt_info()
+            ),
         )
 
 
@@ -52,7 +55,7 @@ class TestDataLakeProse(IntegrationTest):
     @classmethod
     @client_context.require_data_lake
     def setUpClass(cls):
-        super(TestDataLakeProse, cls).setUpClass()
+        super().setUpClass()
 
     # Test killCursors
     def test_1(self):
@@ -62,16 +65,16 @@ class TestDataLakeProse(IntegrationTest):
         next(cursor)
 
         # find command assertions
-        find_cmd = listener.results["succeeded"][-1]
+        find_cmd = listener.succeeded_events[-1]
         self.assertEqual(find_cmd.command_name, "find")
         cursor_id = find_cmd.reply["cursor"]["id"]
         cursor_ns = find_cmd.reply["cursor"]["ns"]
 
         # killCursors command assertions
         cursor.close()
-        started = listener.results["started"][-1]
+        started = listener.started_events[-1]
         self.assertEqual(started.command_name, "killCursors")
-        succeeded = listener.results["succeeded"][-1]
+        succeeded = listener.succeeded_events[-1]
         self.assertEqual(succeeded.command_name, "killCursors")
 
         self.assertIn(cursor_id, started.command["cursors"])
@@ -100,7 +103,7 @@ class DataLakeTestSpec(TestCrudV2):
     @classmethod
     @client_context.require_data_lake
     def setUpClass(cls):
-        super(DataLakeTestSpec, cls).setUpClass()
+        super().setUpClass()
 
     def setup_scenario(self, scenario_def):
         # Spec tests MUST NOT insert data/drop collection for
@@ -115,7 +118,7 @@ def create_test(scenario_def, test, name):
     return run_scenario
 
 
-TestCreator(create_test, DataLakeTestSpec, _TEST_PATH).create_tests()
+SpecTestCreator(create_test, DataLakeTestSpec, _TEST_PATH).create_tests()
 
 
 if __name__ == "__main__":

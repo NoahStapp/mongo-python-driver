@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import unittest
 
@@ -21,49 +22,6 @@ from pymongo import MongoClient
 from pymongo import version as pymongo_version
 from pymongo.errors import OperationFailure
 from pymongo.server_api import ServerApi, ServerApiVersion
-
-
-def test_hello_with_option(self, protocol, **kwargs):
-    hello = "ismaster" if isinstance(protocol(), OpQuery) else "hello"
-    # `db.command("hello"|"ismaster")` commands are the same for primaries and
-    # secondaries, so we only need one server.
-    primary = MockupDB()
-    # Set up a custom handler to save the first request from the driver.
-    self.handshake_req = None
-
-    def respond(r):
-        # Only save the very first request from the driver.
-        if self.handshake_req is None:
-            self.handshake_req = r
-        load_balanced_kwargs = {"serviceId": ObjectId()} if kwargs.get("loadBalanced") else {}
-        return r.reply(
-            OpMsgReply(minWireVersion=0, maxWireVersion=13, **kwargs, **load_balanced_kwargs)
-        )
-
-    primary.autoresponds(respond)
-    primary.run()
-    self.addCleanup(primary.stop)
-
-    # We need a special dict because MongoClient uses "server_api" and all
-    # of the commands use "apiVersion".
-    k_map = {("apiVersion", "1"): ("server_api", ServerApi(ServerApiVersion.V1))}
-    client = MongoClient(
-        "mongodb://" + primary.address_string,
-        appname="my app",  # For _check_handshake_data()
-        **dict([k_map.get((k, v), (k, v)) for k, v in kwargs.items()])  # type: ignore[arg-type]
-    )
-
-    self.addCleanup(client.close)
-
-    # We have an autoresponder luckily, so no need for `go()`.
-    assert client.db.command(hello)
-
-    # We do this checking here rather than in the autoresponder `respond()`
-    # because it runs in another Python thread so there are some funky things
-    # with error handling within that thread, and we want to be able to use
-    # self.assertRaises().
-    self.handshake_req.assert_matches(protocol(hello, **kwargs))
-    _check_handshake_data(self.handshake_req)
 
 
 def _check_handshake_data(request):
@@ -79,6 +37,48 @@ def _check_handshake_data(request):
 
 
 class TestHandshake(unittest.TestCase):
+    def hello_with_option_helper(self, protocol, **kwargs):
+        hello = "ismaster" if isinstance(protocol(), OpQuery) else "hello"
+        # `db.command("hello"|"ismaster")` commands are the same for primaries and
+        # secondaries, so we only need one server.
+        primary = MockupDB()
+        # Set up a custom handler to save the first request from the driver.
+        self.handshake_req = None
+
+        def respond(r):
+            # Only save the very first request from the driver.
+            if self.handshake_req is None:
+                self.handshake_req = r
+            load_balanced_kwargs = {"serviceId": ObjectId()} if kwargs.get("loadBalanced") else {}
+            return r.reply(
+                OpMsgReply(minWireVersion=0, maxWireVersion=13, **kwargs, **load_balanced_kwargs)
+            )
+
+        primary.autoresponds(respond)
+        primary.run()
+        self.addCleanup(primary.stop)
+
+        # We need a special dict because MongoClient uses "server_api" and all
+        # of the commands use "apiVersion".
+        k_map = {("apiVersion", "1"): ("server_api", ServerApi(ServerApiVersion.V1))}
+        client = MongoClient(
+            "mongodb://" + primary.address_string,
+            appname="my app",  # For _check_handshake_data()
+            **dict([k_map.get((k, v), (k, v)) for k, v in kwargs.items()]),  # type: ignore[arg-type]
+        )
+
+        self.addCleanup(client.close)
+
+        # We have an autoresponder luckily, so no need for `go()`.
+        assert client.db.command(hello)
+
+        # We do this checking here rather than in the autoresponder `respond()`
+        # because it runs in another Python thread so there are some funky things
+        # with error handling within that thread, and we want to be able to use
+        # self.assertRaises().
+        self.handshake_req.assert_matches(protocol(hello, **kwargs))
+        _check_handshake_data(self.handshake_req)
+
     def test_client_handshake_data(self):
         primary, secondary = MockupDB(), MockupDB()
         for server in primary, secondary:
@@ -107,7 +107,7 @@ class TestHandshake(unittest.TestCase):
 
         self.addCleanup(client.close)
 
-        # New monitoring sockets send data during handshake.
+        # New monitoring connections send data during handshake.
         heartbeat = primary.receives("ismaster")
         _check_handshake_data(heartbeat)
         heartbeat.ok(primary_response)
@@ -170,7 +170,7 @@ class TestHandshake(unittest.TestCase):
 
         self.addCleanup(client.close)
 
-        # New monitoring sockets send data during handshake.
+        # New monitoring connections send data during handshake.
         heartbeat = server.receives("ismaster")
         heartbeat.ok(primary_response)
 
@@ -208,21 +208,21 @@ class TestHandshake(unittest.TestCase):
                     return
 
     def test_handshake_load_balanced(self):
-        test_hello_with_option(self, OpMsg, loadBalanced=True)
+        self.hello_with_option_helper(OpMsg, loadBalanced=True)
         with self.assertRaisesRegex(AssertionError, "does not match"):
-            test_hello_with_option(self, Command, loadBalanced=True)
+            self.hello_with_option_helper(Command, loadBalanced=True)
 
     def test_handshake_versioned_api(self):
-        test_hello_with_option(self, OpMsg, apiVersion="1")
+        self.hello_with_option_helper(OpMsg, apiVersion="1")
         with self.assertRaisesRegex(AssertionError, "does not match"):
-            test_hello_with_option(self, Command, apiVersion="1")
+            self.hello_with_option_helper(Command, apiVersion="1")
 
     def test_handshake_not_either(self):
         # If we don't specify either option then it should be using
         # OP_QUERY for the initial step of the handshake.
-        test_hello_with_option(self, Command)
+        self.hello_with_option_helper(Command)
         with self.assertRaisesRegex(AssertionError, "does not match"):
-            test_hello_with_option(self, OpMsg)
+            self.hello_with_option_helper(OpMsg)
 
     def test_handshake_max_wire(self):
         server = MockupDB()
@@ -237,16 +237,15 @@ class TestHandshake(unittest.TestCase):
                 request.reply(
                     OpMsgReply(
                         **primary_response,
-                        **{
-                            "payload": b"r=wPleNM8S5p8gMaffMDF7Py4ru9bnmmoqb0"
-                            b"1WNPsil6o=pAvr6B1garhlwc6MKNQ93ZfFky"
-                            b"tXdF9r,"
-                            b"s=4dcxugMJq2P4hQaDbGXZR8uR3ei"
-                            b"PHrSmh4uhkg==,i=15000",
-                            "saslSupportedMechs": ["SCRAM-SHA-1"],
-                        }
+                        payload=b"r=wPleNM8S5p8gMaffMDF7Py4ru9bnmmoqb0"
+                        b"1WNPsil6o=pAvr6B1garhlwc6MKNQ93ZfFky"
+                        b"tXdF9r,"
+                        b"s=4dcxugMJq2P4hQaDbGXZR8uR3ei"
+                        b"PHrSmh4uhkg==,i=15000",
+                        saslSupportedMechs=["SCRAM-SHA-1"],
                     )
                 )
+                return None
             else:
                 return request.reply(**primary_response)
 

@@ -13,9 +13,11 @@
 # limitations under the License.
 
 """Test the bulk API."""
+from __future__ import annotations
 
 import sys
 import uuid
+from typing import Any, Optional
 
 from pymongo.mongo_client import MongoClient
 
@@ -50,12 +52,12 @@ class BulkTestBase(IntegrationTest):
 
     @classmethod
     def setUpClass(cls):
-        super(BulkTestBase, cls).setUpClass()
+        super().setUpClass()
         cls.coll = cls.db.test
         cls.coll_w0 = cls.coll.with_options(write_concern=WriteConcern(w=0))
 
     def setUp(self):
-        super(BulkTestBase, self).setUp()
+        super().setUp()
         self.coll.drop()
 
     def assertEqualResponse(self, expected, actual):
@@ -93,7 +95,7 @@ class BulkTestBase(IntegrationTest):
                 self.assertEqual(
                     actual.get(key),
                     value,
-                    "%r value of %r does not match expected %r" % (key, actual.get(key), value),
+                    f"{key!r} value of {actual.get(key)!r} does not match expected {value!r}",
                 )
 
     def assertEqualUpsert(self, expected, actual):
@@ -154,7 +156,6 @@ class TestBulk(BulkTestBase):
         self.assertEqual(1, self.coll.count_documents({}))
 
     def _test_update_many(self, update):
-
         expected = {
             "nMatched": 2,
             "nModified": 2,
@@ -217,7 +218,6 @@ class TestBulk(BulkTestBase):
         self._test_update_one([{"$set": {"foo": "bar"}}])
 
     def test_replace_one(self):
-
         expected = {
             "nMatched": 1,
             "nModified": 1,
@@ -274,7 +274,6 @@ class TestBulk(BulkTestBase):
         self.assertEqual(self.coll.count_documents({}), 1)
 
     def test_upsert(self):
-
         expected = {
             "nMatched": 0,
             "nModified": 0,
@@ -296,7 +295,7 @@ class TestBulk(BulkTestBase):
     def test_numerous_inserts(self):
         # Ensure we don't exceed server's maxWriteBatchSize size limit.
         n_docs = client_context.max_write_batch_size + 100
-        requests = [InsertOne({}) for _ in range(n_docs)]
+        requests = [InsertOne[dict]({}) for _ in range(n_docs)]
         result = self.coll.bulk_write(requests, ordered=False)
         self.assertEqual(n_docs, result.inserted_count)
         self.assertEqual(n_docs, self.coll.count_documents({}))
@@ -347,7 +346,7 @@ class TestBulk(BulkTestBase):
 
     def test_bulk_write_invalid_arguments(self):
         # The requests argument must be a list.
-        generator = (InsertOne({}) for _ in range(10))
+        generator = (InsertOne[dict]({}) for _ in range(10))
         with self.assertRaises(TypeError):
             self.coll.bulk_write(generator)  # type: ignore[arg-type]
 
@@ -793,10 +792,10 @@ class BulkAuthorizationTestBase(BulkTestBase):
     @client_context.require_auth
     @client_context.require_no_api_version
     def setUpClass(cls):
-        super(BulkAuthorizationTestBase, cls).setUpClass()
+        super().setUpClass()
 
     def setUp(self):
-        super(BulkAuthorizationTestBase, self).setUp()
+        super().setUp()
         client_context.create_user(self.db.name, "readonly", "pw", ["read"])
         self.db.command(
             "createRole",
@@ -830,7 +829,7 @@ class TestBulkUnacknowledged(BulkTestBase):
         ]
         result = self.coll_w0.bulk_write(requests)
         self.assertFalse(result.acknowledged)
-        wait_until(lambda: 2 == self.coll.count_documents({}), "insert 2 documents")
+        wait_until(lambda: self.coll.count_documents({}) == 2, "insert 2 documents")
         wait_until(lambda: self.coll.find_one({"_id": 1}) is None, 'removed {"_id": 1}')
 
     def test_no_results_ordered_failure(self):
@@ -845,7 +844,7 @@ class TestBulkUnacknowledged(BulkTestBase):
         ]
         result = self.coll_w0.bulk_write(requests)
         self.assertFalse(result.acknowledged)
-        wait_until(lambda: 3 == self.coll.count_documents({}), "insert 3 documents")
+        wait_until(lambda: self.coll.count_documents({}) == 3, "insert 3 documents")
         self.assertEqual({"_id": 1}, self.coll.find_one({"_id": 1}))
 
     def test_no_results_unordered_success(self):
@@ -857,7 +856,7 @@ class TestBulkUnacknowledged(BulkTestBase):
         ]
         result = self.coll_w0.bulk_write(requests, ordered=False)
         self.assertFalse(result.acknowledged)
-        wait_until(lambda: 2 == self.coll.count_documents({}), "insert 2 documents")
+        wait_until(lambda: self.coll.count_documents({}) == 2, "insert 2 documents")
         wait_until(lambda: self.coll.find_one({"_id": 1}) is None, 'removed {"_id": 1}')
 
     def test_no_results_unordered_failure(self):
@@ -872,7 +871,7 @@ class TestBulkUnacknowledged(BulkTestBase):
         ]
         result = self.coll_w0.bulk_write(requests, ordered=False)
         self.assertFalse(result.acknowledged)
-        wait_until(lambda: 2 == self.coll.count_documents({}), "insert 2 documents")
+        wait_until(lambda: self.coll.count_documents({}) == 2, "insert 2 documents")
         wait_until(lambda: self.coll.find_one({"_id": 1}) is None, 'removed {"_id": 1}')
 
 
@@ -902,7 +901,7 @@ class TestBulkAuthorization(BulkAuthorizationTestBase):
             InsertOne({"x": 3}),  # Never attempted.
         ]
         self.assertRaises(OperationFailure, coll.bulk_write, requests)
-        self.assertEqual(set([1, 2]), set(self.coll.distinct("x")))
+        self.assertEqual({1, 2}, set(self.coll.distinct("x")))
 
 
 class TestBulkWriteConcern(BulkTestBase):
@@ -911,7 +910,7 @@ class TestBulkWriteConcern(BulkTestBase):
 
     @classmethod
     def setUpClass(cls):
-        super(TestBulkWriteConcern, cls).setUpClass()
+        super().setUpClass()
         cls.w = client_context.w
         cls.secondary = None
         if cls.w is not None and cls.w > 1:
@@ -947,7 +946,7 @@ class TestBulkWriteConcern(BulkTestBase):
         result = coll_ww.bulk_write([DeleteOne({"something": "that does no exist"})])
         self.assertTrue(result.acknowledged)
 
-        requests = [InsertOne({"a": 1}), InsertOne({"a": 2})]
+        requests: list[Any] = [InsertOne({"a": 1}), InsertOne({"a": 2})]
         # Replication wtimeout is a 'soft' error.
         # It shouldn't stop batch processing.
         try:

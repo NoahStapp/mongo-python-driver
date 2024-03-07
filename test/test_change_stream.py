@@ -13,10 +13,10 @@
 # limitations under the License.
 
 """Test the change_stream module."""
+from __future__ import annotations
 
 import os
 import random
-import re
 import string
 import sys
 import threading
@@ -27,7 +27,7 @@ from typing import no_type_check
 
 sys.path[0:0] = [""]
 
-from test import IntegrationTest, client_context, unittest
+from test import IntegrationTest, Version, client_context, unittest
 from test.unified_format import generate_test_classes
 from test.utils import (
     AllowListEventListener,
@@ -36,7 +36,7 @@ from test.utils import (
     wait_until,
 )
 
-from bson import SON, ObjectId, Timestamp, encode, json_util
+from bson import SON, ObjectId, Timestamp, encode
 from bson.binary import ALL_UUID_REPRESENTATIONS, PYTHON_LEGACY, STANDARD, Binary
 from bson.raw_bson import DEFAULT_RAW_BSON_OPTIONS, RawBSONDocument
 from pymongo import MongoClient
@@ -105,7 +105,8 @@ class TestChangeStreamBase(IntegrationTest):
 
     def get_start_at_operation_time(self):
         """Get an operationTime. Advances the operation clock beyond the most
-        recently returned timestamp."""
+        recently returned timestamp.
+        """
         optime = self.client.admin.command("ping")["operationTime"]
         return Timestamp(optime.time, optime.inc + 1)
 
@@ -121,7 +122,7 @@ class TestChangeStreamBase(IntegrationTest):
         client._close_cursor_now(cursor.cursor_id, address)
 
 
-class APITestsMixin(object):
+class APITestsMixin:
     @no_type_check
     def test_watch(self):
         with self.change_stream(
@@ -168,7 +169,7 @@ class APITestsMixin(object):
         client = rs_or_single_client(event_listeners=[listener])
         # Connect to the cluster.
         client.admin.command("ping")
-        listener.results.clear()
+        listener.reset()
         # ChangeStreams only read majority committed data so use w:majority.
         coll = self.watched_collection().with_options(write_concern=WriteConcern("majority"))
         coll.drop()
@@ -178,25 +179,25 @@ class APITestsMixin(object):
         self.addCleanup(coll.drop)
         with self.change_stream_with_client(client, max_await_time_ms=250) as stream:
             self.assertEqual(listener.started_command_names(), ["aggregate"])
-            listener.results.clear()
+            listener.reset()
 
             # Confirm that only a single getMore is run even when no documents
             # are returned.
             self.assertIsNone(stream.try_next())
             self.assertEqual(listener.started_command_names(), ["getMore"])
-            listener.results.clear()
+            listener.reset()
             self.assertIsNone(stream.try_next())
             self.assertEqual(listener.started_command_names(), ["getMore"])
-            listener.results.clear()
+            listener.reset()
 
             # Get at least one change before resuming.
             coll.insert_one({"_id": 2})
             wait_until(lambda: stream.try_next() is not None, "get change from try_next")
-            listener.results.clear()
+            listener.reset()
 
             # Cause the next request to initiate the resume process.
             self.kill_change_stream_cursor(stream)
-            listener.results.clear()
+            listener.reset()
 
             # The sequence should be:
             # - getMore, fail
@@ -204,12 +205,12 @@ class APITestsMixin(object):
             # - no results, return immediately without another getMore
             self.assertIsNone(stream.try_next())
             self.assertEqual(listener.started_command_names(), ["getMore", "aggregate"])
-            listener.results.clear()
+            listener.reset()
 
             # Stream still works after a resume.
             coll.insert_one({"_id": 3})
             wait_until(lambda: stream.try_next() is not None, "get change from try_next")
-            self.assertEqual(set(listener.started_command_names()), set(["getMore"]))
+            self.assertEqual(set(listener.started_command_names()), {"getMore"})
             self.assertIsNone(stream.try_next())
 
     @no_type_check
@@ -218,7 +219,7 @@ class APITestsMixin(object):
         client = rs_or_single_client(event_listeners=[listener])
         # Connect to the cluster.
         client.admin.command("ping")
-        listener.results.clear()
+        listener.reset()
         # ChangeStreams only read majority committed data so use w:majority.
         coll = self.watched_collection().with_options(write_concern=WriteConcern("majority"))
         coll.drop()
@@ -230,12 +231,12 @@ class APITestsMixin(object):
         expected = {"batchSize": 23}
         with self.change_stream_with_client(client, max_await_time_ms=250, batch_size=23) as stream:
             # Confirm that batchSize is honored for initial batch.
-            cmd = listener.results["started"][0].command
+            cmd = listener.started_events[0].command
             self.assertEqual(cmd["cursor"], expected)
-            listener.results.clear()
+            listener.reset()
             # Confirm that batchSize is honored by getMores.
             self.assertIsNone(stream.try_next())
-            cmd = listener.results["started"][0].command
+            cmd = listener.started_events[0].command
             key = next(iter(expected))
             self.assertEqual(expected[key], cmd[key])
 
@@ -250,18 +251,17 @@ class APITestsMixin(object):
         coll.insert_many([{"data": i} for i in range(ndocs)])
 
         with self.change_stream(start_at_operation_time=optime) as cs:
-            for i in range(ndocs):
+            for _i in range(ndocs):
                 cs.next()
 
     @no_type_check
     def _test_full_pipeline(self, expected_cs_stage):
         client, listener = self.client_with_listener("aggregate")
-        results = listener.results
         with self.change_stream_with_client(client, [{"$project": {"foo": 0}}]) as _:
             pass
 
-        self.assertEqual(1, len(results["started"]))
-        command = results["started"][0]
+        self.assertEqual(1, len(listener.started_events))
+        command = listener.started_events[0]
         self.assertEqual("aggregate", command.command_name)
         self.assertEqual(
             [{"$changeStream": expected_cs_stage}, {"$project": {"foo": 0}}],
@@ -329,8 +329,12 @@ class APITestsMixin(object):
         with self.change_stream(max_await_time_ms=250) as change_stream:
 
             def iterate_cursor():
-                for _ in change_stream:
-                    pass
+                try:
+                    for _ in change_stream:
+                        pass
+                except OperationFailure as e:
+                    if e.code != 237:  # CursorKilled error code
+                        raise
 
             t = threading.Thread(target=iterate_cursor)
             t.start()
@@ -431,8 +435,7 @@ class APITestsMixin(object):
             self.assertEqual(change["fullDocument"], {"_id": 3})
 
     @no_type_check
-    @client_context.require_no_mongos  # Remove after SERVER-41196
-    @client_context.require_version_min(4, 1, 1)
+    @client_context.require_version_min(4, 2)
     def test_start_after_resume_process_without_changes(self):
         resume_token = self.get_resume_token(invalidate=True)
 
@@ -446,7 +449,7 @@ class APITestsMixin(object):
             self.assertEqual(change["fullDocument"], {"_id": 2})
 
 
-class ProseSpecTestsMixin(object):
+class ProseSpecTestsMixin:
     @no_type_check
     def _client_with_listener(self, *commands):
         listener = AllowListEventListener(*commands)
@@ -464,9 +467,10 @@ class ProseSpecTestsMixin(object):
     def _get_expected_resume_token_legacy(self, stream, listener, previous_change=None):
         """Predicts what the resume token should currently be for server
         versions that don't support postBatchResumeToken. Assumes the stream
-        has never returned any changes if previous_change is None."""
+        has never returned any changes if previous_change is None.
+        """
         if previous_change is None:
-            agg_cmd = listener.results["started"][0]
+            agg_cmd = listener.started_events[0]
             stage = agg_cmd.command["pipeline"][0]["$changeStream"]
             return stage.get("resumeAfter") or stage.get("startAfter")
 
@@ -477,13 +481,14 @@ class ProseSpecTestsMixin(object):
         versions that support postBatchResumeToken. Assumes the stream has
         never returned any changes if previous_change is None. Assumes
         listener is a AllowListEventListener that listens for aggregate and
-        getMore commands."""
+        getMore commands.
+        """
         if previous_change is None or stream._cursor._has_next():
             token = self._get_expected_resume_token_legacy(stream, listener, previous_change)
             if token is not None:
                 return token
 
-        response = listener.results["succeeded"][-1].reply
+        response = listener.succeeded_events[-1].reply
         return response["cursor"]["postBatchResumeToken"]
 
     @no_type_check
@@ -526,7 +531,6 @@ class ProseSpecTestsMixin(object):
         self._test_update_resume_token(self._get_expected_resume_token_legacy)
 
     # Prose test no. 2
-    @client_context.require_version_max(4, 3, 3)  # PYTHON-2120
     @client_context.require_version_min(4, 1, 8)
     def test_raises_error_on_missing_id_418plus(self):
         # Server returns an error on 4.1.8+
@@ -561,8 +565,8 @@ class ProseSpecTestsMixin(object):
                 pass
 
         # Driver should have attempted aggregate command only once.
-        self.assertEqual(len(listener.results["started"]), 1)
-        self.assertEqual(listener.results["started"][0].command_name, "aggregate")
+        self.assertEqual(len(listener.started_events), 1)
+        self.assertEqual(listener.started_events[0].command_name, "aggregate")
 
     # Prose test no. 5 - REMOVED
     # Prose test no. 6 - SKIPPED
@@ -606,20 +610,20 @@ class ProseSpecTestsMixin(object):
         with self.change_stream_with_client(client) as cs:
             self.kill_change_stream_cursor(cs)
             cs.try_next()
-        cmd = listener.results["started"][-1].command
+        cmd = listener.started_events[-1].command
         self.assertIsNotNone(cmd["pipeline"][0]["$changeStream"].get("startAtOperationTime"))
 
         # Case 2: change stream started with startAtOperationTime
-        listener.results.clear()
+        listener.reset()
         optime = self.get_start_at_operation_time()
         with self.change_stream_with_client(client, start_at_operation_time=optime) as cs:
             self.kill_change_stream_cursor(cs)
             cs.try_next()
-        cmd = listener.results["started"][-1].command
+        cmd = listener.started_events[-1].command
         self.assertEqual(
             cmd["pipeline"][0]["$changeStream"].get("startAtOperationTime"),
             optime,
-            str([k.command for k in listener.results["started"]]),
+            str([k.command for k in listener.started_events]),
         )
 
     # Prose test no. 10 - SKIPPED
@@ -634,7 +638,7 @@ class ProseSpecTestsMixin(object):
             self.assertIsNone(change_stream.try_next())
             resume_token = change_stream.resume_token
 
-        response = listener.results["succeeded"][0].reply
+        response = listener.succeeded_events[0].reply
         self.assertEqual(resume_token, response["cursor"]["postBatchResumeToken"])
 
     # Prose test no. 11
@@ -646,7 +650,7 @@ class ProseSpecTestsMixin(object):
             self._populate_and_exhaust_change_stream(change_stream)
             resume_token = change_stream.resume_token
 
-        response = listener.results["succeeded"][-1].reply
+        response = listener.succeeded_events[-1].reply
         self.assertEqual(resume_token, response["cursor"]["postBatchResumeToken"])
 
     # Prose test no. 12
@@ -740,7 +744,7 @@ class ProseSpecTestsMixin(object):
             self.kill_change_stream_cursor(change_stream)
             change_stream.try_next()  # Resume attempt
 
-        response = listener.results["started"][-1]
+        response = listener.started_events[-1]
         self.assertIsNone(response.command["pipeline"][0]["$changeStream"].get("resumeAfter"))
         self.assertIsNotNone(response.command["pipeline"][0]["$changeStream"].get("startAfter"))
 
@@ -759,9 +763,33 @@ class ProseSpecTestsMixin(object):
             self.kill_change_stream_cursor(change_stream)
             change_stream.try_next()  # Resume attempt
 
-        response = listener.results["started"][-1]
+        response = listener.started_events[-1]
         self.assertIsNotNone(response.command["pipeline"][0]["$changeStream"].get("resumeAfter"))
         self.assertIsNone(response.command["pipeline"][0]["$changeStream"].get("startAfter"))
+
+    # Prose test no. 19
+    @no_type_check
+    def test_split_large_change(self):
+        server_version = client_context.version
+        if not server_version.at_least(6, 0, 9):
+            self.skipTest("$changeStreamSplitLargeEvent requires MongoDB 6.0.9+")
+        if server_version.at_least(6, 1, 0) and server_version < Version(7, 0, 0):
+            self.skipTest("$changeStreamSplitLargeEvent is not available in 6.x rapid releases")
+        self.db.drop_collection("test_split_large_change")
+        coll = self.db.create_collection(
+            "test_split_large_change", changeStreamPreAndPostImages={"enabled": True}
+        )
+        coll.insert_one({"_id": 1, "value": "q" * 10 * 1024 * 1024})
+        with coll.watch(
+            [{"$changeStreamSplitLargeEvent": {}}], full_document_before_change="required"
+        ) as change_stream:
+            coll.update_one({"_id": 1}, {"$set": {"value": "z" * 10 * 1024 * 1024}})
+            doc_1 = change_stream.next()
+            self.assertIn("splitEvent", doc_1)
+            self.assertEqual(doc_1["splitEvent"], {"fragment": 1, "of": 2})
+            doc_2 = change_stream.next()
+            self.assertIn("splitEvent", doc_2)
+            self.assertEqual(doc_2["splitEvent"], {"fragment": 2, "of": 2})
 
 
 class TestClusterChangeStream(TestChangeStreamBase, APITestsMixin):
@@ -769,17 +797,16 @@ class TestClusterChangeStream(TestChangeStreamBase, APITestsMixin):
 
     @classmethod
     @client_context.require_version_min(4, 0, 0, -1)
-    @client_context.require_no_mmap
-    @client_context.require_no_standalone
+    @client_context.require_change_streams
     def setUpClass(cls):
-        super(TestClusterChangeStream, cls).setUpClass()
+        super().setUpClass()
         cls.dbs = [cls.db, cls.client.pymongo_test_2]
 
     @classmethod
     def tearDownClass(cls):
         for db in cls.dbs:
             cls.client.drop_database(db)
-        super(TestClusterChangeStream, cls).tearDownClass()
+        super().tearDownClass()
 
     def change_stream_with_client(self, client, *args, **kwargs):
         return client.watch(*args, **kwargs)
@@ -831,10 +858,9 @@ class TestClusterChangeStream(TestChangeStreamBase, APITestsMixin):
 class TestDatabaseChangeStream(TestChangeStreamBase, APITestsMixin):
     @classmethod
     @client_context.require_version_min(4, 0, 0, -1)
-    @client_context.require_no_mmap
-    @client_context.require_no_standalone
+    @client_context.require_change_streams
     def setUpClass(cls):
-        super(TestDatabaseChangeStream, cls).setUpClass()
+        super().setUpClass()
 
     def change_stream_with_client(self, client, *args, **kwargs):
         return client[self.db.name].watch(*args, **kwargs)
@@ -917,11 +943,9 @@ class TestDatabaseChangeStream(TestChangeStreamBase, APITestsMixin):
 
 class TestCollectionChangeStream(TestChangeStreamBase, APITestsMixin, ProseSpecTestsMixin):
     @classmethod
-    @client_context.require_version_min(3, 5, 11)
-    @client_context.require_no_mmap
-    @client_context.require_no_standalone
+    @client_context.require_change_streams
     def setUpClass(cls):
-        super(TestCollectionChangeStream, cls).setUpClass()
+        super().setUpClass()
 
     def setUp(self):
         # Use a new collection for each test.
@@ -1052,18 +1076,18 @@ class TestAllLegacyScenarios(IntegrationTest):
     @classmethod
     @client_context.require_connection
     def setUpClass(cls):
-        super(TestAllLegacyScenarios, cls).setUpClass()
+        super().setUpClass()
         cls.listener = AllowListEventListener("aggregate", "getMore")
         cls.client = rs_or_single_client(event_listeners=[cls.listener])
 
     @classmethod
     def tearDownClass(cls):
         cls.client.close()
-        super(TestAllLegacyScenarios, cls).tearDownClass()
+        super().tearDownClass()
 
     def setUp(self):
-        super(TestAllLegacyScenarios, self).setUp()
-        self.listener.results.clear()
+        super().setUp()
+        self.listener.reset()
 
     def setUpCluster(self, scenario_dict):
         assets = [
@@ -1096,7 +1120,8 @@ class TestAllLegacyScenarios(IntegrationTest):
 
     def assert_list_contents_are_subset(self, superlist, sublist):
         """Check that each element in sublist is a subset of the corresponding
-        element in superlist."""
+        element in superlist.
+        """
         self.assertEqual(len(superlist), len(sublist))
         for sup, sub in zip(superlist, sublist):
             if isinstance(sub, dict):
@@ -1112,7 +1137,7 @@ class TestAllLegacyScenarios(IntegrationTest):
         exempt_fields = ["documentKey", "_id", "getMore"]
         for key, value in subdict.items():
             if key not in superdict:
-                self.fail("Key %s not found in %s" % (key, superdict))
+                self.fail(f"Key {key} not found in {superdict}")
             if isinstance(value, dict):
                 self.assert_dict_is_subset(superdict[key], value)
                 continue
@@ -1135,135 +1160,10 @@ class TestAllLegacyScenarios(IntegrationTest):
                 self.assertEqual(getattr(event, key), value)
 
     def tearDown(self):
-        self.listener.results.clear()
+        self.listener.reset()
 
 
 _TEST_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "change_streams")
-
-
-def camel_to_snake(camel):
-    # Regex to convert CamelCase to snake_case.
-    snake = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", camel)
-    return re.sub("([a-z0-9])([A-Z])", r"\1_\2", snake).lower()
-
-
-def get_change_stream(client, scenario_def, test):
-    # Get target namespace on which to instantiate change stream
-    target = test["target"]
-    if target == "collection":
-        db = client.get_database(scenario_def["database_name"])
-        cs_target = db.get_collection(scenario_def["collection_name"])
-    elif target == "database":
-        cs_target = client.get_database(scenario_def["database_name"])
-    elif target == "client":
-        cs_target = client
-    else:
-        raise ValueError("Invalid target in spec")
-
-    # Construct change stream kwargs dict
-    cs_pipeline = test["changeStreamPipeline"]
-    options = test["changeStreamOptions"]
-    cs_options = {}
-    for key, value in options.items():
-        cs_options[camel_to_snake(key)] = value
-
-    # Create and return change stream
-    return cs_target.watch(pipeline=cs_pipeline, **cs_options)
-
-
-def run_operation(client, operation):
-    # Apply specified operations
-    opname = camel_to_snake(operation["name"])
-    arguments = operation.get("arguments", {})
-    if opname == "rename":
-        # Special case for rename operation.
-        arguments = {"new_name": arguments["to"]}
-    cmd = getattr(
-        client.get_database(operation["database"]).get_collection(operation["collection"]), opname
-    )
-    return cmd(**arguments)
-
-
-def create_test(scenario_def, test):
-    def run_scenario(self):
-        # Set up
-        self.setUpCluster(scenario_def)
-        self.setFailPoint(test)
-        is_error = test["result"].get("error", False)
-        try:
-            with get_change_stream(self.client, scenario_def, test) as change_stream:
-                for operation in test["operations"]:
-                    # Run specified operations
-                    run_operation(self.client, operation)
-                num_expected_changes = len(test["result"].get("success", []))
-                changes = [change_stream.next() for _ in range(num_expected_changes)]
-                # Run a next() to induce an error if one is expected and
-                # there are no changes.
-                if is_error and not changes:
-                    change_stream.next()
-
-        except OperationFailure as exc:
-            if not is_error:
-                raise
-            expected_code = test["result"]["error"]["code"]
-            self.assertEqual(exc.code, expected_code)
-
-        else:
-            # Check for expected output from change streams
-            if test["result"].get("success"):
-                for change, expected_changes in zip(changes, test["result"]["success"]):
-                    self.assert_dict_is_subset(change, expected_changes)
-                self.assertEqual(len(changes), len(test["result"]["success"]))
-
-        finally:
-            # Check for expected events
-            results = self.listener.results
-            # Note: expectations may be missing, null, or a list of events.
-            # Extra events emitted by the test are intentionally ignored.
-            for idx, expectation in enumerate(test.get("expectations") or []):
-                for event_type, event_desc in expectation.items():
-                    results_key = event_type.split("_")[1]
-                    event = results[results_key][idx] if len(results[results_key]) > idx else None
-                    self.check_event(event, event_desc)
-
-    return run_scenario
-
-
-def create_tests():
-    for dirpath, _, filenames in os.walk(os.path.join(_TEST_PATH, "legacy")):
-        dirname = os.path.split(dirpath)[-1]
-
-        for filename in filenames:
-            with open(os.path.join(dirpath, filename)) as scenario_stream:
-                scenario_def = json_util.loads(scenario_stream.read())
-
-            test_type = os.path.splitext(filename)[0]
-
-            for test in scenario_def["tests"]:
-                new_test = create_test(scenario_def, test)
-                new_test = client_context.require_no_mmap(new_test)
-
-                if "minServerVersion" in test:
-                    min_ver = tuple(int(elt) for elt in test["minServerVersion"].split("."))
-                    new_test = client_context.require_version_min(*min_ver)(new_test)
-                if "maxServerVersion" in test:
-                    max_ver = tuple(int(elt) for elt in test["maxServerVersion"].split("."))
-                    new_test = client_context.require_version_max(*max_ver)(new_test)
-
-                topologies = test["topology"]
-                new_test = client_context.require_cluster_type(topologies)(new_test)
-
-                test_name = "test_%s_%s_%s" % (
-                    dirname,
-                    test_type.replace("-", "_"),
-                    str(test["description"].replace(" ", "_")),
-                )
-
-                new_test.__name__ = test_name
-                setattr(TestAllLegacyScenarios, new_test.__name__, new_test)
-
-
-create_tests()
 
 
 globals().update(

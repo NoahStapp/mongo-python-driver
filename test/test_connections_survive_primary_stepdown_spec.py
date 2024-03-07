@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test compliance with the connections survive primary step down spec."""
+from __future__ import annotations
 
 import sys
 
@@ -40,14 +41,14 @@ class TestConnectionsSurvivePrimaryStepDown(IntegrationTest):
     @classmethod
     @client_context.require_replica_set
     def setUpClass(cls):
-        super(TestConnectionsSurvivePrimaryStepDown, cls).setUpClass()
+        super().setUpClass()
         cls.listener = CMAPListener()
         cls.client = rs_or_single_client(
             event_listeners=[cls.listener], retryWrites=False, heartbeatFrequencyMS=500
         )
 
         # Ensure connections to all servers in replica set. This is to test
-        # that the is_writable flag is properly updated for sockets that
+        # that the is_writable flag is properly updated for connections that
         # survive a replica set election.
         ensure_all_connected(cls.client)
         cls.listener.reset()
@@ -111,7 +112,7 @@ class TestConnectionsSurvivePrimaryStepDown(IntegrationTest):
         # Insert record and verify failure.
         with self.assertRaises(NotPrimaryError) as exc:
             self.coll.insert_one({"test": 1})
-        self.assertEqual(exc.exception.details["code"], error_code)  # type: ignore
+        self.assertEqual(exc.exception.details["code"], error_code)  # type: ignore[call-overload]
         # Retry before CMAPListener assertion if retry_before=True.
         if retry:
             self.coll.insert_one({"test": 1})

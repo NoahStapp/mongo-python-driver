@@ -16,6 +16,9 @@
 
 https://github.com/mongodb/specifications/blob/master/source/unified-test-format/unified-test-format.rst
 """
+from __future__ import annotations
+
+import binascii
 import collections
 import copy
 import datetime
@@ -24,9 +27,22 @@ import os
 import re
 import sys
 import time
+import traceback
 import types
-from collections import abc
-from test import IntegrationTest, client_context, unittest
+from collections import abc, defaultdict
+from test import (
+    AWS_CREDS,
+    AWS_CREDS_2,
+    AZURE_CREDS,
+    CA_PEM,
+    CLIENT_PEM,
+    GCP_CREDS,
+    KMIP_CREDS,
+    LOCAL_MASTER_KEY,
+    IntegrationTest,
+    client_context,
+    unittest,
+)
 from test.utils import (
     CMAPListener,
     camel_to_snake,
@@ -38,24 +54,32 @@ from test.utils import (
     rs_or_single_client,
     single_client,
     snake_to_camel,
+    wait_until,
 )
+from test.utils_spec_runner import SpecRunnerThread
 from test.version import Version
-from typing import Any
+from typing import Any, Dict, List, Mapping, Optional, Union
 
+import pymongo
 from bson import SON, Code, DBRef, Decimal128, Int64, MaxKey, MinKey, json_util
 from bson.binary import Binary
+from bson.codec_options import DEFAULT_CODEC_OPTIONS
 from bson.objectid import ObjectId
 from bson.regex import RE_TYPE, Regex
-from gridfs import GridFSBucket
-from pymongo import ASCENDING, MongoClient
+from gridfs import GridFSBucket, GridOut
+from pymongo import ASCENDING, CursorType, MongoClient, _csot
 from pymongo.change_stream import ChangeStream
 from pymongo.client_session import ClientSession, TransactionOptions, _TxnState
 from pymongo.collection import Collection
+from pymongo.command_cursor import CommandCursor
 from pymongo.database import Database
+from pymongo.encryption import ClientEncryption
+from pymongo.encryption_options import _HAVE_PYMONGOCRYPT
 from pymongo.errors import (
     BulkWriteError,
     ConfigurationError,
     ConnectionFailure,
+    EncryptionError,
     InvalidOperation,
     NotPrimaryError,
     PyMongoError,
@@ -77,16 +101,76 @@ from pymongo.monitoring import (
     PoolClosedEvent,
     PoolCreatedEvent,
     PoolReadyEvent,
+    ServerClosedEvent,
+    ServerDescriptionChangedEvent,
+    ServerHeartbeatFailedEvent,
+    ServerHeartbeatListener,
+    ServerHeartbeatStartedEvent,
+    ServerHeartbeatSucceededEvent,
+    ServerListener,
+    ServerOpeningEvent,
+    TopologyClosedEvent,
+    TopologyDescriptionChangedEvent,
+    TopologyEvent,
+    TopologyListener,
+    TopologyOpenedEvent,
+    _CommandEvent,
+    _ConnectionEvent,
+    _PoolEvent,
+    _ServerEvent,
+    _ServerHeartbeatEvent,
 )
+from pymongo.operations import SearchIndexModel
 from pymongo.read_concern import ReadConcern
 from pymongo.read_preferences import ReadPreference
 from pymongo.results import BulkWriteResult
 from pymongo.server_api import ServerApi
+from pymongo.server_description import ServerDescription
+from pymongo.server_selectors import Selection, writable_server_selector
+from pymongo.server_type import SERVER_TYPE
+from pymongo.topology_description import TopologyDescription
+from pymongo.typings import _Address
 from pymongo.write_concern import WriteConcern
 
 JSON_OPTS = json_util.JSONOptions(tz_aware=False)
 
 IS_INTERRUPTED = False
+
+KMS_TLS_OPTS = {
+    "kmip": {
+        "tlsCAFile": CA_PEM,
+        "tlsCertificateKeyFile": CLIENT_PEM,
+    }
+}
+
+
+# Build up a placeholder maps.
+PLACEHOLDER_MAP = {}
+for provider_name, provider_data in [
+    ("local", {"key": LOCAL_MASTER_KEY}),
+    ("local:name1", {"key": LOCAL_MASTER_KEY}),
+    ("aws", AWS_CREDS),
+    ("aws:name1", AWS_CREDS),
+    ("aws:name2", AWS_CREDS_2),
+    ("azure", AZURE_CREDS),
+    ("azure:name1", AZURE_CREDS),
+    ("gcp", GCP_CREDS),
+    ("gcp:name1", GCP_CREDS),
+    ("kmip", KMIP_CREDS),
+    ("kmip:name1", KMIP_CREDS),
+]:
+    for key, value in provider_data.items():
+        placeholder = f"/clientEncryptionOpts/kmsProviders/{provider_name}/{key}"
+        PLACEHOLDER_MAP[placeholder] = value
+
+PROVIDER_NAME = os.environ.get("OIDC_PROVIDER_NAME", "aws")
+if PROVIDER_NAME == "aws":
+    PLACEHOLDER_MAP["/uriOptions/authMechanismProperties"] = {"PROVIDER_NAME": "aws"}
+elif PROVIDER_NAME == "azure":
+    PLACEHOLDER_MAP["/uriOptions/authMechanismProperties"] = {
+        "PROVIDER_NAME": "azure",
+        "TOKEN_AUDIENCE": os.environ["AZUREOIDC_AUDIENCE"],
+    }
 
 
 def interrupt_loop():
@@ -99,12 +183,13 @@ def with_metaclass(meta, *bases):
 
     Vendored from six: https://github.com/benjaminp/six/blob/master/six.py
     """
+
     # This requires a bit of explanation: the basic idea is to make a dummy
     # metaclass for one level of class instantiation that replaces itself with
     # the actual metaclass.
     class metaclass(type):
         def __new__(cls, name, this_bases, d):
-            if sys.version_info[:2] >= (3, 7):
+            if sys.version_info[:2] >= (3, 7):  # noqa: UP036
                 # This version introduced PEP 560 that requires a bit
                 # of extra care (we mimic what is done by __build_class__).
                 resolved_bases = types.resolve_bases(bases)
@@ -161,8 +246,16 @@ def is_run_on_requirement_satisfied(requirement):
     if req_auth is not None:
         if req_auth:
             auth_satisfied = client_context.auth_enabled
+            if auth_satisfied and "authMechanism" in requirement:
+                auth_satisfied = client_context.check_auth_type(requirement["authMechanism"])
         else:
             auth_satisfied = not client_context.auth_enabled
+
+    csfle_satisfied = True
+    req_csfle = requirement.get("csfle")
+    if req_csfle is True:
+        min_version_satisfied = Version.from_string("4.2") <= server_version
+        csfle_satisfied = _HAVE_PYMONGOCRYPT and min_version_satisfied
 
     return (
         topology_satisfied
@@ -171,6 +264,7 @@ def is_run_on_requirement_satisfied(requirement):
         and serverless_satisfied
         and params_satisfied
         and auth_satisfied
+        and csfle_satisfied
     )
 
 
@@ -195,13 +289,18 @@ def parse_bulk_write_error_result(error):
     return parse_bulk_write_result(write_result)
 
 
-class NonLazyCursor(object):
+class NonLazyCursor:
     """A find cursor proxy that creates the remote cursor when initialized."""
 
-    def __init__(self, find_cursor):
+    def __init__(self, find_cursor, client):
+        self.client = client
         self.find_cursor = find_cursor
         # Create the server side cursor.
         self.first_result = next(find_cursor, None)
+
+    @property
+    def alive(self):
+        return self.first_result is not None or self.find_cursor.alive
 
     def __next__(self):
         if self.first_result is not None:
@@ -210,15 +309,21 @@ class NonLazyCursor(object):
             return first
         return next(self.find_cursor)
 
+    # Added to support the iterateOnce operation.
+    try_next = __next__
+
     def close(self):
         self.find_cursor.close()
+        self.client = None
 
 
-class EventListenerUtil(CMAPListener, CommandListener):
+class EventListenerUtil(
+    CMAPListener, CommandListener, ServerListener, ServerHeartbeatListener, TopologyListener
+):
     def __init__(
         self, observe_events, ignore_commands, observe_sensitive_commands, store_events, entity_map
     ):
-        self._event_types = set(name.lower() for name in observe_events)
+        self._event_types = {name.lower() for name in observe_events}
         if observe_sensitive_commands:
             self._observe_sensitive_commands = True
             self._ignore_commands = set(ignore_commands)
@@ -235,17 +340,26 @@ class EventListenerUtil(CMAPListener, CommandListener):
                 for i in events:
                     self._event_mapping[i].append(id)
                 self.entity_map[id] = []
-        super(EventListenerUtil, self).__init__()
+        super().__init__()
 
     def get_events(self, event_type):
+        assert event_type in ("command", "cmap", "sdam", "all"), event_type
+        if event_type == "all":
+            return list(self.events)
         if event_type == "command":
-            return [e for e in self.events if "Command" in type(e).__name__]
-        return [e for e in self.events if "Command" not in type(e).__name__]
+            return [e for e in self.events if isinstance(e, _CommandEvent)]
+        if event_type == "cmap":
+            return [e for e in self.events if isinstance(e, (_ConnectionEvent, _PoolEvent))]
+        return [
+            e
+            for e in self.events
+            if isinstance(e, (_ServerEvent, TopologyEvent, _ServerHeartbeatEvent))
+        ]
 
     def add_event(self, event):
         event_name = type(event).__name__.lower()
         if event_name in self._event_types:
-            super(EventListenerUtil, self).add_event(event)
+            super().add_event(event)
         for id in self._event_mapping[event_name]:
             self.entity_map[id].append(
                 {
@@ -260,34 +374,58 @@ class EventListenerUtil(CMAPListener, CommandListener):
             self.add_event(event)
 
     def started(self, event):
-        if event.command == {}:
-            # Command is redacted. Observe only if flag is set.
-            if self._observe_sensitive_commands:
+        if isinstance(event, CommandStartedEvent):
+            if event.command == {}:
+                # Command is redacted. Observe only if flag is set.
+                if self._observe_sensitive_commands:
+                    self._command_event(event)
+            else:
                 self._command_event(event)
         else:
-            self._command_event(event)
+            self.add_event(event)
 
     def succeeded(self, event):
-        if event.reply == {}:
-            # Command is redacted. Observe only if flag is set.
-            if self._observe_sensitive_commands:
+        if isinstance(event, CommandSucceededEvent):
+            if event.reply == {}:
+                # Command is redacted. Observe only if flag is set.
+                if self._observe_sensitive_commands:
+                    self._command_event(event)
+            else:
                 self._command_event(event)
         else:
-            self._command_event(event)
+            self.add_event(event)
 
     def failed(self, event):
-        self._command_event(event)
+        if isinstance(event, CommandFailedEvent):
+            self._command_event(event)
+        else:
+            self.add_event(event)
+
+    def opened(self, event: Union[ServerOpeningEvent, TopologyOpenedEvent]) -> None:
+        self.add_event(event)
+
+    def description_changed(
+        self, event: Union[ServerDescriptionChangedEvent, TopologyDescriptionChangedEvent]
+    ) -> None:
+        self.add_event(event)
+
+    def topology_changed(self, event: TopologyDescriptionChangedEvent) -> None:
+        self.add_event(event)
+
+    def closed(self, event: Union[ServerClosedEvent, TopologyClosedEvent]) -> None:
+        self.add_event(event)
 
 
-class EntityMapUtil(object):
+class EntityMapUtil:
     """Utility class that implements an entity map as per the unified
-    test format specification."""
+    test format specification.
+    """
 
     def __init__(self, test_class):
-        self._entities = {}
-        self._listeners = {}
-        self._session_lsids = {}
-        self.test = test_class
+        self._entities: Dict[str, Any] = {}
+        self._listeners: Dict[str, EventListenerUtil] = {}
+        self._session_lsids: Dict[str, Mapping[str, Any]] = {}
+        self.test: UnifiedSpecTestMixinV1 = test_class
 
     def __contains__(self, item):
         return item in self._entities
@@ -299,24 +437,36 @@ class EntityMapUtil(object):
         try:
             return self._entities[item]
         except KeyError:
-            self.test.fail("Could not find entity named %s in map" % (item,))
+            self.test.fail(f"Could not find entity named {item} in map")
 
     def __setitem__(self, key, value):
         if not isinstance(key, str):
             self.test.fail("Expected entity name of type str, got %s" % (type(key)))
 
         if key in self._entities:
-            self.test.fail("Entity named %s already in map" % (key,))
+            self.test.fail(f"Entity named {key} already in map")
 
         self._entities[key] = value
 
+    def _handle_placeholders(self, spec: dict, current: dict, path: str) -> Any:
+        if "$$placeholder" in current:
+            if path not in PLACEHOLDER_MAP:
+                raise ValueError(f"Could not find a placeholder value for {path}")
+            return PLACEHOLDER_MAP[path]
+
+        for key in list(current):
+            value = current[key]
+            if isinstance(value, dict):
+                subpath = f"{path}/{key}"
+                current[key] = self._handle_placeholders(spec, value, subpath)
+        return current
+
     def _create_entity(self, entity_spec, uri=None):
         if len(entity_spec) != 1:
-            self.test.fail(
-                "Entity spec %s did not contain exactly one top-level key" % (entity_spec,)
-            )
+            self.test.fail(f"Entity spec {entity_spec} did not contain exactly one top-level key")
 
         entity_type, spec = next(iter(entity_spec.items()))
+        spec = self._handle_placeholders(spec, spec, "")
         if entity_type == "client":
             kwargs: dict = {}
             observe_events = spec.get("observeEvents", [])
@@ -355,8 +505,9 @@ class EntityMapUtil(object):
             client = self[spec["client"]]
             if not isinstance(client, MongoClient):
                 self.test.fail(
-                    "Expected entity %s to be of type MongoClient, got %s"
-                    % (spec["client"], type(client))
+                    "Expected entity {} to be of type MongoClient, got {}".format(
+                        spec["client"], type(client)
+                    )
                 )
             options = parse_collection_or_database_options(spec.get("databaseOptions", {}))
             self[spec["id"]] = client.get_database(spec["databaseName"], **options)
@@ -365,8 +516,9 @@ class EntityMapUtil(object):
             database = self[spec["database"]]
             if not isinstance(database, Database):
                 self.test.fail(
-                    "Expected entity %s to be of type Database, got %s"
-                    % (spec["database"], type(database))
+                    "Expected entity {} to be of type Database, got {}".format(
+                        spec["database"], type(database)
+                    )
                 )
             options = parse_collection_or_database_options(spec.get("collectionOptions", {}))
             self[spec["id"]] = database.get_collection(spec["collectionName"], **options)
@@ -375,8 +527,9 @@ class EntityMapUtil(object):
             client = self[spec["client"]]
             if not isinstance(client, MongoClient):
                 self.test.fail(
-                    "Expected entity %s to be of type MongoClient, got %s"
-                    % (spec["client"], type(client))
+                    "Expected entity {} to be of type MongoClient, got {}".format(
+                        spec["client"], type(client)
+                    )
                 )
             opts = camel_to_snake_args(spec.get("sessionOptions", {}))
             if "default_transaction_options" in opts:
@@ -390,24 +543,61 @@ class EntityMapUtil(object):
             self.test.addCleanup(session.end_session)
             return
         elif entity_type == "bucket":
-            # TODO: implement the 'bucket' entity type
-            self.test.skipTest("GridFS is not currently supported (PYTHON-2459)")
-        self.test.fail("Unable to create entity of unknown type %s" % (entity_type,))
+            db = self[spec["database"]]
+            kwargs = parse_spec_options(spec.get("bucketOptions", {}).copy())
+            bucket = GridFSBucket(db, **kwargs)
+
+            # PyMongo does not support GridFSBucket.drop(), emulate it.
+            @_csot.apply
+            def drop(self: GridFSBucket, *args: Any, **kwargs: Any) -> None:
+                self._files.drop(*args, **kwargs)
+                self._chunks.drop(*args, **kwargs)
+
+            if not hasattr(bucket, "drop"):
+                bucket.drop = drop.__get__(bucket)
+            self[spec["id"]] = bucket
+            return
+        elif entity_type == "clientEncryption":
+            opts = camel_to_snake_args(spec["clientEncryptionOpts"].copy())
+            if isinstance(opts["key_vault_client"], str):
+                opts["key_vault_client"] = self[opts["key_vault_client"]]
+            # Set TLS options for providers like "kmip:name1".
+            kms_tls_options = {}
+            for provider in opts["kms_providers"]:
+                provider_type = provider.split(":")[0]
+                if provider_type in KMS_TLS_OPTS:
+                    kms_tls_options[provider] = KMS_TLS_OPTS[provider_type]
+            self[spec["id"]] = ClientEncryption(
+                opts["kms_providers"],
+                opts["key_vault_namespace"],
+                opts["key_vault_client"],
+                DEFAULT_CODEC_OPTIONS,
+                opts.get("kms_tls_options", kms_tls_options),
+            )
+            return
+        elif entity_type == "thread":
+            name = spec["id"]
+            thread = SpecRunnerThread(name)
+            thread.start()
+            self[name] = thread
+            return
+
+        self.test.fail(f"Unable to create entity of unknown type {entity_type}")
 
     def create_entities_from_spec(self, entity_spec, uri=None):
         for spec in entity_spec:
             self._create_entity(spec, uri=uri)
 
-    def get_listener_for_client(self, client_name):
+    def get_listener_for_client(self, client_name: str) -> EventListenerUtil:
         client = self[client_name]
         if not isinstance(client, MongoClient):
             self.test.fail(
-                "Expected entity %s to be of type MongoClient, got %s" % (client_name, type(client))
+                f"Expected entity {client_name} to be of type MongoClient, got {type(client)}"
             )
 
         listener = self._listeners.get(client_name)
         if not listener:
-            self.test.fail("No listeners configured for client %s" % (client_name,))
+            self.test.fail(f"No listeners configured for client {client_name}")
 
         return listener
 
@@ -415,8 +605,7 @@ class EntityMapUtil(object):
         session = self[session_name]
         if not isinstance(session, ClientSession):
             self.test.fail(
-                "Expected entity %s to be of type ClientSession, got %s"
-                % (session_name, type(session))
+                f"Expected entity {session_name} to be of type ClientSession, got {type(session)}"
             )
 
         try:
@@ -432,7 +621,7 @@ unicode_type = str
 
 
 BSON_TYPE_ALIAS_MAP = {
-    # https://docs.mongodb.com/manual/reference/operator/query/type/
+    # https://mongodb.com/docs/manual/reference/operator/query/type/
     # https://pymongo.readthedocs.io/en/stable/api/bson/index.html
     "double": (float,),
     "string": (str,),
@@ -457,24 +646,31 @@ BSON_TYPE_ALIAS_MAP = {
 }
 
 
-class MatchEvaluatorUtil(object):
+class MatchEvaluatorUtil:
     """Utility class that implements methods for evaluating matches as per
-    the unified test format specification."""
+    the unified test format specification.
+    """
 
     def __init__(self, test_class):
         self.test = test_class
 
     def _operation_exists(self, spec, actual, key_to_compare):
         if spec is True:
-            self.test.assertIn(key_to_compare, actual)
+            if key_to_compare is None:
+                assert actual is not None
+            else:
+                self.test.assertIn(key_to_compare, actual)
         elif spec is False:
-            self.test.assertNotIn(key_to_compare, actual)
+            if key_to_compare is None:
+                assert actual is None
+            else:
+                self.test.assertNotIn(key_to_compare, actual)
         else:
-            self.test.fail("Expected boolean value for $$exists operator, got %s" % (spec,))
+            self.test.fail(f"Expected boolean value for $$exists operator, got {spec}")
 
     def __type_alias_to_type(self, alias):
         if alias not in BSON_TYPE_ALIAS_MAP:
-            self.test.fail("Unrecognized BSON type alias %s" % (alias,))
+            self.test.fail(f"Unrecognized BSON type alias {alias}")
         return BSON_TYPE_ALIAS_MAP[alias]
 
     def _operation_type(self, spec, actual, key_to_compare):
@@ -489,11 +685,12 @@ class MatchEvaluatorUtil(object):
 
     def _operation_matchesEntity(self, spec, actual, key_to_compare):
         expected_entity = self.test.entity_map[spec]
-        self.test.assertIsInstance(expected_entity, abc.Mapping)
         self.test.assertEqual(expected_entity, actual[key_to_compare])
 
     def _operation_matchesHexBytes(self, spec, actual, key_to_compare):
-        raise NotImplementedError
+        expected = binascii.unhexlify(spec)
+        value = actual[key_to_compare] if key_to_compare else actual
+        self.test.assertEqual(value, expected)
 
     def _operation_unsetOrMatches(self, spec, actual, key_to_compare):
         if key_to_compare is None and not actual:
@@ -510,12 +707,23 @@ class MatchEvaluatorUtil(object):
         expected_lsid = self.test.entity_map.get_lsid_for_session(spec)
         self.test.assertEqual(expected_lsid, actual[key_to_compare])
 
+    def _operation_lte(self, spec, actual, key_to_compare):
+        if key_to_compare not in actual:
+            self.test.fail(f"Actual command is missing the {key_to_compare} field: {spec}")
+        self.test.assertLessEqual(actual[key_to_compare], spec)
+
+    def _operation_matchAsDocument(self, spec, actual, key_to_compare):
+        self._match_document(spec, json_util.loads(actual[key_to_compare]), False)
+
+    def _operation_matchAsRoot(self, spec, actual, key_to_compare):
+        self._match_document(spec, actual, True)
+
     def _evaluate_special_operation(self, opname, spec, actual, key_to_compare):
-        method_name = "_operation_%s" % (opname.strip("$"),)
+        method_name = "_operation_{}".format(opname.strip("$"))
         try:
             method = getattr(self, method_name)
         except AttributeError:
-            self.test.fail("Unsupported special matching operator %s" % (opname,))
+            self.test.fail(f"Unsupported special matching operator {opname}")
         else:
             method(spec, actual, key_to_compare)
 
@@ -526,7 +734,8 @@ class MatchEvaluatorUtil(object):
         If given, ``key_to_compare`` is assumed to be the key in
         ``expectation`` whose corresponding value needs to be
         evaluated for a possible special operation. ``key_to_compare``
-        is ignored when ``expectation`` has only one key."""
+        is ignored when ``expectation`` has only one key.
+        """
         if not isinstance(expectation, abc.Mapping):
             return False
 
@@ -588,14 +797,20 @@ class MatchEvaluatorUtil(object):
                     self._match_document(e, a, is_root=not in_recursive_call)
                 else:
                     self.match_result(e, a, in_recursive_call=True)
-                return
+                return None
 
         # account for flexible numerics in element-wise comparison
         if isinstance(expectation, int) or isinstance(expectation, float):
             self.test.assertEqual(expectation, actual)
+            return None
         else:
             self.test.assertIsInstance(actual, type(expectation))
             self.test.assertEqual(expectation, actual)
+            return None
+
+    def assertHasDatabaseName(self, spec, actual):
+        if "databaseName" in spec:
+            self.test.assertEqual(spec["databaseName"], actual.database_name)
 
     def assertHasServiceId(self, spec, actual):
         if "hasServiceId" in spec:
@@ -604,6 +819,34 @@ class MatchEvaluatorUtil(object):
                 self.test.assertIsInstance(actual.service_id, ObjectId)
             else:
                 self.test.assertIsNone(actual.service_id)
+
+    def assertHasInterruptInUseConnections(self, spec, actual):
+        if "interruptInUseConnections" in spec:
+            self.test.assertEqual(
+                spec.get("interruptInUseConnections"), actual.interrupt_connections
+            )
+        else:
+            self.test.assertIsInstance(actual.interrupt_connections, bool)
+
+    def assertHasServerConnectionId(self, spec, actual):
+        if "hasServerConnectionId" in spec:
+            if spec.get("hasServerConnectionId"):
+                self.test.assertIsNotNone(actual.server_connection_id)
+                self.test.assertIsInstance(actual.server_connection_id, int)
+            else:
+                self.test.assertIsNone(actual.server_connection_id)
+
+    def match_server_description(self, actual: ServerDescription, spec: dict) -> None:
+        if "type" in spec:
+            self.test.assertEqual(actual.server_type_name, spec["type"])
+        if "error" in spec:
+            self.test.process_error(actual.error, spec["error"])
+        if "minWireVersion" in spec:
+            self.test.assertEqual(actual.min_wire_version, spec["minWireVersion"])
+        if "maxWireVersion" in spec:
+            self.test.assertEqual(actual.max_wire_version, spec["maxWireVersion"])
+        if "topologyVersion" in spec:
+            self.test.assertEqual(actual.topology_version, spec["topologyVersion"])
 
     def match_event(self, event_type, expectation, actual):
         name, spec = next(iter(expectation.items()))
@@ -617,27 +860,24 @@ class MatchEvaluatorUtil(object):
         if name == "commandStartedEvent":
             self.test.assertIsInstance(actual, CommandStartedEvent)
             command = spec.get("command")
-            database_name = spec.get("databaseName")
             if command:
-                if actual.command_name == "update":
-                    # TODO: remove this once PYTHON-1744 is done.
-                    # Add upsert and multi fields back into expectations.
-                    for update in command.get("updates", []):
-                        update.setdefault("upsert", False)
-                        update.setdefault("multi", False)
                 self.match_result(command, actual.command)
-            if database_name:
-                self.test.assertEqual(database_name, actual.database_name)
+            self.assertHasDatabaseName(spec, actual)
             self.assertHasServiceId(spec, actual)
+            self.assertHasServerConnectionId(spec, actual)
         elif name == "commandSucceededEvent":
             self.test.assertIsInstance(actual, CommandSucceededEvent)
             reply = spec.get("reply")
             if reply:
                 self.match_result(reply, actual.reply)
+            self.assertHasDatabaseName(spec, actual)
             self.assertHasServiceId(spec, actual)
+            self.assertHasServerConnectionId(spec, actual)
         elif name == "commandFailedEvent":
             self.test.assertIsInstance(actual, CommandFailedEvent)
             self.assertHasServiceId(spec, actual)
+            self.assertHasDatabaseName(spec, actual)
+            self.assertHasServerConnectionId(spec, actual)
         elif name == "poolCreatedEvent":
             self.test.assertIsInstance(actual, PoolCreatedEvent)
         elif name == "poolReadyEvent":
@@ -645,6 +885,7 @@ class MatchEvaluatorUtil(object):
         elif name == "poolClearedEvent":
             self.test.assertIsInstance(actual, PoolClearedEvent)
             self.assertHasServiceId(spec, actual)
+            self.assertHasInterruptInUseConnections(spec, actual)
         elif name == "poolClosedEvent":
             self.test.assertIsInstance(actual, PoolClosedEvent)
         elif name == "connectionCreatedEvent":
@@ -665,8 +906,30 @@ class MatchEvaluatorUtil(object):
             self.test.assertIsInstance(actual, ConnectionCheckedOutEvent)
         elif name == "connectionCheckedInEvent":
             self.test.assertIsInstance(actual, ConnectionCheckedInEvent)
+        elif name == "serverDescriptionChangedEvent":
+            self.test.assertIsInstance(actual, ServerDescriptionChangedEvent)
+            if "previousDescription" in spec:
+                self.match_server_description(
+                    actual.previous_description, spec["previousDescription"]
+                )
+            if "newDescription" in spec:
+                self.match_server_description(actual.new_description, spec["newDescription"])
+        elif name == "serverHeartbeatStartedEvent":
+            self.test.assertIsInstance(actual, ServerHeartbeatStartedEvent)
+            if "awaited" in spec:
+                self.test.assertEqual(actual.awaited, spec["awaited"])
+        elif name == "serverHeartbeatSucceededEvent":
+            self.test.assertIsInstance(actual, ServerHeartbeatSucceededEvent)
+            if "awaited" in spec:
+                self.test.assertEqual(actual.awaited, spec["awaited"])
+        elif name == "serverHeartbeatFailedEvent":
+            self.test.assertIsInstance(actual, ServerHeartbeatFailedEvent)
+            if "awaited" in spec:
+                self.test.assertEqual(actual.awaited, spec["awaited"])
+        elif name == "topologyDescriptionChangedEvent":
+            self.test.assertIsInstance(actual, TopologyDescriptionChangedEvent)
         else:
-            self.test.fail("Unsupported event type %s" % (name,))
+            raise Exception(f"Unsupported event type {name}")
 
 
 def coerce_result(opname, result):
@@ -678,7 +941,7 @@ def coerce_result(opname, result):
     if opname == "insertOne":
         return {"insertedId": result.inserted_id}
     if opname == "insertMany":
-        return {idx: _id for idx, _id in enumerate(result.inserted_ids)}
+        return dict(enumerate(result.inserted_ids))
     if opname in ("deleteOne", "deleteMany"):
         return {"deletedCount": result.deleted_count}
     if opname in ("updateOne", "updateMany", "replaceOne"):
@@ -700,7 +963,7 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
     a class attribute ``TEST_SPEC``.
     """
 
-    SCHEMA_VERSION = Version.from_string("1.5")
+    SCHEMA_VERSION = Version.from_string("1.19")
     RUN_ON_LOAD_BALANCER = True
     RUN_ON_SERVERLESS = True
     TEST_SPEC: Any
@@ -717,31 +980,36 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         return False
 
     def insert_initial_data(self, initial_data):
-        for collection_data in initial_data:
+        for i, collection_data in enumerate(initial_data):
             coll_name = collection_data["collectionName"]
             db_name = collection_data["databaseName"]
+            opts = collection_data.get("createOptions", {})
             documents = collection_data["documents"]
 
-            coll = self.client.get_database(db_name).get_collection(
-                coll_name, write_concern=WriteConcern(w="majority")
-            )
-            coll.drop()
-
-            if len(documents) > 0:
-                coll.insert_many(documents)
+            # Setup the collection with as few majority writes as possible.
+            db = self.client[db_name]
+            db.drop_collection(coll_name)
+            # Only use majority wc only on the final write.
+            if i == len(initial_data) - 1:
+                wc = WriteConcern(w="majority")
             else:
-                # ensure collection exists
-                result = coll.insert_one({})
-                coll.delete_one({"_id": result.inserted_id})
+                wc = WriteConcern(w=1)
+            if documents:
+                if opts:
+                    db.create_collection(coll_name, **opts)
+                db.get_collection(coll_name, write_concern=wc).insert_many(documents)
+            else:
+                # Ensure collection exists
+                db.create_collection(coll_name, write_concern=wc, **opts)
 
     @classmethod
     def setUpClass(cls):
         # super call creates internal client cls.client
-        super(UnifiedSpecTestMixinV1, cls).setUpClass()
+        super().setUpClass()
         # process file-level runOnRequirements
         run_on_spec = cls.TEST_SPEC.get("runOnRequirements", [])
         if not cls.should_run_on(run_on_spec):
-            raise unittest.SkipTest("%s runOnRequirements not satisfied" % (cls.__name__,))
+            raise unittest.SkipTest(f"{cls.__name__} runOnRequirements not satisfied")
 
         # add any special-casing for skipping tests here
         if client_context.storage_engine == "mmapv1":
@@ -749,7 +1017,7 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
                 raise unittest.SkipTest("MMAPv1 does not support retryWrites=True")
 
     def setUp(self):
-        super(UnifiedSpecTestMixinV1, self).setUp()
+        super().setUp()
         # process schemaVersion
         # note: we check major schema version during class generation
         # note: we do this here because we cannot run assertions in setUpClass
@@ -757,7 +1025,7 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         self.assertLessEqual(
             version,
             self.SCHEMA_VERSION,
-            "expected schema version %s or lower, got %s" % (self.SCHEMA_VERSION, version),
+            f"expected schema version {self.SCHEMA_VERSION} or lower, got {version}",
         )
 
         # initialize internals
@@ -769,10 +1037,42 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
             if (
                 "Dirty explicit session is discarded" in spec["description"]
                 or "Dirty implicit session is discarded" in spec["description"]
+                or "Cancel server check" in spec["description"]
             ):
-                raise unittest.SkipTest("MMAPv1 does not support retryWrites=True")
-        elif "Client side error in command starting transaction" in spec["description"]:
-            raise unittest.SkipTest("Implement PYTHON-1894")
+                self.skipTest("MMAPv1 does not support retryWrites=True")
+        if "Client side error in command starting transaction" in spec["description"]:
+            self.skipTest("Implement PYTHON-1894")
+        if "timeoutMS applied to entire download" in spec["description"]:
+            self.skipTest("PyMongo's open_download_stream does not cap the stream's lifetime")
+
+        if "unpin after TransientTransactionError error on" in spec["description"]:
+            if client_context.version[0] == 8:
+                self.skipTest("Skipping TransientTransactionError pending PYTHON-4182")
+        if "unpin after non-transient error on abort" in spec["description"]:
+            if client_context.version[0] == 8:
+                self.skipTest("Skipping TransientTransactionError pending PYTHON-4182")
+
+        class_name = self.__class__.__name__.lower()
+        description = spec["description"].lower()
+        if "csot" in class_name:
+            if "gridfs" in class_name and sys.platform == "win32":
+                self.skipTest("PYTHON-3522 CSOT GridFS tests are flaky on Windows")
+            if client_context.storage_engine == "mmapv1":
+                self.skipTest(
+                    "MMAPv1 does not support retryable writes which is required for CSOT tests"
+                )
+            if "change" in description or "change" in class_name:
+                self.skipTest("CSOT not implemented for watch()")
+            if "cursors" in class_name:
+                self.skipTest("CSOT not implemented for cursors")
+            if "tailable" in class_name:
+                self.skipTest("CSOT not implemented for tailable cursors")
+            if "sessions" in class_name:
+                self.skipTest("CSOT not implemented for sessions")
+            if "withtransaction" in description:
+                self.skipTest("CSOT not implemented for with_transaction")
+            if "transaction" in class_name or "transaction" in description:
+                self.skipTest("CSOT not implemented for transactions")
 
         # Some tests need to be skipped based on the operations they try to run.
         for op in spec["operations"]:
@@ -789,16 +1089,24 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
             if not client_context.test_commands_enabled:
                 if name == "failPoint" or name == "targetedFailPoint":
                     self.skipTest("Test commands must be enabled to use fail points")
+            if name == "modifyCollection":
+                self.skipTest("PyMongo does not support modifyCollection")
+            if "timeoutMode" in op.get("arguments", {}):
+                self.skipTest("PyMongo does not support timeoutMode")
 
     def process_error(self, exception, spec):
         is_error = spec.get("isError")
         is_client_error = spec.get("isClientError")
+        is_timeout_error = spec.get("isTimeoutError")
         error_contains = spec.get("errorContains")
         error_code = spec.get("errorCode")
         error_code_name = spec.get("errorCodeName")
         error_labels_contain = spec.get("errorLabelsContain")
         error_labels_omit = spec.get("errorLabelsOmit")
         expect_result = spec.get("expectResult")
+        error_response = spec.get("errorResponse")
+        if error_response:
+            self.match_evaluator.match_result(error_response, exception.details)
 
         if is_error:
             # already satisfied because exception was raised
@@ -808,10 +1116,16 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
             # Connection errors are considered client errors.
             if isinstance(exception, ConnectionFailure):
                 self.assertNotIsInstance(exception, NotPrimaryError)
-            elif isinstance(exception, (InvalidOperation, ConfigurationError)):
+            elif isinstance(exception, (InvalidOperation, ConfigurationError, EncryptionError)):
                 pass
             else:
                 self.assertNotIsInstance(exception, PyMongoError)
+
+        if is_timeout_error:
+            self.assertIsInstance(exception, PyMongoError)
+            if not exception.timeout:
+                # Re-raise the exception for better diagnostics.
+                raise exception
 
         if error_contains:
             if isinstance(exception, BulkWriteError):
@@ -837,20 +1151,18 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         if error_labels_omit:
             for err_label in error_labels_omit:
                 if exception.has_error_label(err_label):
-                    self.fail("Exception '%s' unexpectedly had label '%s'" % (exception, err_label))
+                    self.fail(f"Exception '{exception}' unexpectedly had label '{err_label}'")
 
         if expect_result:
             if isinstance(exception, BulkWriteError):
                 result = parse_bulk_write_error_result(exception)
                 self.match_evaluator.match_result(expect_result, result)
             else:
-                self.fail(
-                    "expectResult can only be specified with %s exceptions" % (BulkWriteError,)
-                )
+                self.fail(f"expectResult can only be specified with {BulkWriteError} exceptions")
 
     def __raise_if_unsupported(self, opname, target, *target_types):
         if not isinstance(target, target_types):
-            self.fail("Operation %s not supported for entity of type %s" % (opname, type(target)))
+            self.fail(f"Operation {opname} not supported for entity of type {type(target)}")
 
     def __entityOperation_createChangeStream(self, target, *args, **kwargs):
         if client_context.storage_engine == "mmapv1":
@@ -877,11 +1189,50 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         kwargs["command"] = ordered_command
         return target.command(**kwargs)
 
+    def _databaseOperation_runCursorCommand(self, target, **kwargs):
+        return list(self._databaseOperation_createCommandCursor(target, **kwargs))
+
+    def _databaseOperation_createCommandCursor(self, target, **kwargs):
+        self.__raise_if_unsupported("createCommandCursor", target, Database)
+        # Ensure the first key is the command name.
+        ordered_command = SON([(kwargs.pop("command_name"), 1)])
+        ordered_command.update(kwargs["command"])
+        kwargs["command"] = ordered_command
+        batch_size = 0
+
+        cursor_type = kwargs.pop("cursor_type", "nonTailable")
+        if cursor_type == CursorType.TAILABLE:
+            ordered_command["tailable"] = True
+        elif cursor_type == CursorType.TAILABLE_AWAIT:
+            ordered_command["tailable"] = True
+            ordered_command["awaitData"] = True
+        elif cursor_type != "nonTailable":
+            self.fail(f"unknown cursorType: {cursor_type}")
+
+        if "maxTimeMS" in kwargs:
+            kwargs["max_await_time_ms"] = kwargs.pop("maxTimeMS")
+
+        if "batch_size" in kwargs:
+            batch_size = kwargs.pop("batch_size")
+
+        cursor = target.cursor_command(**kwargs)
+
+        if batch_size > 0:
+            cursor.batch_size(batch_size)
+
+        return cursor
+
     def _databaseOperation_listCollections(self, target, *args, **kwargs):
         if "batch_size" in kwargs:
             kwargs["cursor"] = {"batchSize": kwargs.pop("batch_size")}
         cursor = target.list_collections(*args, **kwargs)
         return list(cursor)
+
+    def _databaseOperation_createCollection(self, target, *args, **kwargs):
+        # PYTHON-1936 Ignore the listCollections event from create_collection.
+        kwargs["check_exists"] = False
+        ret = target.create_collection(*args, **kwargs)
+        return ret
 
     def __entityOperation_aggregate(self, target, *args, **kwargs):
         self.__raise_if_unsupported("aggregate", target, Database, Collection)
@@ -902,14 +1253,29 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         self.__raise_if_unsupported("find", target, Collection)
         if "filter" not in kwargs:
             self.fail('createFindCursor requires a "filter" argument')
-        cursor = NonLazyCursor(target.find(*args, **kwargs))
+        cursor = NonLazyCursor(target.find(*args, **kwargs), target.database.client)
         self.addCleanup(cursor.close)
         return cursor
+
+    def _collectionOperation_count(self, target, *args, **kwargs):
+        self.skipTest("PyMongo does not support collection.count()")
 
     def _collectionOperation_listIndexes(self, target, *args, **kwargs):
         if "batch_size" in kwargs:
             self.skipTest("PyMongo does not support batch_size for list_indexes")
-        return target.list_indexes(*args, **kwargs)
+        return list(target.list_indexes(*args, **kwargs))
+
+    def _collectionOperation_listIndexNames(self, target, *args, **kwargs):
+        self.skipTest("PyMongo does not support list_index_names")
+
+    def _collectionOperation_createSearchIndexes(self, target, *args, **kwargs):
+        models = [SearchIndexModel(**i) for i in kwargs["models"]]
+        return target.create_search_indexes(models)
+
+    def _collectionOperation_listSearchIndexes(self, target, *args, **kwargs):
+        name = kwargs.get("name")
+        agg_kwargs = kwargs.get("aggregation_options", dict())
+        return list(target.list_search_indexes(name, **agg_kwargs))
 
     def _sessionOperation_withTransaction(self, target, *args, **kwargs):
         if client_context.storage_engine == "mmapv1":
@@ -928,12 +1294,74 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         return next(target)
 
     def _cursor_iterateUntilDocumentOrError(self, target, *args, **kwargs):
-        self.__raise_if_unsupported("iterateUntilDocumentOrError", target, NonLazyCursor)
-        return next(target)
+        self.__raise_if_unsupported(
+            "iterateUntilDocumentOrError", target, NonLazyCursor, CommandCursor
+        )
+        while target.alive:
+            try:
+                return next(target)
+            except StopIteration:
+                pass
+        return None
 
     def _cursor_close(self, target, *args, **kwargs):
-        self.__raise_if_unsupported("close", target, NonLazyCursor)
+        self.__raise_if_unsupported("close", target, NonLazyCursor, CommandCursor)
         return target.close()
+
+    def _clientEncryptionOperation_createDataKey(self, target, *args, **kwargs):
+        if "opts" in kwargs:
+            kwargs.update(camel_to_snake_args(kwargs.pop("opts")))
+
+        return target.create_data_key(*args, **kwargs)
+
+    def _clientEncryptionOperation_getKeys(self, target, *args, **kwargs):
+        return list(target.get_keys(*args, **kwargs))
+
+    def _clientEncryptionOperation_deleteKey(self, target, *args, **kwargs):
+        result = target.delete_key(*args, **kwargs)
+        response = result.raw_result
+        response["deletedCount"] = result.deleted_count
+        return response
+
+    def _clientEncryptionOperation_rewrapManyDataKey(self, target, *args, **kwargs):
+        if "opts" in kwargs:
+            kwargs.update(camel_to_snake_args(kwargs.pop("opts")))
+        data = target.rewrap_many_data_key(*args, **kwargs)
+        if data.bulk_write_result:
+            return {"bulkWriteResult": parse_bulk_write_result(data.bulk_write_result)}
+        return {}
+
+    def _clientEncryptionOperation_encrypt(self, target, *args, **kwargs):
+        if "opts" in kwargs:
+            kwargs.update(camel_to_snake_args(kwargs.pop("opts")))
+        return target.encrypt(*args, **kwargs)
+
+    def _bucketOperation_download(self, target: GridFSBucket, *args: Any, **kwargs: Any) -> bytes:
+        with target.open_download_stream(*args, **kwargs) as gout:
+            return gout.read()
+
+    def _bucketOperation_downloadByName(
+        self, target: GridFSBucket, *args: Any, **kwargs: Any
+    ) -> bytes:
+        with target.open_download_stream_by_name(*args, **kwargs) as gout:
+            return gout.read()
+
+    def _bucketOperation_upload(self, target: GridFSBucket, *args: Any, **kwargs: Any) -> ObjectId:
+        kwargs["source"] = binascii.unhexlify(kwargs.pop("source")["$$hexBytes"])
+        if "content_type" in kwargs:
+            kwargs.setdefault("metadata", {})["contentType"] = kwargs.pop("content_type")
+        return target.upload_from_stream(*args, **kwargs)
+
+    def _bucketOperation_uploadWithId(self, target: GridFSBucket, *args: Any, **kwargs: Any) -> Any:
+        kwargs["source"] = binascii.unhexlify(kwargs.pop("source")["$$hexBytes"])
+        if "content_type" in kwargs:
+            kwargs.setdefault("metadata", {})["contentType"] = kwargs.pop("content_type")
+        return target.upload_from_stream_with_id(*args, **kwargs)
+
+    def _bucketOperation_find(
+        self, target: GridFSBucket, *args: Any, **kwargs: Any
+    ) -> List[GridOut]:
+        return list(target.find(*args, **kwargs))
 
     def run_entity_operation(self, spec):
         target = self.entity_map[spec["object"]]
@@ -954,50 +1382,68 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
                 spec, arguments, camel_to_snake(opname), self.entity_map, self.run_operations
             )
         else:
-            arguments = tuple()
+            arguments = {}
 
         if isinstance(target, MongoClient):
-            method_name = "_clientOperation_%s" % (opname,)
+            method_name = f"_clientOperation_{opname}"
         elif isinstance(target, Database):
-            method_name = "_databaseOperation_%s" % (opname,)
+            method_name = f"_databaseOperation_{opname}"
         elif isinstance(target, Collection):
-            method_name = "_collectionOperation_%s" % (opname,)
+            method_name = f"_collectionOperation_{opname}"
+            # contentType is always stored in metadata in pymongo.
+            if target.name.endswith(".files") and opname == "find":
+                for doc in spec.get("expectResult", []):
+                    if "contentType" in doc:
+                        doc.setdefault("metadata", {})["contentType"] = doc.pop("contentType")
         elif isinstance(target, ChangeStream):
-            method_name = "_changeStreamOperation_%s" % (opname,)
-        elif isinstance(target, NonLazyCursor):
-            method_name = "_cursor_%s" % (opname,)
+            method_name = f"_changeStreamOperation_{opname}"
+        elif isinstance(target, (NonLazyCursor, CommandCursor)):
+            method_name = f"_cursor_{opname}"
         elif isinstance(target, ClientSession):
-            method_name = "_sessionOperation_%s" % (opname,)
+            method_name = f"_sessionOperation_{opname}"
         elif isinstance(target, GridFSBucket):
-            raise NotImplementedError
+            method_name = f"_bucketOperation_{opname}"
+            if "id" in arguments:
+                arguments["file_id"] = arguments.pop("id")
+            # MD5 is always disabled in pymongo.
+            arguments.pop("disable_md5", None)
+        elif isinstance(target, ClientEncryption):
+            method_name = f"_clientEncryptionOperation_{opname}"
         else:
             method_name = "doesNotExist"
 
         try:
             method = getattr(self, method_name)
         except AttributeError:
+            target_opname = camel_to_snake(opname)
+            if target_opname == "iterate_once":
+                target_opname = "try_next"
             try:
-                cmd = getattr(target, camel_to_snake(opname))
+                cmd = getattr(target, target_opname)
             except AttributeError:
-                self.fail("Unsupported operation %s on entity %s" % (opname, target))
+                self.fail(f"Unsupported operation {opname} on entity {target}")
         else:
             cmd = functools.partial(method, target)
 
         try:
-            result = cmd(**dict(arguments))
+            # CSOT: Translate the spec test "timeout" arg into pymongo's context timeout API.
+            if "timeout" in arguments:
+                timeout = arguments.pop("timeout")
+                with pymongo.timeout(timeout):
+                    result = cmd(**dict(arguments))
+            else:
+                result = cmd(**dict(arguments))
         except Exception as exc:
             # Ignore all operation errors but to avoid masking bugs don't
             # ignore things like TypeError and ValueError.
             if ignore and isinstance(exc, (PyMongoError,)):
-                return
+                return None
             if expect_error:
                 return self.process_error(exc, expect_error)
             raise
         else:
             if expect_error:
-                self.fail(
-                    'Excepted error %s but "%s" succeeded: %s' % (expect_error, opname, result)
-                )
+                self.fail(f'Excepted error {expect_error} but "{opname}" succeeded: {result}')
 
         if expect_result:
             actual = coerce_result(opname, result)
@@ -1005,6 +1451,8 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
 
         if save_as_entity:
             self.entity_map[save_as_entity] = result
+            return None
+        return None
 
     def __set_fail_point(self, client, command_args):
         if not client_context.test_commands_enabled:
@@ -1026,13 +1474,17 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         session = self.entity_map[spec["session"]]
         if not session._pinned_address:
             self.fail(
-                "Cannot use targetedFailPoint operation with unpinned "
-                "session %s" % (spec["session"],)
+                "Cannot use targetedFailPoint operation with unpinned " "session {}".format(
+                    spec["session"]
+                )
             )
 
-        client = single_client("%s:%s" % session._pinned_address)
+        client = single_client("{}:{}".format(*session._pinned_address))
         self.addCleanup(client.close)
         self.__set_fail_point(client=client, command_args=spec["failPoint"])
+
+    def _testOperation_createEntities(self, spec):
+        self.entity_map.create_entities_from_spec(spec["entities"], uri=self._uri)
 
     def _testOperation_assertSessionTransactionState(self, spec):
         session = self.entity_map[spec["session"]]
@@ -1103,6 +1555,88 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         pool = get_pool(client)
         self.assertEqual(spec["connections"], pool.active_sockets)
 
+    def _event_count(self, client_name, event):
+        listener = self.entity_map.get_listener_for_client(client_name)
+        actual_events = listener.get_events("all")
+        count = 0
+        for actual in actual_events:
+            try:
+                self.match_evaluator.match_event("all", event, actual)
+            except AssertionError:
+                continue
+            else:
+                count += 1
+        return count
+
+    def _testOperation_assertEventCount(self, spec):
+        """Run the assertEventCount test operation.
+
+        Assert the given event was published exactly `count` times.
+        """
+        client, event, count = spec["client"], spec["event"], spec["count"]
+        self.assertEqual(self._event_count(client, event), count, f"expected {count} not {event!r}")
+
+    def _testOperation_waitForEvent(self, spec):
+        """Run the waitForEvent test operation.
+
+        Wait for a number of events to be published, or fail.
+        """
+        client, event, count = spec["client"], spec["event"], spec["count"]
+        wait_until(
+            lambda: self._event_count(client, event) >= count,
+            f"find {count} {event} event(s)",
+        )
+
+    def _testOperation_wait(self, spec):
+        """Run the "wait" test operation."""
+        time.sleep(spec["ms"] / 1000.0)
+
+    def _testOperation_recordTopologyDescription(self, spec):
+        """Run the recordTopologyDescription test operation."""
+        self.entity_map[spec["id"]] = self.entity_map[spec["client"]].topology_description
+
+    def _testOperation_assertTopologyType(self, spec):
+        """Run the assertTopologyType test operation."""
+        description = self.entity_map[spec["topologyDescription"]]
+        self.assertIsInstance(description, TopologyDescription)
+        self.assertEqual(description.topology_type_name, spec["topologyType"])
+
+    def _testOperation_waitForPrimaryChange(self, spec: dict) -> None:
+        """Run the waitForPrimaryChange test operation."""
+        client = self.entity_map[spec["client"]]
+        old_description: TopologyDescription = self.entity_map[spec["priorTopologyDescription"]]
+        timeout = spec["timeoutMS"] / 1000.0
+
+        def get_primary(td: TopologyDescription) -> Optional[_Address]:
+            servers = writable_server_selector(Selection.from_topology_description(td))
+            if servers and servers[0].server_type == SERVER_TYPE.RSPrimary:
+                return servers[0].address
+            return None
+
+        old_primary = get_primary(old_description)
+
+        def primary_changed() -> bool:
+            primary = client.primary
+            if primary is None:
+                return False
+            return primary != old_primary
+
+        wait_until(primary_changed, "change primary", timeout=timeout)
+
+    def _testOperation_runOnThread(self, spec):
+        """Run the 'runOnThread' operation."""
+        thread = self.entity_map[spec["thread"]]
+        thread.schedule(lambda: self.run_entity_operation(spec["operation"]))
+
+    def _testOperation_waitForThread(self, spec):
+        """Run the 'waitForThread' operation."""
+        thread = self.entity_map[spec["thread"]]
+        thread.stop()
+        thread.join(10)
+        if thread.exc:
+            raise thread.exc
+        self.assertFalse(thread.is_alive(), "Thread {} is still running".format(spec["thread"]))
+
     def _testOperation_loop(self, spec):
         failure_key = spec.get("storeFailuresAsEntity")
         error_key = spec.get("storeErrorsAsEntity")
@@ -1143,11 +1677,11 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
 
     def run_special_operation(self, spec):
         opname = spec["name"]
-        method_name = "_testOperation_%s" % (opname,)
+        method_name = f"_testOperation_{opname}"
         try:
             method = getattr(self, method_name)
         except AttributeError:
-            self.fail("Unsupported special test operation %s" % (opname,))
+            self.fail(f"Unsupported special test operation {opname}")
         else:
             method(spec["arguments"])
 
@@ -1162,20 +1696,71 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         for event_spec in spec:
             client_name = event_spec["client"]
             events = event_spec["events"]
-            # Valid types: 'command', 'cmap'
             event_type = event_spec.get("eventType", "command")
-            assert event_type in ("command", "cmap")
-
+            ignore_extra_events = event_spec.get("ignoreExtraEvents", False)
+            server_connection_id = event_spec.get("serverConnectionId")
+            has_server_connection_id = event_spec.get("hasServerConnectionId", False)
             listener = self.entity_map.get_listener_for_client(client_name)
             actual_events = listener.get_events(event_type)
+            if ignore_extra_events:
+                actual_events = actual_events[: len(events)]
+
             if len(events) == 0:
                 self.assertEqual(actual_events, [])
                 continue
 
-            self.assertGreaterEqual(len(actual_events), len(events), actual_events)
+            self.assertEqual(len(actual_events), len(events), actual_events)
 
             for idx, expected_event in enumerate(events):
                 self.match_evaluator.match_event(event_type, expected_event, actual_events[idx])
+
+            if has_server_connection_id:
+                assert server_connection_id is not None
+                assert server_connection_id >= 0
+            else:
+                assert server_connection_id is None
+
+    def check_log_messages(self, operations, spec):
+        def format_logs(log_list):
+            client_to_log = defaultdict(list)
+            for log in log_list:
+                data = json_util.loads(log.message)
+                client = data.pop("clientId")
+                client_to_log[client].append(
+                    {
+                        "level": log.levelname.lower(),
+                        "component": log.name.replace("pymongo.", "", 1),
+                        "data": data,
+                    }
+                )
+            return client_to_log
+
+        with self.assertLogs("pymongo", level="DEBUG") as cm:
+            self.run_operations(operations)
+            formatted_logs = format_logs(cm.records)
+            for client in spec:
+                components = set()
+                for message in client["messages"]:
+                    components.add(message["component"])
+
+                clientid = self.entity_map[client["client"]]._topology_settings._topology_id
+                actual_logs = formatted_logs[clientid]
+                actual_logs = [log for log in actual_logs if log["component"] in components]
+                self.assertEqual(len(client["messages"]), len(actual_logs))
+                for expected_msg, actual_msg in zip(client["messages"], actual_logs):
+                    expected_data, actual_data = expected_msg.pop("data"), actual_msg.pop("data")
+
+                    if "failureIsRedacted" in expected_msg:
+                        self.assertIn("failure", actual_data)
+                        should_redact = expected_msg.pop("failureIsRedacted")
+                        if should_redact:
+                            actual_fields = set(json_util.loads(actual_data["failure"]).keys())
+                            self.assertTrue(
+                                {"code", "codeName", "errorLabels"}.issuperset(actual_fields)
+                            )
+
+                    self.match_evaluator.match_result(expected_data, actual_data)
+                    self.match_evaluator.match_result(expected_msg, actual_msg)
 
     def verify_outcome(self, spec):
         for collection_data in spec:
@@ -1195,6 +1780,28 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
                 self.assertListEqual(sorted_expected_documents, actual_documents)
 
     def run_scenario(self, spec, uri=None):
+        if "csot" in self.id().lower():
+            # Retry CSOT tests up to 2 times to deal with flakey tests.
+            attempts = 3
+            for i in range(attempts):
+                try:
+                    return self._run_scenario(spec, uri)
+                except AssertionError:
+                    if i < attempts - 1:
+                        print(
+                            f"Retrying after attempt {i+1} of {self.id()} failed with:\n"
+                            f"{traceback.format_exc()}",
+                            file=sys.stderr,
+                        )
+                        self.setUp()
+                        continue
+                    raise
+            return None
+        else:
+            self._run_scenario(spec, uri)
+            return None
+
+    def _run_scenario(self, spec, uri=None):
         # maybe skip test manually
         self.maybe_skip_test(spec)
 
@@ -1206,16 +1813,22 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
         # process skipReason
         skip_reason = spec.get("skipReason", None)
         if skip_reason is not None:
-            raise unittest.SkipTest("%s" % (skip_reason,))
+            raise unittest.SkipTest(f"{skip_reason}")
 
         # process createEntities
+        self._uri = uri
         self.entity_map = EntityMapUtil(self)
         self.entity_map.create_entities_from_spec(self.TEST_SPEC.get("createEntities", []), uri=uri)
         # process initialData
         self.insert_initial_data(self.TEST_SPEC.get("initialData", []))
 
-        # process operations
-        self.run_operations(spec["operations"])
+        if "expectLogMessages" in spec:
+            expect_log_messages = spec["expectLogMessages"]
+            self.assertTrue(expect_log_messages, "expectEvents must be non-empty")
+            self.check_log_messages(spec["operations"], expect_log_messages)
+        else:
+            # process operations
+            self.run_operations(spec["operations"])
 
         # process expectEvents
         if "expectEvents" in spec:
@@ -1234,7 +1847,7 @@ class UnifiedSpecTestMeta(type):
     EXPECTED_FAILURES: Any
 
     def __init__(cls, *args, **kwargs):
-        super(UnifiedSpecTestMeta, cls).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         def create_test(spec):
             def test_case(self):
@@ -1244,7 +1857,9 @@ class UnifiedSpecTestMeta(type):
 
         for test_spec in cls.TEST_SPEC["tests"]:
             description = test_spec["description"]
-            test_name = "test_%s" % (description.strip(". ").replace(" ", "_").replace(".", "_"),)
+            test_name = "test_{}".format(
+                description.strip(". ").replace(" ", "_").replace(".", "_")
+            )
             test_method = create_test(copy.deepcopy(test_spec))
             test_method.__name__ = str(test_name)
 
@@ -1273,16 +1888,18 @@ def generate_test_classes(
     class_name_prefix="",
     expected_failures=[],  # noqa: B006
     bypass_test_generation_errors=False,
-    **kwargs
+    **kwargs,
 ):
     """Method for generating test classes. Returns a dictionary where keys are
-    the names of test classes and values are the test class objects."""
+    the names of test classes and values are the test class objects.
+    """
     test_klasses = {}
 
     def test_base_class_factory(test_spec):
         """Utility that creates the base class to use for test generation.
         This is needed to ensure that cls.TEST_SPEC is appropriately set when
-        the metaclass __init__ is invoked."""
+        the metaclass __init__ is invoked.
+        """
 
         class SpecTestBase(with_metaclass(UnifiedSpecTestMeta)):  # type: ignore
             TEST_SPEC = test_spec
@@ -1302,7 +1919,7 @@ def generate_test_classes(
                 scenario_def = json_util.loads(scenario_stream.read(), json_options=opts)
 
             test_type = os.path.splitext(filename)[0]
-            snake_class_name = "Test%s_%s_%s" % (
+            snake_class_name = "Test{}_{}_{}".format(
                 class_name_prefix,
                 dirname.replace("-", "_"),
                 test_type.replace("-", "_").replace(".", "_"),
@@ -1314,8 +1931,7 @@ def generate_test_classes(
                 mixin_class = _SCHEMA_VERSION_MAJOR_TO_MIXIN_CLASS.get(schema_version[0])
                 if mixin_class is None:
                     raise ValueError(
-                        "test file '%s' has unsupported schemaVersion '%s'"
-                        % (fpath, schema_version)
+                        f"test file '{fpath}' has unsupported schemaVersion '{schema_version}'"
                     )
                 module_dict = {"__module__": module}
                 module_dict.update(kwargs)

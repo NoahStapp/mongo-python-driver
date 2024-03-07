@@ -27,9 +27,12 @@ MongoDB, you can start it like so:
    gevent
    gridfs
    high_availability
+   logging
    mod_wsgi
+   network_compression
    server_selection
    tailable
+   timeouts
    tls
    type_hints
    encryption

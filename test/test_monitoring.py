@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import copy
 import datetime
@@ -39,25 +40,24 @@ class TestCommandMonitoring(IntegrationTest):
     @classmethod
     @client_context.require_connection
     def setUpClass(cls):
-        super(TestCommandMonitoring, cls).setUpClass()
+        super().setUpClass()
         cls.listener = EventListener()
         cls.client = rs_or_single_client(event_listeners=[cls.listener], retryWrites=False)
 
     @classmethod
     def tearDownClass(cls):
         cls.client.close()
-        super(TestCommandMonitoring, cls).tearDownClass()
+        super().tearDownClass()
 
     def tearDown(self):
-        self.listener.results.clear()
-        super(TestCommandMonitoring, self).tearDown()
+        self.listener.reset()
+        super().tearDown()
 
     def test_started_simple(self):
         self.client.pymongo_test.command("ping")
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertTrue(isinstance(succeeded, monitoring.CommandSucceededEvent))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertEqualCommand(SON([("ping", 1)]), started.command)
@@ -68,10 +68,9 @@ class TestCommandMonitoring(IntegrationTest):
 
     def test_succeeded_simple(self):
         self.client.pymongo_test.command("ping")
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertTrue(isinstance(succeeded, monitoring.CommandSucceededEvent))
         self.assertEqual("ping", succeeded.command_name)
@@ -85,10 +84,9 @@ class TestCommandMonitoring(IntegrationTest):
             self.client.pymongo_test.command("oops!")
         except OperationFailure:
             pass
-        results = self.listener.results
-        started = results["started"][0]
-        failed = results["failed"][0]
-        self.assertEqual(0, len(results["succeeded"]))
+        started = self.listener.started_events[0]
+        failed = self.listener.failed_events[0]
+        self.assertEqual(0, len(self.listener.succeeded_events))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertTrue(isinstance(failed, monitoring.CommandFailedEvent))
         self.assertEqual("oops!", failed.command_name)
@@ -99,10 +97,9 @@ class TestCommandMonitoring(IntegrationTest):
 
     def test_find_one(self):
         self.client.pymongo_test.test.find_one()
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertTrue(isinstance(succeeded, monitoring.CommandSucceededEvent))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertEqualCommand(
@@ -117,15 +114,14 @@ class TestCommandMonitoring(IntegrationTest):
     def test_find_and_get_more(self):
         self.client.pymongo_test.test.drop()
         self.client.pymongo_test.test.insert_many([{} for _ in range(10)])
-        self.listener.results.clear()
+        self.listener.reset()
         cursor = self.client.pymongo_test.test.find(projection={"_id": False}, batch_size=4)
         for _ in range(4):
             next(cursor)
         cursor_id = cursor.cursor_id
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertEqualCommand(
             SON(
@@ -147,15 +143,14 @@ class TestCommandMonitoring(IntegrationTest):
         self.assertEqual(csr["ns"], "pymongo_test.test")
         self.assertEqual(csr["firstBatch"], [{} for _ in range(4)])
 
-        self.listener.results.clear()
+        self.listener.reset()
         # Next batch. Exhausting the cursor could cause a getMore
         # that returns id of 0 and no results.
         next(cursor)
         try:
-            results = self.listener.results
-            started = results["started"][0]
-            succeeded = results["succeeded"][0]
-            self.assertEqual(0, len(results["failed"]))
+            started = self.listener.started_events[0]
+            succeeded = self.listener.succeeded_events[0]
+            self.assertEqual(0, len(self.listener.failed_events))
             self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
             self.assertEqualCommand(
                 SON([("getMore", cursor_id), ("collection", "test"), ("batchSize", 4)]),
@@ -182,16 +177,15 @@ class TestCommandMonitoring(IntegrationTest):
         cmd = SON([("explain", SON([("find", "test"), ("filter", {})]))])
         self.client.pymongo_test.test.drop()
         self.client.pymongo_test.test.insert_one({})
-        self.listener.results.clear()
+        self.listener.reset()
         coll = self.client.pymongo_test.test
         # Test that we publish the unwrapped command.
         if self.client.is_mongos:
             coll = coll.with_options(read_preference=ReadPreference.PRIMARY_PREFERRED)
         res = coll.find().explain()
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertEqualCommand(cmd, started.command)
         self.assertEqual("explain", started.command_name)
@@ -212,7 +206,7 @@ class TestCommandMonitoring(IntegrationTest):
         coll.insert_many([{"x": i} for i in range(5)])
 
         # Test that we publish the unwrapped command.
-        self.listener.results.clear()
+        self.listener.reset()
         if self.client.is_mongos:
             coll = coll.with_options(read_preference=ReadPreference.PRIMARY_PREFERRED)
 
@@ -220,10 +214,9 @@ class TestCommandMonitoring(IntegrationTest):
 
         next(cursor)
         try:
-            results = self.listener.results
-            started = results["started"][0]
-            succeeded = results["succeeded"][0]
-            self.assertEqual(0, len(results["failed"]))
+            started = self.listener.started_events[0]
+            succeeded = self.listener.succeeded_events[0]
+            self.assertEqual(0, len(self.listener.failed_events))
             self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
             self.assertEqualCommand(expected_cmd, started.command)
             self.assertEqual("find", started.command_name)
@@ -240,40 +233,40 @@ class TestCommandMonitoring(IntegrationTest):
             tuple(cursor)
 
     def test_find_options(self):
-        query = dict(
-            filter={},
-            hint=[("x", 1)],
-            max_time_ms=10000,
-            max={"x": 10},
-            min={"x": -10},
-            return_key=True,
-            show_record_id=True,
-            projection={"x": False},
-            skip=1,
-            no_cursor_timeout=True,
-            sort=[("_id", 1)],
-            allow_partial_results=True,
-            comment="this is a test",
-            batch_size=2,
-        )
+        query = {
+            "filter": {},
+            "hint": [("x", 1)],
+            "max_time_ms": 10000,
+            "max": {"x": 10},
+            "min": {"x": -10},
+            "return_key": True,
+            "show_record_id": True,
+            "projection": {"x": False},
+            "skip": 1,
+            "no_cursor_timeout": True,
+            "sort": [("_id", 1)],
+            "allow_partial_results": True,
+            "comment": "this is a test",
+            "batch_size": 2,
+        }
 
-        cmd = dict(
-            find="test",
-            filter={},
-            hint=SON([("x", 1)]),
-            comment="this is a test",
-            maxTimeMS=10000,
-            max={"x": 10},
-            min={"x": -10},
-            returnKey=True,
-            showRecordId=True,
-            sort=SON([("_id", 1)]),
-            projection={"x": False},
-            skip=1,
-            batchSize=2,
-            noCursorTimeout=True,
-            allowPartialResults=True,
-        )
+        cmd = {
+            "find": "test",
+            "filter": {},
+            "hint": SON([("x", 1)]),
+            "comment": "this is a test",
+            "maxTimeMS": 10000,
+            "max": {"x": 10},
+            "min": {"x": -10},
+            "returnKey": True,
+            "showRecordId": True,
+            "sort": SON([("_id", 1)]),
+            "projection": {"x": False},
+            "skip": 1,
+            "batchSize": 2,
+            "noCursorTimeout": True,
+            "allowPartialResults": True,
+        }
 
         if client_context.version < (4, 1, 0, -1):
             query["max_scan"] = 10
@@ -284,16 +277,16 @@ class TestCommandMonitoring(IntegrationTest):
     @client_context.require_version_max(3, 7, 2)
     def test_find_snapshot(self):
         # Test "snapshot" parameter separately, can't combine with "sort".
-        query = dict(filter={}, snapshot=True)
+        query = {"filter": {}, "snapshot": True}
 
-        cmd = dict(find="test", filter={}, snapshot=True)
+        cmd = {"find": "test", "filter": {}, "snapshot": True}
 
         self._test_find_options(query, cmd)
 
     def test_command_and_get_more(self):
         self.client.pymongo_test.test.drop()
         self.client.pymongo_test.test.insert_many([{"x": 1} for _ in range(10)])
-        self.listener.results.clear()
+        self.listener.reset()
         coll = self.client.pymongo_test.test
         # Test that we publish the unwrapped command.
         if self.client.is_mongos:
@@ -302,10 +295,9 @@ class TestCommandMonitoring(IntegrationTest):
         for _ in range(4):
             next(cursor)
         cursor_id = cursor.cursor_id
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertEqualCommand(
             SON(
@@ -333,13 +325,12 @@ class TestCommandMonitoring(IntegrationTest):
         }
         self.assertEqualCommand(expected_cursor, succeeded.reply.get("cursor"))
 
-        self.listener.results.clear()
+        self.listener.reset()
         next(cursor)
         try:
-            results = self.listener.results
-            started = results["started"][0]
-            succeeded = results["succeeded"][0]
-            self.assertEqual(0, len(results["failed"]))
+            started = self.listener.started_events[0]
+            succeeded = self.listener.succeeded_events[0]
+            self.assertEqual(0, len(self.listener.failed_events))
             self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
             self.assertEqualCommand(
                 SON([("getMore", cursor_id), ("collection", "test"), ("batchSize", 4)]),
@@ -377,10 +368,9 @@ class TestCommandMonitoring(IntegrationTest):
             next(cursor)
         except Exception:
             pass
-        results = self.listener.results
-        started = results["started"][0]
-        self.assertEqual(0, len(results["succeeded"]))
-        failed = results["failed"][0]
+        started = self.listener.started_events[0]
+        self.assertEqual(0, len(self.listener.succeeded_events))
+        failed = self.listener.failed_events[0]
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertEqualCommand(
             SON([("getMore", cursor_id), ("collection", "test")]), started.command
@@ -403,16 +393,15 @@ class TestCommandMonitoring(IntegrationTest):
         client = single_client(*address, event_listeners=[self.listener])
         # Clear authentication command results from the listener.
         client.admin.command("ping")
-        self.listener.results.clear()
+        self.listener.reset()
         error = None
         try:
             client.pymongo_test.test.find_one_and_delete({})
         except NotPrimaryError as exc:
             error = exc.errors
-        results = self.listener.results
-        started = results["started"][0]
-        failed = results["failed"][0]
-        self.assertEqual(0, len(results["succeeded"]))
+        started = self.listener.started_events[0]
+        failed = self.listener.failed_events[0]
+        self.assertEqual(0, len(self.listener.succeeded_events))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertTrue(isinstance(failed, monitoring.CommandFailedEvent))
         self.assertEqual("findAndModify", failed.command_name)
@@ -426,16 +415,15 @@ class TestCommandMonitoring(IntegrationTest):
     def test_exhaust(self):
         self.client.pymongo_test.test.drop()
         self.client.pymongo_test.test.insert_many([{} for _ in range(11)])
-        self.listener.results.clear()
+        self.listener.reset()
         cursor = self.client.pymongo_test.test.find(
             projection={"_id": False}, batch_size=5, cursor_type=CursorType.EXHAUST
         )
         next(cursor)
         cursor_id = cursor.cursor_id
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertEqualCommand(
             SON(
@@ -462,11 +450,10 @@ class TestCommandMonitoring(IntegrationTest):
         }
         self.assertEqualReply(expected_result, succeeded.reply)
 
-        self.listener.results.clear()
+        self.listener.reset()
         tuple(cursor)
-        results = self.listener.results
-        self.assertEqual(0, len(results["failed"]))
-        for event in results["started"]:
+        self.assertEqual(0, len(self.listener.failed_events))
+        for event in self.listener.started_events:
             self.assertTrue(isinstance(event, monitoring.CommandStartedEvent))
             self.assertEqualCommand(
                 SON([("getMore", cursor_id), ("collection", "test"), ("batchSize", 5)]),
@@ -476,14 +463,14 @@ class TestCommandMonitoring(IntegrationTest):
             self.assertEqual(cursor.address, event.connection_id)
             self.assertEqual("pymongo_test", event.database_name)
             self.assertTrue(isinstance(event.request_id, int))
-        for event in results["succeeded"]:
+        for event in self.listener.succeeded_events:
             self.assertTrue(isinstance(event, monitoring.CommandSucceededEvent))
             self.assertTrue(isinstance(event.duration_micros, int))
             self.assertEqual("getMore", event.command_name)
             self.assertTrue(isinstance(event.request_id, int))
             self.assertEqual(cursor.address, event.connection_id)
         # Last getMore receives a response with cursor id 0.
-        self.assertEqual(0, results["succeeded"][-1].reply["cursor"]["id"])
+        self.assertEqual(0, self.listener.succeeded_events[-1].reply["cursor"]["id"])
 
     def test_kill_cursors(self):
         with client_knobs(kill_cursor_frequency=0.01):
@@ -492,13 +479,12 @@ class TestCommandMonitoring(IntegrationTest):
             cursor = self.client.pymongo_test.test.find().batch_size(5)
             next(cursor)
             cursor_id = cursor.cursor_id
-            self.listener.results.clear()
+            self.listener.reset()
             cursor.close()
             time.sleep(2)
-            results = self.listener.results
-            started = results["started"][0]
-            succeeded = results["succeeded"][0]
-            self.assertEqual(0, len(results["failed"]))
+            started = self.listener.started_events[0]
+            succeeded = self.listener.succeeded_events[0]
+            self.assertEqual(0, len(self.listener.failed_events))
             self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
             # There could be more than one cursor_id here depending on
             # when the thread last ran.
@@ -524,14 +510,13 @@ class TestCommandMonitoring(IntegrationTest):
     def test_non_bulk_writes(self):
         coll = self.client.pymongo_test.test
         coll.drop()
-        self.listener.results.clear()
+        self.listener.reset()
 
         # Implied write concern insert_one
         res = coll.insert_one({"x": 1})
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON(
             [
@@ -555,13 +540,12 @@ class TestCommandMonitoring(IntegrationTest):
         self.assertEqual(1, reply.get("n"))
 
         # Unacknowledged insert_one
-        self.listener.results.clear()
+        self.listener.reset()
         coll = coll.with_options(write_concern=WriteConcern(w=0))
         res = coll.insert_one({"x": 1})
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON(
             [
@@ -584,13 +568,12 @@ class TestCommandMonitoring(IntegrationTest):
         self.assertEqualReply(succeeded.reply, {"ok": 1})
 
         # Explicit write concern insert_one
-        self.listener.results.clear()
+        self.listener.reset()
         coll = coll.with_options(write_concern=WriteConcern(w=1))
         res = coll.insert_one({"x": 1})
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON(
             [
@@ -615,12 +598,11 @@ class TestCommandMonitoring(IntegrationTest):
         self.assertEqual(1, reply.get("n"))
 
         # delete_many
-        self.listener.results.clear()
+        self.listener.reset()
         res = coll.delete_many({"x": 1})
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON(
             [
@@ -645,13 +627,12 @@ class TestCommandMonitoring(IntegrationTest):
         self.assertEqual(res.deleted_count, reply.get("n"))
 
         # replace_one
-        self.listener.results.clear()
+        self.listener.reset()
         oid = ObjectId()
         res = coll.replace_one({"_id": oid}, {"_id": oid, "x": 1}, upsert=True)
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON(
             [
@@ -689,12 +670,11 @@ class TestCommandMonitoring(IntegrationTest):
         self.assertEqual([{"index": 0, "_id": oid}], reply.get("upserted"))
 
         # update_one
-        self.listener.results.clear()
+        self.listener.reset()
         res = coll.update_one({"x": 1}, {"$inc": {"x": 1}})
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON(
             [
@@ -731,12 +711,11 @@ class TestCommandMonitoring(IntegrationTest):
         self.assertEqual(1, reply.get("n"))
 
         # update_many
-        self.listener.results.clear()
+        self.listener.reset()
         res = coll.update_many({"x": 2}, {"$inc": {"x": 1}})
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON(
             [
@@ -773,12 +752,11 @@ class TestCommandMonitoring(IntegrationTest):
         self.assertEqual(1, reply.get("n"))
 
         # delete_one
-        self.listener.results.clear()
+        self.listener.reset()
         _ = coll.delete_one({"x": 3})
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON(
             [
@@ -807,14 +785,13 @@ class TestCommandMonitoring(IntegrationTest):
         # write errors
         coll.insert_one({"_id": 1})
         try:
-            self.listener.results.clear()
+            self.listener.reset()
             coll.insert_one({"_id": 1})
         except OperationFailure:
             pass
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON(
             [
@@ -848,15 +825,14 @@ class TestCommandMonitoring(IntegrationTest):
         # This always uses the bulk API.
         coll = self.client.pymongo_test.test
         coll.drop()
-        self.listener.results.clear()
+        self.listener.reset()
 
         big = "x" * (1024 * 1024 * 4)
         docs = [{"_id": i, "big": big} for i in range(6)]
         coll.insert_many(docs)
-        results = self.listener.results
-        started = results["started"]
-        succeeded = results["succeeded"]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events
+        succeeded = self.listener.succeeded_events
+        self.assertEqual(0, len(self.listener.failed_events))
         documents = []
         count = 0
         operation_id = started[0].operation_id
@@ -889,16 +865,15 @@ class TestCommandMonitoring(IntegrationTest):
         coll = self.client.pymongo_test.test
         coll.drop()
         unack_coll = coll.with_options(write_concern=WriteConcern(w=0))
-        self.listener.results.clear()
+        self.listener.reset()
 
         # Force two batches on legacy servers.
         big = "x" * (1024 * 1024 * 12)
         docs = [{"_id": i, "big": big} for i in range(6)]
         unack_coll.insert_many(docs)
-        results = self.listener.results
-        started = results["started"]
-        succeeded = results["succeeded"]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events
+        succeeded = self.listener.succeeded_events
+        self.assertEqual(0, len(self.listener.failed_events))
         documents = []
         operation_id = started[0].operation_id
         self.assertIsInstance(operation_id, int)
@@ -928,7 +903,7 @@ class TestCommandMonitoring(IntegrationTest):
     def test_bulk_write(self):
         coll = self.client.pymongo_test.test
         coll.drop()
-        self.listener.results.clear()
+        self.listener.reset()
 
         coll.bulk_write(
             [
@@ -937,10 +912,9 @@ class TestCommandMonitoring(IntegrationTest):
                 DeleteOne({"_id": 1}),
             ]
         )
-        results = self.listener.results
-        started = results["started"]
-        succeeded = results["succeeded"]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events
+        succeeded = self.listener.succeeded_events
+        self.assertEqual(0, len(self.listener.failed_events))
         operation_id = started[0].operation_id
         pairs = list(zip(started, succeeded))
         self.assertEqual(3, len(pairs))
@@ -991,7 +965,7 @@ class TestCommandMonitoring(IntegrationTest):
     @client_context.require_failCommand_fail_point
     def test_bulk_write_command_network_error(self):
         coll = self.client.pymongo_test.test
-        self.listener.results.clear()
+        self.listener.reset()
 
         insert_network_error = {
             "configureFailPoint": "failCommand",
@@ -1004,7 +978,7 @@ class TestCommandMonitoring(IntegrationTest):
         with self.fail_point(insert_network_error):
             with self.assertRaises(AutoReconnect):
                 coll.bulk_write([InsertOne({"_id": 1})])
-        failed = self.listener.results["failed"]
+        failed = self.listener.failed_events
         self.assertEqual(1, len(failed))
         event = failed[0]
         self.assertEqual(event.command_name, "insert")
@@ -1015,7 +989,7 @@ class TestCommandMonitoring(IntegrationTest):
     @client_context.require_failCommand_fail_point
     def test_bulk_write_command_error(self):
         coll = self.client.pymongo_test.test
-        self.listener.results.clear()
+        self.listener.reset()
 
         insert_command_error = {
             "configureFailPoint": "failCommand",
@@ -1029,7 +1003,7 @@ class TestCommandMonitoring(IntegrationTest):
         with self.fail_point(insert_command_error):
             with self.assertRaises(NotPrimaryError):
                 coll.bulk_write([InsertOne({"_id": 1})])
-        failed = self.listener.results["failed"]
+        failed = self.listener.failed_events
         self.assertEqual(1, len(failed))
         event = failed[0]
         self.assertEqual(event.command_name, "insert")
@@ -1040,7 +1014,7 @@ class TestCommandMonitoring(IntegrationTest):
     def test_write_errors(self):
         coll = self.client.pymongo_test.test
         coll.drop()
-        self.listener.results.clear()
+        self.listener.reset()
 
         try:
             coll.bulk_write(
@@ -1054,10 +1028,9 @@ class TestCommandMonitoring(IntegrationTest):
             )
         except OperationFailure:
             pass
-        results = self.listener.results
-        started = results["started"]
-        succeeded = results["succeeded"]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events
+        succeeded = self.listener.succeeded_events
+        self.assertEqual(0, len(self.listener.failed_events))
         operation_id = started[0].operation_id
         pairs = list(zip(started, succeeded))
         errors = []
@@ -1077,19 +1050,18 @@ class TestCommandMonitoring(IntegrationTest):
                 errors.extend(succeed.reply["writeErrors"])
 
         self.assertEqual(2, len(errors))
-        fields = set(["index", "code", "errmsg"])
+        fields = {"index", "code", "errmsg"}
         for error in errors:
             self.assertTrue(fields.issubset(set(error)))
 
     def test_first_batch_helper(self):
         # Regardless of server version and use of helpers._first_batch
         # this test should still pass.
-        self.listener.results.clear()
+        self.listener.reset()
         tuple(self.client.pymongo_test.test.list_indexes())
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         expected = SON([("listIndexes", "test"), ("cursor", {})])
         self.assertEqualCommand(expected, started.command)
@@ -1105,22 +1077,28 @@ class TestCommandMonitoring(IntegrationTest):
         self.assertTrue("cursor" in succeeded.reply)
         self.assertTrue("ok" in succeeded.reply)
 
-        self.listener.results.clear()
+        self.listener.reset()
 
+    @client_context.require_version_max(6, 1, 99)
     def test_sensitive_commands(self):
         listeners = self.client._event_listeners
 
-        self.listener.results.clear()
+        self.listener.reset()
         cmd = SON([("getnonce", 1)])
-        listeners.publish_command_start(cmd, "pymongo_test", 12345, self.client.address)
+        listeners.publish_command_start(cmd, "pymongo_test", 12345, self.client.address, None)  # type: ignore[arg-type]
         delta = datetime.timedelta(milliseconds=100)
         listeners.publish_command_success(
-            delta, {"nonce": "e474f4561c5eb40b", "ok": 1.0}, "getnonce", 12345, self.client.address
+            delta,
+            {"nonce": "e474f4561c5eb40b", "ok": 1.0},
+            "getnonce",
+            12345,
+            self.client.address,  # type: ignore[arg-type]
+            None,
+            database_name="pymongo_test",
         )
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertIsInstance(started, monitoring.CommandStartedEvent)
         self.assertEqual({}, started.command)
         self.assertEqual("pymongo_test", started.database_name)
@@ -1142,7 +1120,7 @@ class TestGlobalListener(IntegrationTest):
     @classmethod
     @client_context.require_connection
     def setUpClass(cls):
-        super(TestGlobalListener, cls).setUpClass()
+        super().setUpClass()
         cls.listener = EventListener()
         # We plan to call register(), which internally modifies _LISTENERS.
         cls.saved_listeners = copy.deepcopy(monitoring._LISTENERS)
@@ -1155,18 +1133,17 @@ class TestGlobalListener(IntegrationTest):
     def tearDownClass(cls):
         monitoring._LISTENERS = cls.saved_listeners
         cls.client.close()
-        super(TestGlobalListener, cls).tearDownClass()
+        super().tearDownClass()
 
     def setUp(self):
-        super(TestGlobalListener, self).setUp()
-        self.listener.results.clear()
+        super().setUp()
+        self.listener.reset()
 
     def test_simple(self):
         self.client.pymongo_test.command("ping")
-        results = self.listener.results
-        started = results["started"][0]
-        succeeded = results["succeeded"][0]
-        self.assertEqual(0, len(results["failed"]))
+        started = self.listener.started_events[0]
+        succeeded = self.listener.succeeded_events[0]
+        self.assertEqual(0, len(self.listener.failed_events))
         self.assertTrue(isinstance(succeeded, monitoring.CommandSucceededEvent))
         self.assertTrue(isinstance(started, monitoring.CommandStartedEvent))
         self.assertEqualCommand(SON([("ping", 1)]), started.command)
@@ -1178,42 +1155,46 @@ class TestGlobalListener(IntegrationTest):
 
 class TestEventClasses(unittest.TestCase):
     def test_command_event_repr(self):
-        request_id, connection_id, operation_id = 1, ("localhost", 27017), 2
+        request_id, connection_id, operation_id, db_name = 1, ("localhost", 27017), 2, "admin"
         event = monitoring.CommandStartedEvent(
-            {"ping": 1}, "admin", request_id, connection_id, operation_id
+            {"ping": 1}, db_name, request_id, connection_id, operation_id
         )
         self.assertEqual(
             repr(event),
             "<CommandStartedEvent ('localhost', 27017) db: 'admin', "
-            "command: 'ping', operation_id: 2, service_id: None>",
+            "command: 'ping', operation_id: 2, service_id: None, server_connection_id: None>",
         )
         delta = datetime.timedelta(milliseconds=100)
         event = monitoring.CommandSucceededEvent(
-            delta, {"ok": 1}, "ping", request_id, connection_id, operation_id
+            delta, {"ok": 1}, "ping", request_id, connection_id, operation_id, database_name=db_name
         )
         self.assertEqual(
             repr(event),
-            "<CommandSucceededEvent ('localhost', 27017) "
+            "<CommandSucceededEvent ('localhost', 27017) db: 'admin', "
             "command: 'ping', operation_id: 2, duration_micros: 100000, "
-            "service_id: None>",
+            "service_id: None, server_connection_id: None>",
         )
         event = monitoring.CommandFailedEvent(
-            delta, {"ok": 0}, "ping", request_id, connection_id, operation_id
+            delta, {"ok": 0}, "ping", request_id, connection_id, operation_id, database_name=db_name
         )
         self.assertEqual(
             repr(event),
-            "<CommandFailedEvent ('localhost', 27017) "
+            "<CommandFailedEvent ('localhost', 27017) db: 'admin', "
             "command: 'ping', operation_id: 2, duration_micros: 100000, "
-            "failure: {'ok': 0}, service_id: None>",
+            "failure: {'ok': 0}, service_id: None, server_connection_id: None>",
         )
 
     def test_server_heartbeat_event_repr(self):
         connection_id = ("localhost", 27017)
         event = monitoring.ServerHeartbeatStartedEvent(connection_id)
-        self.assertEqual(repr(event), "<ServerHeartbeatStartedEvent ('localhost', 27017)>")
+        self.assertEqual(
+            repr(event), "<ServerHeartbeatStartedEvent ('localhost', 27017) awaited: False>"
+        )
         delta = 0.1
         event = monitoring.ServerHeartbeatSucceededEvent(
-            delta, {"ok": 1}, connection_id  # type: ignore[arg-type]
+            delta,
+            {"ok": 1},  # type: ignore[arg-type]
+            connection_id,
         )
         self.assertEqual(
             repr(event),
@@ -1221,7 +1202,9 @@ class TestEventClasses(unittest.TestCase):
             "duration: 0.1, awaited: False, reply: {'ok': 1}>",
         )
         event = monitoring.ServerHeartbeatFailedEvent(
-            delta, "ERROR", connection_id  # type: ignore[arg-type]
+            delta,
+            "ERROR",  # type: ignore[arg-type]
+            connection_id,
         )
         self.assertEqual(
             repr(event),
@@ -1238,7 +1221,10 @@ class TestEventClasses(unittest.TestCase):
             "<ServerOpeningEvent ('localhost', 27017) topology_id: 000000000000000000000001>",
         )
         event = monitoring.ServerDescriptionChangedEvent(
-            "PREV", "NEW", server_address, topology_id  # type: ignore[arg-type]
+            "PREV",  # type: ignore[arg-type]
+            "NEW",  # type: ignore[arg-type]
+            server_address,
+            topology_id,
         )
         self.assertEqual(
             repr(event),
@@ -1255,7 +1241,9 @@ class TestEventClasses(unittest.TestCase):
         event = monitoring.TopologyOpenedEvent(topology_id)
         self.assertEqual(repr(event), "<TopologyOpenedEvent topology_id: 000000000000000000000001>")
         event = monitoring.TopologyDescriptionChangedEvent(
-            "PREV", "NEW", topology_id  # type: ignore[arg-type]
+            "PREV",  # type: ignore[arg-type]
+            "NEW",  # type: ignore[arg-type]
+            topology_id,
         )
         self.assertEqual(
             repr(event),

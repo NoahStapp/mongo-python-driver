@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tools for working with MongoDB `ObjectIds
-<http://dochub.mongodb.org/core/objectids>`_.
-"""
+"""Tools for working with MongoDB ObjectIds."""
+from __future__ import annotations
 
 import binascii
 import calendar
@@ -44,7 +43,7 @@ def _random_bytes() -> bytes:
     return os.urandom(5)
 
 
-class ObjectId(object):
+class ObjectId:
     """A MongoDB ObjectId."""
 
     _pid = os.getpid()
@@ -58,7 +57,7 @@ class ObjectId(object):
 
     _type_marker = 7
 
-    def __init__(self, oid: Optional[Union[str, "ObjectId", bytes]] = None) -> None:
+    def __init__(self, oid: Optional[Union[str, ObjectId, bytes]] = None) -> None:
         """Initialize a new ObjectId.
 
         An ObjectId is a 12-byte unique identifier consisting of:
@@ -85,10 +84,9 @@ class ObjectId(object):
         Raises :class:`~bson.errors.InvalidId` if `oid` is not 12 bytes nor
         24 hex digits, or :class:`TypeError` if `oid` is not an accepted type.
 
-        :Parameters:
-          - `oid` (optional): a valid ObjectId.
+        :param oid: a valid ObjectId.
 
-        .. seealso:: The MongoDB documentation on `ObjectIds`_.
+        .. seealso:: The MongoDB documentation on  `ObjectIds <http://dochub.mongodb.org/core/objectids>`_.
 
         .. versionchanged:: 3.8
            :class:`~bson.objectid.ObjectId` now implements the `ObjectID
@@ -104,7 +102,7 @@ class ObjectId(object):
             self.__validate(oid)
 
     @classmethod
-    def from_datetime(cls: Type["ObjectId"], generation_time: datetime.datetime) -> "ObjectId":
+    def from_datetime(cls: Type[ObjectId], generation_time: datetime.datetime) -> ObjectId:
         """Create a dummy ObjectId instance with a specific generation time.
 
         This method is useful for doing range queries on a field
@@ -127,8 +125,7 @@ class ObjectId(object):
         >>> dummy_id = ObjectId.from_datetime(gen_time)
         >>> result = collection.find({"_id": {"$lt": dummy_id}})
 
-        :Parameters:
-          - `generation_time`: :class:`~datetime.datetime` to be used
+        :param generation_time: :class:`~datetime.datetime` to be used
             as the generation time for the resulting ObjectId.
         """
         offset = generation_time.utcoffset()
@@ -139,11 +136,10 @@ class ObjectId(object):
         return cls(oid)
 
     @classmethod
-    def is_valid(cls: Type["ObjectId"], oid: Any) -> bool:
+    def is_valid(cls: Type[ObjectId], oid: Any) -> bool:
         """Checks if a `oid` string is valid or not.
 
-        :Parameters:
-          - `oid`: the object id to validate
+        :param oid: the object id to validate
 
         .. versionadded:: 2.3
         """
@@ -167,7 +163,6 @@ class ObjectId(object):
 
     def __generate(self) -> None:
         """Generate a new value for this ObjectId."""
-
         # 4 bytes current time
         oid = struct.pack(">I", int(time.time()))
 
@@ -184,13 +179,11 @@ class ObjectId(object):
     def __validate(self, oid: Any) -> None:
         """Validate and use the given id for this ObjectId.
 
-        Raises TypeError if id is not an instance of
-        (:class:`basestring` (:class:`str` or :class:`bytes`
-        in python 3), ObjectId) and InvalidId if it is not a
+        Raises TypeError if id is not an instance of :class:`str`,
+        :class:`bytes`, or ObjectId. Raises InvalidId if it is not a
         valid ObjectId.
 
-        :Parameters:
-          - `oid`: a valid ObjectId
+        :param oid: a valid ObjectId
         """
         if isinstance(oid, ObjectId):
             self.__id = oid.binary
@@ -203,9 +196,7 @@ class ObjectId(object):
             else:
                 _raise_invalid_id(oid)
         else:
-            raise TypeError(
-                "id must be an instance of (bytes, str, ObjectId), not %s" % (type(oid),)
-            )
+            raise TypeError(f"id must be an instance of (bytes, str, ObjectId), not {type(oid)}")
 
     @property
     def binary(self) -> bytes:
@@ -225,14 +216,14 @@ class ObjectId(object):
         return datetime.datetime.fromtimestamp(timestamp, utc)
 
     def __getstate__(self) -> bytes:
-        """return value of object for pickling.
+        """Return value of object for pickling.
         needed explicitly because __slots__() defined.
         """
         return self.__id
 
     def __setstate__(self, value: Any) -> None:
-        """explicit state set from pickling"""
-        # Provide backwards compatability with OIDs
+        """Explicit state set from pickling"""
+        # Provide backwards compatibility with OIDs
         # pickled with pymongo-1.9 or older.
         if isinstance(value, dict):
             oid = value["_ObjectId__id"]
@@ -249,8 +240,8 @@ class ObjectId(object):
     def __str__(self) -> str:
         return binascii.hexlify(self.__id).decode()
 
-    def __repr__(self):
-        return "ObjectId('%s')" % (str(self),)
+    def __repr__(self) -> str:
+        return f"ObjectId('{self!s}')"
 
     def __eq__(self, other: Any) -> bool:
         if isinstance(other, ObjectId):

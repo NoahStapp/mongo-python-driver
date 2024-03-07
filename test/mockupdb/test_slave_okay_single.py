@@ -18,12 +18,13 @@
 - A direct connection to a slave.
 - A direct connection to a mongos.
 """
+from __future__ import annotations
 
 import itertools
 import unittest
 
 from mockupdb import MockupDB, going
-from operations import operations
+from operations import operations  # type: ignore[import]
 
 from pymongo import MongoClient
 from pymongo.read_preferences import make_read_preference, read_pref_mode_from_name
@@ -78,7 +79,7 @@ def generate_slave_ok_single_tests():
         mode, (server_type, ismaster), operation = entry
         test = create_slave_ok_single_test(mode, server_type, ismaster, operation)
 
-        test_name = "test_%s_%s_with_mode_%s" % (
+        test_name = "test_{}_{}_with_mode_{}".format(
             operation.name.replace(" ", "_"),
             server_type,
             mode,

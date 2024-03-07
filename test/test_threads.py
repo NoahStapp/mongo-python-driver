@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test that pymongo is thread safe."""
+from __future__ import annotations
 
 import threading
 from test import IntegrationTest, client_context, unittest
@@ -30,7 +31,7 @@ class AutoAuthenticateThreads(threading.Thread):
         self.coll = collection
         self.num = num
         self.success = False
-        self.setDaemon(True)
+        self.daemon = True
 
     def run(self):
         for i in range(self.num):
@@ -44,7 +45,7 @@ class SaveAndFind(threading.Thread):
     def __init__(self, collection):
         threading.Thread.__init__(self)
         self.collection = collection
-        self.setDaemon(True)
+        self.daemon = True
         self.passed = False
 
     def run(self):
@@ -62,7 +63,7 @@ class Insert(threading.Thread):
         self.collection = collection
         self.n = n
         self.expect_exception = expect_exception
-        self.setDaemon(True)
+        self.daemon = True
 
     def run(self):
         for _ in range(self.n):
@@ -85,7 +86,7 @@ class Update(threading.Thread):
         self.collection = collection
         self.n = n
         self.expect_exception = expect_exception
-        self.setDaemon(True)
+        self.daemon = True
 
     def run(self):
         for _ in range(self.n):
@@ -111,7 +112,7 @@ class TestThreads(IntegrationTest):
         self.db.test.insert_many([{"x": i} for i in range(1000)])
 
         threads = []
-        for i in range(10):
+        for _i in range(10):
             t = SaveAndFind(self.db.test)
             t.start()
             threads.append(t)

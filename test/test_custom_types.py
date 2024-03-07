@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test support for callbacks to encode/decode custom types."""
+from __future__ import annotations
 
 import datetime
 import sys
@@ -81,7 +82,7 @@ class DecimalCodec(DecimalDecoder, DecimalEncoder):
 DECIMAL_CODECOPTS = CodecOptions(type_registry=TypeRegistry([DecimalCodec()]))
 
 
-class UndecipherableInt64Type(object):
+class UndecipherableInt64Type:
     def __init__(self, value):
         self.value = value
 
@@ -146,7 +147,7 @@ def type_obfuscating_decoder_factory(rt_type):
     return ResumeTokenToNanDecoder
 
 
-class CustomBSONTypeTests(object):
+class CustomBSONTypeTests:
     @no_type_check
     def roundtrip(self, doc):
         bsonbytes = encode(doc, codec_options=self.codecopts)
@@ -164,9 +165,9 @@ class CustomBSONTypeTests(object):
     def test_decode_all(self):
         documents = []
         for dec in range(3):
-            documents.append({"average": Decimal("56.4%s" % (dec,))})
+            documents.append({"average": Decimal(f"56.4{dec}")})
 
-        bsonstream = bytes()
+        bsonstream = b""
         for doc in documents:
             bsonstream += encode(doc, codec_options=self.codecopts)
 
@@ -274,6 +275,22 @@ class TestBSONFallbackEncoder(unittest.TestCase):
         with self.assertRaises(TypeError):
             encode(document, codec_options=codecopts)
 
+    def test_call_only_once_for_not_handled_big_integers(self):
+        called_with = []
+
+        def fallback_encoder(value):
+            called_with.append(value)
+            return value
+
+        codecopts = self._get_codec_options(fallback_encoder)
+        document = {"a": {"b": {"c": 2 << 65}}}
+
+        msg = "MongoDB can only handle up to 8-byte ints"
+        with self.assertRaises(OverflowError, msg=msg):
+            encode(document, codec_options=codecopts)
+
+        self.assertEqual(called_with, [2 << 65])
+
 
 class TestBSONTypeEnDeCodecs(unittest.TestCase):
     def test_instantiation(self):
@@ -287,7 +304,7 @@ class TestBSONTypeEnDeCodecs(unittest.TestCase):
             else:
                 codec()
 
-        class MyType(object):
+        class MyType:
             pass
 
         run_test(
@@ -339,7 +356,6 @@ class TestBSONTypeEnDeCodecs(unittest.TestCase):
 
 
 class TestBSONCustomTypeEncoderAndFallbackEncoderTandem(unittest.TestCase):
-
     TypeA: Any
     TypeB: Any
     fallback_encoder_A2B: Any
@@ -350,11 +366,11 @@ class TestBSONCustomTypeEncoderAndFallbackEncoderTandem(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        class TypeA(object):
+        class TypeA:
             def __init__(self, x):
                 self.value = x
 
-        class TypeB(object):
+        class TypeB:
             def __init__(self, x):
                 self.value = x
 
@@ -442,12 +458,12 @@ class TestTypeRegistry(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        class MyIntType(object):
+        class MyIntType:
             def __init__(self, x):
                 assert isinstance(x, int)
                 self.x = x
 
-        class MyStrType(object):
+        class MyStrType:
             def __init__(self, x):
                 assert isinstance(x, str)
                 self.x = x
@@ -541,7 +557,8 @@ class TestTypeRegistry(unittest.TestCase):
             {MyIntEncoder.python_type: codec_instances[1].transform_python},
         )
         self.assertEqual(
-            type_registry._decoder_map, {MyIntDecoder.bson_type: codec_instances[0].transform_bson}
+            type_registry._decoder_map,
+            {MyIntDecoder.bson_type: codec_instances[0].transform_bson},
         )
 
     def test_initialize_fail(self):
@@ -552,18 +569,18 @@ class TestTypeRegistry(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, err_msg):
             TypeRegistry([type("AnyType", (object,), {})()])
 
-        err_msg = "fallback_encoder %r is not a callable" % (True,)
+        err_msg = f"fallback_encoder {True!r} is not a callable"
         with self.assertRaisesRegex(TypeError, err_msg):
             TypeRegistry([], True)  # type: ignore[arg-type]
 
-        err_msg = "fallback_encoder %r is not a callable" % ("hello",)
+        err_msg = "fallback_encoder {!r} is not a callable".format("hello")
         with self.assertRaisesRegex(TypeError, err_msg):
             TypeRegistry(fallback_encoder="hello")  # type: ignore[arg-type]
 
     def test_type_registry_repr(self):
         codec_instances = [codec() for codec in self.codecs]
         type_registry = TypeRegistry(codec_instances)
-        r = "TypeRegistry(type_codecs=%r, fallback_encoder=%r)" % (codec_instances, None)
+        r = f"TypeRegistry(type_codecs={codec_instances!r}, fallback_encoder={None!r})"
         self.assertEqual(r, repr(type_registry))
 
     def test_type_registry_eq(self):
@@ -621,6 +638,15 @@ class TestCollectionWCustomType(IntegrationTest):
 
     def tearDown(self):
         self.db.test.drop()
+
+    def test_overflow_int_w_custom_decoder(self):
+        type_registry = TypeRegistry(fallback_encoder=lambda val: str(val))
+        codec_options = CodecOptions(type_registry=type_registry)
+        collection = self.db.get_collection("test", codec_options=codec_options)
+
+        collection.insert_one({"_id": 1, "data": 2**520})
+        ret = collection.find_one()
+        self.assertEqual(ret["data"], str(2**520))
 
     def test_command_errors_w_custom_type_decoder(self):
         db = self.db
@@ -776,7 +802,7 @@ class TestGridFileCustomType(IntegrationTest):
             self.assertRaises(AttributeError, setattr, two, attr, 5)
 
 
-class ChangeStreamsWCustomTypesTestMixin(object):
+class ChangeStreamsWCustomTypesTestMixin:
     @no_type_check
     def change_stream(self, *args, **kwargs):
         return self.watched_target.watch(*args, **kwargs)
@@ -896,10 +922,9 @@ class ChangeStreamsWCustomTypesTestMixin(object):
 
 class TestCollectionChangeStreamsWCustomTypes(IntegrationTest, ChangeStreamsWCustomTypesTestMixin):
     @classmethod
-    @client_context.require_no_mmap
-    @client_context.require_no_standalone
+    @client_context.require_change_streams
     def setUpClass(cls):
-        super(TestCollectionChangeStreamsWCustomTypes, cls).setUpClass()
+        super().setUpClass()
         cls.db.test.delete_many({})
 
     def tearDown(self):
@@ -916,10 +941,9 @@ class TestCollectionChangeStreamsWCustomTypes(IntegrationTest, ChangeStreamsWCus
 class TestDatabaseChangeStreamsWCustomTypes(IntegrationTest, ChangeStreamsWCustomTypesTestMixin):
     @classmethod
     @client_context.require_version_min(4, 0, 0)
-    @client_context.require_no_mmap
-    @client_context.require_no_standalone
+    @client_context.require_change_streams
     def setUpClass(cls):
-        super(TestDatabaseChangeStreamsWCustomTypes, cls).setUpClass()
+        super().setUpClass()
         cls.db.test.delete_many({})
 
     def tearDown(self):
@@ -936,10 +960,9 @@ class TestDatabaseChangeStreamsWCustomTypes(IntegrationTest, ChangeStreamsWCusto
 class TestClusterChangeStreamsWCustomTypes(IntegrationTest, ChangeStreamsWCustomTypesTestMixin):
     @classmethod
     @client_context.require_version_min(4, 0, 0)
-    @client_context.require_no_mmap
-    @client_context.require_no_standalone
+    @client_context.require_change_streams
     def setUpClass(cls):
-        super(TestClusterChangeStreamsWCustomTypes, cls).setUpClass()
+        super().setUpClass()
         cls.db.test.delete_many({})
 
     def tearDown(self):

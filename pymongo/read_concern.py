@@ -13,15 +13,15 @@
 # limitations under the License.
 
 """Tools for working with read concerns."""
+from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 
-class ReadConcern(object):
+class ReadConcern:
     """ReadConcern
 
-    :Parameters:
-        - `level`: (string) The read concern level specifies the level of
+    :param level: (string) The read concern level specifies the level of
           isolation for read operations.  For example, a read operation using a
           read concern level of ``majority`` will only return data that has been
           written to a majority of nodes. If the level is left unspecified, the
@@ -45,11 +45,12 @@ class ReadConcern(object):
     @property
     def ok_for_legacy(self) -> bool:
         """Return ``True`` if this read concern is compatible with
-        old wire protocol versions."""
+        old wire protocol versions.
+        """
         return self.level is None or self.level == "local"
 
     @property
-    def document(self) -> Dict[str, Any]:
+    def document(self) -> dict[str, Any]:
         """The document representation of this read concern.
 
         .. note::
@@ -66,7 +67,7 @@ class ReadConcern(object):
             return self.document == other.document
         return NotImplemented
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         if self.level:
             return "ReadConcern(%s)" % self.level
         return "ReadConcern()"

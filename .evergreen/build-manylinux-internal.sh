@@ -11,12 +11,13 @@ mv dist/* validdist || true
 
 # Compile wheels
 for PYTHON in /opt/python/*/bin/python; do
-    if [[ ! $PYTHON =~ (cp37|cp38|cp39|cp310) ]]; then
+    if [[ ! $PYTHON =~ (cp37|cp38|cp39|cp310|cp311|cp312) ]]; then
         continue
     fi
     # https://github.com/pypa/manylinux/issues/49
     rm -rf build
-    $PYTHON setup.py bdist_wheel
+    $PYTHON -m pip install build
+    $PYTHON -m build --wheel .
     rm -rf build
 
     # Audit wheels and write manylinux tag

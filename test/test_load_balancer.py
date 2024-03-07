@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test the Load Balancer unified spec tests."""
+from __future__ import annotations
 
 import gc
 import os
@@ -37,12 +38,15 @@ class TestLB(IntegrationTest):
     RUN_ON_SERVERLESS = True
 
     def test_connections_are_only_returned_once(self):
+        if "PyPy" in sys.version:
+            # Tracked in PYTHON-3011
+            self.skipTest("Test is flaky on PyPy")
         pool = get_pool(self.client)
-        nconns = len(pool.sockets)
+        n_conns = len(pool.conns)
         self.db.test.find_one({})
-        self.assertEqual(len(pool.sockets), nconns)
+        self.assertEqual(len(pool.conns), n_conns)
         list(self.db.test.aggregate([{"$limit": 1}]))
-        self.assertEqual(len(pool.sockets), nconns)
+        self.assertEqual(len(pool.conns), n_conns)
 
     @client_context.require_load_balancer
     def test_unpin_committed_transaction(self):
@@ -122,6 +126,10 @@ class TestLB(IntegrationTest):
         session = client.start_session()
         session.start_transaction()
         client.test_session_gc.test.find_one({}, session=session)
+        # Cleanup the transaction left open on the server unless we're
+        # testing serverless which does not support killSessions.
+        if not client_context.serverless:
+            self.addCleanup(self.client.admin.command, "killSessions", [session.session_id])
         if client_context.load_balancer:
             self.assertEqual(pool.active_sockets, 1)  # Pinned.
 
@@ -146,7 +154,7 @@ class TestLB(IntegrationTest):
 
 class PoolLocker(ExceptionCatchingThread):
     def __init__(self, pool):
-        super(PoolLocker, self).__init__(target=self.lock_pool)
+        super().__init__(target=self.lock_pool)
         self.pool = pool
         self.daemon = True
         self.locked = threading.Event()

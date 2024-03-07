@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test OCSP."""
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -41,7 +42,7 @@ else:
 
 
 def _connect(options):
-    uri = ("mongodb://localhost:27017/?serverSelectionTimeoutMS=%s&tlsCAFile=%s&%s") % (
+    uri = ("mongodb://localhost:27017/?serverSelectionTimeoutMS={}&tlsCAFile={}&{}").format(
         TIMEOUT_MS,
         CA_FILE,
         options,

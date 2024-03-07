@@ -3,31 +3,17 @@
 set -o xtrace
 set -o errexit
 
-git clone https://github.com/mongodb-labs/driver-performance-test-data.git
-cd driver-performance-test-data
+git clone --depth 1 https://github.com/mongodb/specifications.git
+pushd specifications/source/benchmarking/data
 tar xf extended_bson.tgz
 tar xf parallel.tgz
 tar xf single_and_multi_document.tgz
-cd ..
+popd
 
-export TEST_PATH="${PROJECT_DIRECTORY}/driver-performance-test-data"
+export TEST_PATH="${PROJECT_DIRECTORY}/specifications/source/benchmarking/data"
 export OUTPUT_FILE="${PROJECT_DIRECTORY}/results.json"
 
-MTCBIN=/opt/mongodbtoolchain/v3/bin
-VIRTUALENV="$MTCBIN/virtualenv -p $MTCBIN/python3"
+export PYTHON_BINARY=/opt/mongodbtoolchain/v4/bin/python3
+export PERF_TEST=1
 
-$VIRTUALENV pyperftest
-. pyperftest/bin/activate
-python -m pip install simplejson
-
-python setup.py build_ext -i
-start_time=$(date +%s)
-python test/performance/perf_test.py --locals
-end_time=$(date +%s)
-elapsed_secs=$((end_time-start_time))
-
-cat results.json
-
-echo "{\"failures\": 0, \"results\": [{\"status\": \"pass\", \"exit_code\": 0, \"test_file\": \"BenchMarkTests\", \"start\": $start_time, \"end\": $end_time, \"elapsed\": $elapsed_secs}]}" > report.json
-
-cat report.json
+bash ./.evergreen/tox.sh -m test-eg

@@ -13,11 +13,11 @@
 # limitations under the License.
 
 """Tests for SSL support."""
+from __future__ import annotations
 
 import os
 import socket
 import sys
-from typing import Any
 
 sys.path[0:0] = [""]
 
@@ -40,12 +40,12 @@ from pymongo.write_concern import WriteConcern
 _HAVE_PYOPENSSL = False
 try:
     # All of these must be available to use PyOpenSSL
-    import OpenSSL  # noqa
-    import requests  # noqa
-    import service_identity  # noqa
+    import OpenSSL
+    import requests
+    import service_identity
 
     # Ensure service_identity>=18.1 is installed
-    from service_identity.pyopenssl import verify_ip_address  # noqa
+    from service_identity.pyopenssl import verify_ip_address
 
     from pymongo.ocsp_support import _load_trusted_ca_certs
 
@@ -64,8 +64,6 @@ CA_PEM = os.path.join(CERT_PATH, "ca.pem")
 CA_BUNDLE_PEM = os.path.join(CERT_PATH, "trusted-ca.pem")
 CRL_PEM = os.path.join(CERT_PATH, "crl.pem")
 MONGODB_X509_USERNAME = "C=US,ST=New York,L=New York City,O=MDB,OU=Drivers,CN=client"
-
-_PY37PLUS = sys.version_info[:2] >= (3, 7)
 
 # To fully test this start a mongod instance (built with SSL support) like so:
 # mongod --dbpath /path/to/data/directory --sslOnNormalPorts \
@@ -144,7 +142,7 @@ class TestSSL(IntegrationTest):
     @classmethod
     @unittest.skipUnless(HAVE_SSL, "The ssl module is not available.")
     def setUpClass(cls):
-        super(TestSSL, cls).setUpClass()
+        super().setUpClass()
         # MongoClient should connect to the primary by default.
         cls.saved_port = MongoClient.PORT
         MongoClient.PORT = client_context.port
@@ -152,7 +150,7 @@ class TestSSL(IntegrationTest):
     @classmethod
     def tearDownClass(cls):
         MongoClient.PORT = cls.saved_port
-        super(TestSSL, cls).tearDownClass()
+        super().tearDownClass()
 
     @client_context.require_tls
     def test_simple_ssl(self):
@@ -176,7 +174,7 @@ class TestSSL(IntegrationTest):
                 tlsCertificateKeyFile=CLIENT_ENCRYPTED_PEM,
                 tlsCertificateKeyFilePassword="qwerty",
                 tlsCAFile=CA_PEM,
-                serverSelectionTimeoutMS=100,
+                serverSelectionTimeoutMS=1000,
             )
         else:
             connected(
@@ -187,7 +185,7 @@ class TestSSL(IntegrationTest):
                     tlsCertificateKeyFilePassword="qwerty",
                     tlsCAFile=CA_PEM,
                     serverSelectionTimeoutMS=5000,
-                    **self.credentials  # type: ignore[arg-type]
+                    **self.credentials,  # type: ignore[arg-type]
                 )
             )
 
@@ -306,10 +304,7 @@ class TestSSL(IntegrationTest):
         ctx = get_ssl_context(None, None, None, None, False, True, False)
         self.assertFalse(ctx.check_hostname)
         ctx = get_ssl_context(None, None, None, None, False, False, False)
-        if _PY37PLUS or _HAVE_PYOPENSSL:
-            self.assertTrue(ctx.check_hostname)
-        else:
-            self.assertFalse(ctx.check_hostname)
+        self.assertTrue(ctx.check_hostname)
 
         response = self.client.admin.command(HelloCompat.LEGACY_CMD)
 
@@ -322,7 +317,7 @@ class TestSSL(IntegrationTest):
                     tlsAllowInvalidCertificates=False,
                     tlsCAFile=CA_PEM,
                     serverSelectionTimeoutMS=500,
-                    **self.credentials  # type: ignore[arg-type]
+                    **self.credentials,  # type: ignore[arg-type]
                 )
             )
 
@@ -335,7 +330,7 @@ class TestSSL(IntegrationTest):
                 tlsCAFile=CA_PEM,
                 tlsAllowInvalidHostnames=True,
                 serverSelectionTimeoutMS=500,
-                **self.credentials  # type: ignore[arg-type]
+                **self.credentials,  # type: ignore[arg-type]
             )
         )
 
@@ -350,7 +345,7 @@ class TestSSL(IntegrationTest):
                         tlsAllowInvalidCertificates=False,
                         tlsCAFile=CA_PEM,
                         serverSelectionTimeoutMS=500,
-                        **self.credentials  # type: ignore[arg-type]
+                        **self.credentials,  # type: ignore[arg-type]
                     )
                 )
 
@@ -364,7 +359,7 @@ class TestSSL(IntegrationTest):
                     tlsCAFile=CA_PEM,
                     tlsAllowInvalidHostnames=True,
                     serverSelectionTimeoutMS=500,
-                    **self.credentials  # type: ignore[arg-type]
+                    **self.credentials,  # type: ignore[arg-type]
                 )
             )
 
@@ -379,7 +374,7 @@ class TestSSL(IntegrationTest):
                 ssl=True,
                 tlsCAFile=CA_PEM,
                 tlsCRLFile=CRL_PEM,
-                serverSelectionTimeoutMS=100,
+                serverSelectionTimeoutMS=1000,
             )
         else:
             connected(
@@ -387,8 +382,8 @@ class TestSSL(IntegrationTest):
                     "localhost",
                     ssl=True,
                     tlsCAFile=CA_PEM,
-                    serverSelectionTimeoutMS=100,
-                    **self.credentials  # type: ignore[arg-type]
+                    serverSelectionTimeoutMS=1000,
+                    **self.credentials,  # type: ignore[arg-type]
                 )
             )
 
@@ -399,17 +394,17 @@ class TestSSL(IntegrationTest):
                         ssl=True,
                         tlsCAFile=CA_PEM,
                         tlsCRLFile=CRL_PEM,
-                        serverSelectionTimeoutMS=100,
-                        **self.credentials  # type: ignore[arg-type]
+                        serverSelectionTimeoutMS=1000,
+                        **self.credentials,  # type: ignore[arg-type]
                     )
                 )
 
-            uri_fmt = "mongodb://localhost/?ssl=true&tlsCAFile=%s&serverSelectionTimeoutMS=100"
+            uri_fmt = "mongodb://localhost/?ssl=true&tlsCAFile=%s&serverSelectionTimeoutMS=1000"
             connected(MongoClient(uri_fmt % (CA_PEM,), **self.credentials))  # type: ignore
 
             uri_fmt = (
                 "mongodb://localhost/?ssl=true&tlsCRLFile=%s"
-                "&tlsCAFile=%s&serverSelectionTimeoutMS=100"
+                "&tlsCAFile=%s&serverSelectionTimeoutMS=1000"
             )
             with self.assertRaises(ConnectionFailure):
                 connected(
@@ -430,7 +425,7 @@ class TestSSL(IntegrationTest):
         with self.assertRaises(ConnectionFailure):
             # Server cert is verified but hostname matching fails
             connected(
-                MongoClient("server", ssl=True, serverSelectionTimeoutMS=100, **self.credentials)  # type: ignore[arg-type]
+                MongoClient("server", ssl=True, serverSelectionTimeoutMS=1000, **self.credentials)  # type: ignore[arg-type]
             )
 
         # Server cert is verified. Disable hostname matching.
@@ -439,20 +434,21 @@ class TestSSL(IntegrationTest):
                 "server",
                 ssl=True,
                 tlsAllowInvalidHostnames=True,
-                serverSelectionTimeoutMS=100,
-                **self.credentials  # type: ignore[arg-type]
+                serverSelectionTimeoutMS=1000,
+                **self.credentials,  # type: ignore[arg-type]
             )
         )
 
         # Server cert and hostname are verified.
         connected(
-            MongoClient("localhost", ssl=True, serverSelectionTimeoutMS=100, **self.credentials)  # type: ignore[arg-type]
+            MongoClient("localhost", ssl=True, serverSelectionTimeoutMS=1000, **self.credentials)  # type: ignore[arg-type]
         )
 
         # Server cert and hostname are verified.
         connected(
             MongoClient(
-                "mongodb://localhost/?ssl=true&serverSelectionTimeoutMS=100", **self.credentials  # type: ignore[arg-type]
+                "mongodb://localhost/?ssl=true&serverSelectionTimeoutMS=1000",
+                **self.credentials,  # type: ignore[arg-type]
             )
         )
 
@@ -463,7 +459,6 @@ class TestSSL(IntegrationTest):
         ):
             raise SkipTest("Can't test when system CA certificates are loadable.")
 
-        ssl_support: Any
         have_certifi = ssl_support.HAVE_CERTIFI
         have_wincertstore = ssl_support.HAVE_WINCERTSTORE
         # Force the test regardless of environment.
@@ -482,7 +477,6 @@ class TestSSL(IntegrationTest):
             # with SSLContext and SSLContext provides no information
             # about ca_certs.
             raise SkipTest("Can't test when SSLContext available.")
-        ssl_support: Any
         if not ssl_support.HAVE_CERTIFI:
             raise SkipTest("Need certifi to test certifi support.")
 
@@ -627,7 +621,7 @@ class TestSSL(IntegrationTest):
                     ssl=True,
                     tlsAllowInvalidCertificates=True,
                     tlsCertificateKeyFile=CA_PEM,
-                    serverSelectionTimeoutMS=100,
+                    serverSelectionTimeoutMS=1000,
                 )
             )
         except (ConnectionFailure, ConfigurationError):

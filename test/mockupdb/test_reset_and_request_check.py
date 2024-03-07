@@ -11,22 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import itertools
 import time
 import unittest
 
 from mockupdb import MockupDB, going, wait_until
-from operations import operations
+from operations import operations  # type: ignore[import]
 
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
+from pymongo.operations import _Op
 from pymongo.server_type import SERVER_TYPE
 
 
 class TestResetAndRequestCheck(unittest.TestCase):
     def __init__(self, *args, **kwargs):
-        super(TestResetAndRequestCheck, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.ismaster_time = 0.0
         self.client = None
         self.server = None
@@ -67,7 +69,7 @@ class TestResetAndRequestCheck(unittest.TestCase):
         # Server is Unknown.
         topology = self.client._topology
         with self.assertRaises(ConnectionFailure):
-            topology.select_server_by_address(self.server.address, 0)
+            topology.select_server_by_address(self.server.address, _Op.TEST, 0)
 
         time.sleep(0.5)
         after = time.time()
@@ -94,7 +96,7 @@ class TestResetAndRequestCheck(unittest.TestCase):
 
         # Server is *not* Unknown.
         topology = self.client._topology
-        server = topology.select_server_by_address(self.server.address, 0)
+        server = topology.select_server_by_address(self.server.address, _Op.TEST, 0)
         assert server is not None
         self.assertEqual(SERVER_TYPE.Standalone, server.description.server_type)
 
@@ -116,7 +118,7 @@ class TestResetAndRequestCheck(unittest.TestCase):
 
         # Server is rediscovered.
         topology = self.client._topology
-        server = topology.select_server_by_address(self.server.address, 0)
+        server = topology.select_server_by_address(self.server.address, _Op.TEST, 0)
         assert server is not None
         self.assertEqual(SERVER_TYPE.Standalone, server.description.server_type)
 
@@ -143,7 +145,7 @@ def generate_reset_tests():
     for entry in matrix:
         operation, (test_method, name) = entry
         test = create_reset_test(operation, test_method)
-        test_name = "%s_%s" % (name, operation.name.replace(" ", "_"))
+        test_name = "{}_{}".format(name, operation.name.replace(" ", "_"))
         test.__name__ = test_name
         setattr(TestResetAndRequestCheck, test_name, test)
 

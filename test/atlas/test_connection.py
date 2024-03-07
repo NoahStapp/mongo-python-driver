@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test connections to various Atlas cluster types."""
+from __future__ import annotations
 
 import os
 import sys
@@ -23,14 +24,6 @@ sys.path[0:0] = [""]
 
 import pymongo
 from pymongo.ssl_support import HAS_SNI
-
-try:
-    import dns  # noqa
-
-    HAS_DNS = True
-except ImportError:
-    HAS_DNS = False
-
 
 URIS = {
     "ATLAS_REPL": os.environ.get("ATLAS_REPL"),
@@ -46,10 +39,6 @@ URIS = {
     "ATLAS_SRV_TLS12": os.environ.get("ATLAS_SRV_TLS12"),
     "ATLAS_SRV_SERVERLESS": os.environ.get("ATLAS_SRV_SERVERLESS"),
 }
-
-# Set this variable to true to run the SRV tests even when dnspython is not
-# installed.
-MUST_TEST_SRV = os.environ.get("MUST_TEST_SRV")
 
 
 def connect(uri):
@@ -87,27 +76,21 @@ class TestAtlasConnect(unittest.TestCase):
         self.assertIn("mongodb+srv://", uri)
 
     @unittest.skipUnless(HAS_SNI, "Free tier requires SNI support")
-    @unittest.skipUnless(HAS_DNS or MUST_TEST_SRV, "SRV requires dnspython")
     def test_srv_free_tier(self):
         self.connect_srv(URIS["ATLAS_SRV_FREE"])
 
-    @unittest.skipUnless(HAS_DNS or MUST_TEST_SRV, "SRV requires dnspython")
     def test_srv_replica_set(self):
         self.connect_srv(URIS["ATLAS_SRV_REPL"])
 
-    @unittest.skipUnless(HAS_DNS or MUST_TEST_SRV, "SRV requires dnspython")
     def test_srv_sharded_cluster(self):
         self.connect_srv(URIS["ATLAS_SRV_SHRD"])
 
-    @unittest.skipUnless(HAS_DNS or MUST_TEST_SRV, "SRV requires dnspython")
     def test_srv_tls_11(self):
         self.connect_srv(URIS["ATLAS_SRV_TLS11"])
 
-    @unittest.skipUnless(HAS_DNS or MUST_TEST_SRV, "SRV requires dnspython")
     def test_srv_tls_12(self):
         self.connect_srv(URIS["ATLAS_SRV_TLS12"])
 
-    @unittest.skipUnless(HAS_DNS or MUST_TEST_SRV, "SRV requires dnspython")
     def test_srv_serverless(self):
         self.connect_srv(URIS["ATLAS_SRV_SERVERLESS"])
 
@@ -120,7 +103,7 @@ class TestAtlasConnect(unittest.TestCase):
         duplicates = [names for names in uri_to_names.values() if len(names) > 1]
         self.assertFalse(
             duplicates,
-            "Error: the following env variables have duplicate values: %s" % (duplicates,),
+            f"Error: the following env variables have duplicate values: {duplicates}",
         )
 
 

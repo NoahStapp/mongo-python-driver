@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # Copyright 2015-present MongoDB, Inc.
 #
@@ -14,13 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the gridfs package.
-"""
+"""Tests for the gridfs package."""
+from __future__ import annotations
+
 import datetime
 import itertools
+import sys
 import threading
 import time
 from io import BytesIO
+from unittest.mock import patch
+
+sys.path[0:0] = [""]
+
 from test import IntegrationTest, client_context, unittest
 from test.utils import joinall, one, rs_client, rs_or_single_client, single_client
 
@@ -34,6 +39,7 @@ from pymongo.errors import (
     ConfigurationError,
     NotPrimaryError,
     ServerSelectionTimeoutError,
+    WriteConcernError,
 )
 from pymongo.mongo_client import MongoClient
 from pymongo.read_preferences import ReadPreference
@@ -44,7 +50,7 @@ class JustWrite(threading.Thread):
         threading.Thread.__init__(self)
         self.gfs = gfs
         self.num = num
-        self.setDaemon(True)
+        self.daemon = True
 
     def run(self):
         for _ in range(self.num):
@@ -59,7 +65,7 @@ class JustRead(threading.Thread):
         self.gfs = gfs
         self.num = num
         self.results = results
-        self.setDaemon(True)
+        self.daemon = True
 
     def run(self):
         for _ in range(self.num):
@@ -75,7 +81,7 @@ class TestGridfs(IntegrationTest):
 
     @classmethod
     def setUpClass(cls):
-        super(TestGridfs, cls).setUpClass()
+        super().setUpClass()
         cls.fs = gridfs.GridFSBucket(cls.db)
         cls.alt = gridfs.GridFSBucket(cls.db, bucket_name="alt")
 
@@ -196,8 +202,8 @@ class TestGridfs(IntegrationTest):
         self.alt.upload_from_stream("hello world", b"")
 
         self.assertEqual(
-            set(["mike", "test", "hello world", "foo"]),
-            set(k["filename"] for k in list(self.db.alt.files.find())),
+            {"mike", "test", "hello world", "foo"},
+            {k["filename"] for k in list(self.db.alt.files.find())},
         )
 
     def test_threaded_reads(self):
@@ -275,6 +281,39 @@ class TestGridfs(IntegrationTest):
             oid, "test_file_custom_id", BytesIO(b"custom id"), chunk_size_bytes=1
         )
         self.assertEqual(b"custom id", self.fs.open_download_stream(oid).read())
+
+    @patch("gridfs.grid_file._UPLOAD_BUFFER_CHUNKS", 3)
+    @client_context.require_failCommand_fail_point
+    def test_upload_bulk_write_error(self):
+        # Test BulkWriteError from insert_many is converted to an insert_one style error.
+        expected_wce = {
+            "code": 100,
+            "codeName": "UnsatisfiableWriteConcern",
+            "errmsg": "Not enough data-bearing nodes",
+        }
+        cause_wce = {
+            "configureFailPoint": "failCommand",
+            "mode": {"times": 2},
+            "data": {"failCommands": ["insert"], "writeConcernError": expected_wce},
+        }
+        gin = self.fs.open_upload_stream("test_file", chunk_size_bytes=1)
+        with self.fail_point(cause_wce):
+            # Assert we raise WriteConcernError, not BulkWriteError.
+            with self.assertRaises(WriteConcernError):
+                gin.write(b"hello world")
+        # 3 chunks were uploaded.
+        self.assertEqual(3, self.db.fs.chunks.count_documents({"files_id": gin._id}))
+        gin.abort()
+
+    @patch("gridfs.grid_file._UPLOAD_BUFFER_CHUNKS", 10)
+    def test_upload_batching(self):
+        with self.fs.open_upload_stream("test_file", chunk_size_bytes=1) as gin:
+            gin.write(b"s" * (10 - 1))
+            # No chunks were uploaded yet.
+            self.assertEqual(0, self.db.fs.chunks.count_documents({"files_id": gin._id}))
+            gin.write(b"s")
+            # All chunks were uploaded since we hit the _UPLOAD_BUFFER_CHUNKS limit.
+            self.assertEqual(10, self.db.fs.chunks.count_documents({"files_id": gin._id}))
 
     def test_open_upload_stream(self):
         gin = self.fs.open_upload_stream("from_stream")
@@ -362,6 +401,7 @@ class TestGridfs(IntegrationTest):
         self.assertRaises(NoFile, self.fs.open_download_stream_by_name, "first_name")
         self.assertEqual(b"testing", self.fs.open_download_stream_by_name("second_name").read())
 
+    @patch("gridfs.grid_file._UPLOAD_BUFFER_SIZE", 5)
     def test_abort(self):
         gin = self.fs.open_upload_stream("test_filename", chunk_size_bytes=5)
         gin.write(b"test1")
@@ -442,7 +482,7 @@ class TestGridfsBucketReplicaSet(IntegrationTest):
     @classmethod
     @client_context.require_secondaries_count(1)
     def setUpClass(cls):
-        super(TestGridfsBucketReplicaSet, cls).setUpClass()
+        super().setUpClass()
 
     @classmethod
     def tearDownClass(cls):

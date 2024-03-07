@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 from collections import namedtuple
 
-from mockupdb import OpMsg, OpMsgReply, OpReply
+from mockupdb import OpMsgReply, OpReply
 
 from pymongo import ReadPreference
 
@@ -61,8 +62,15 @@ operations = [
         not_master=not_master_reply,
     ),
     Operation(
-        "count",
+        "count_documents",
         lambda client: client.db.collection.count_documents({}),
+        reply={"n": 1},
+        op_type="may-use-secondary",
+        not_master=not_master_reply,
+    ),
+    Operation(
+        "estimated_document_count",
+        lambda client: client.db.collection.estimated_document_count(),
         reply={"n": 1},
         op_type="may-use-secondary",
         not_master=not_master_reply,
@@ -105,16 +113,8 @@ operations = [
 ]
 
 
-_ops_by_name = dict([(op.name, op) for op in operations])
+_ops_by_name = {op.name: op for op in operations}
 
 Upgrade = namedtuple("Upgrade", ["name", "function", "old", "new", "wire_version"])
 
-upgrades = [
-    Upgrade(
-        "estimated_document_count",
-        lambda client: client.db.collection.estimated_document_count(),
-        old=OpMsg("count", "collection", namespace="db"),
-        new=OpMsg("aggregate", "collection", namespace="db"),
-        wire_version=12,
-    ),
-]
+upgrades = []

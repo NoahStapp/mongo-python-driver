@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tests for the Binary wrapper."""
+from __future__ import annotations
 
 import array
 import base64
@@ -21,6 +22,7 @@ import mmap
 import pickle
 import sys
 import uuid
+from typing import Any
 
 sys.path[0:0] = [""]
 
@@ -122,15 +124,15 @@ class TestBinary(unittest.TestCase):
 
     def test_repr(self):
         one = Binary(b"hello world")
-        self.assertEqual(repr(one), "Binary(%s, 0)" % (repr(b"hello world"),))
+        self.assertEqual(repr(one), "Binary({}, 0)".format(repr(b"hello world")))
         two = Binary(b"hello world", 2)
-        self.assertEqual(repr(two), "Binary(%s, 2)" % (repr(b"hello world"),))
+        self.assertEqual(repr(two), "Binary({}, 2)".format(repr(b"hello world")))
         three = Binary(b"\x08\xFF")
-        self.assertEqual(repr(three), "Binary(%s, 0)" % (repr(b"\x08\xFF"),))
+        self.assertEqual(repr(three), "Binary({}, 0)".format(repr(b"\x08\xFF")))
         four = Binary(b"\x08\xFF", 2)
-        self.assertEqual(repr(four), "Binary(%s, 2)" % (repr(b"\x08\xFF"),))
+        self.assertEqual(repr(four), "Binary({}, 2)".format(repr(b"\x08\xFF")))
         five = Binary(b"test", 100)
-        self.assertEqual(repr(five), "Binary(%s, 100)" % (repr(b"test"),))
+        self.assertEqual(repr(five), "Binary({}, 100)".format(repr(b"test")))
 
     def test_hash(self):
         one = Binary(b"hello world")
@@ -275,7 +277,6 @@ class TestBinary(unittest.TestCase):
         client_context.client.pymongo_test.drop_collection("csharp_uuid")
 
     def test_uri_to_uuid(self):
-
         uri = "mongodb://foo/?uuidrepresentation=csharpLegacy"
         client = MongoClient(uri, connect=False)
         self.assertEqual(client.pymongo_test.test.codec_options.uuid_representation, CSHARP_LEGACY)
@@ -351,7 +352,7 @@ class TestUuidSpecExplicitCoding(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        super(TestUuidSpecExplicitCoding, cls).setUpClass()
+        super().setUpClass()
         cls.uuid = uuid.UUID("00112233445566778899AABBCCDDEEFF")
 
     @staticmethod
@@ -452,7 +453,7 @@ class TestUuidSpecImplicitCoding(IntegrationTest):
 
     @classmethod
     def setUpClass(cls):
-        super(TestUuidSpecImplicitCoding, cls).setUpClass()
+        super().setUpClass()
         cls.uuid = uuid.UUID("00112233445566778899AABBCCDDEEFF")
 
     @staticmethod
@@ -495,7 +496,7 @@ class TestUuidSpecImplicitCoding(IntegrationTest):
     # Implicit encoding prose test #5
     def test_encoding_5(self):
         with self.assertRaises(ValueError):
-            self._test_encoding("unspecifed", "dummy", -1)
+            self._test_encoding("unspecified", "dummy", -1)
 
     def _test_decoding(
         self,

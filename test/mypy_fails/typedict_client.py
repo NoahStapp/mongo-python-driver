@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import TypedDict
 
 from pymongo import MongoClient
@@ -10,9 +12,9 @@ class Movie(TypedDict):
 
 client: MongoClient[Movie] = MongoClient()
 coll = client.test.test
-retreived = coll.find_one({"_id": "foo"})
-assert retreived is not None
-assert retreived["year"] == 1
+retrieved = coll.find_one({"_id": "foo"})
+assert retrieved is not None
+assert retrieved["year"] == 1
 assert (
-    retreived["name"] == 2
+    retrieved["name"] == 2
 )  # error: Non-overlapping equality check (left operand type: "str", right operand type: "Literal[2]")  [comparison-overlap]

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Run the SRV support tests."""
+from __future__ import annotations
 
 import glob
 import json
@@ -21,7 +22,7 @@ import sys
 
 sys.path[0:0] = [""]
 
-from test import client_context, unittest
+from test import IntegrationTest, client_context, unittest
 from test.utils import wait_until
 
 from pymongo.common import validate_read_preference_tags
@@ -131,6 +132,8 @@ def create_test(test_case):
                     wait_until(
                         lambda: num_hosts == len(client.nodes), "wait to connect to num_hosts"
                     )
+                if test_case.get("ping", True):
+                    client.admin.command("ping")
                 # XXX: we should block until SRV poller runs at least once
                 # and re-run these assertions.
         else:
@@ -184,6 +187,14 @@ class TestParsingErrors(unittest.TestCase):
             MongoClient,
             "mongodb+srv://[::1]",
         )
+
+
+class TestCaseInsensitive(IntegrationTest):
+    @unittest.skipUnless(_HAVE_DNSPYTHON, "DNS tests require the dnspython module")
+    def test_connect_case_insensitive(self):
+        client = MongoClient("mongodb+srv://TEST1.TEST.BUILD.10GEN.cc/")
+        self.addCleanup(client.close)
+        self.assertGreater(len(client.topology_description.server_descriptions()), 1)
 
 
 if __name__ == "__main__":

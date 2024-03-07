@@ -13,10 +13,13 @@
 # limitations under the License.
 
 """Test the database module."""
+from __future__ import annotations
 
 import re
 import sys
-from typing import Any, Iterable, List, Mapping
+from typing import Any, Iterable, List, Mapping, Union
+
+from pymongo.command_cursor import CommandCursor
 
 sys.path[0:0] = [""]
 
@@ -42,6 +45,7 @@ from pymongo.errors import (
     CollectionInvalid,
     ExecutionTimeout,
     InvalidName,
+    InvalidOperation,
     OperationFailure,
     WriteConcernError,
 )
@@ -95,7 +99,7 @@ class TestDatabaseNoConnect(unittest.TestCase):
 
     def test_iteration(self):
         db = self.client.pymongo_test
-        if "PyPy" in sys.version:
+        if "PyPy" in sys.version and sys.version_info < (3, 8, 15):
             msg = "'NoneType' object is not callable"
         else:
             msg = "'Database' object is not iterable"
@@ -137,7 +141,7 @@ class TestDatabase(IntegrationTest):
     def test_repr(self):
         self.assertEqual(
             repr(Database(self.client, "pymongo_test")),
-            "Database(%r, %s)" % (self.client, repr("pymongo_test")),
+            "Database({!r}, {})".format(self.client, repr("pymongo_test")),
         )
 
     def test_create_collection(self):
@@ -193,7 +197,6 @@ class TestDatabase(IntegrationTest):
 
     def test_list_collection_names_filter(self):
         listener = OvertCommandListener()
-        results = listener.results
         client = rs_or_single_client(event_listeners=[listener])
         db = client[self.db.name]
         db.capped.drop()
@@ -201,24 +204,37 @@ class TestDatabase(IntegrationTest):
         db.capped.insert_one({})
         db.non_capped.insert_one({})
         self.addCleanup(client.drop_database, db.name)
-
+        filter: Union[None, Mapping[str, Any]]
         # Should not send nameOnly.
         for filter in ({"options.capped": True}, {"options.capped": True, "name": "capped"}):
-            results.clear()
+            listener.reset()
             names = db.list_collection_names(filter=filter)
             self.assertEqual(names, ["capped"])
-            self.assertNotIn("nameOnly", results["started"][0].command)
+            self.assertNotIn("nameOnly", listener.started_events[0].command)
 
         # Should send nameOnly (except on 2.6).
-        filter: Any
         for filter in (None, {}, {"name": {"$in": ["capped", "non_capped"]}}):
-            results.clear()
+            listener.reset()
             names = db.list_collection_names(filter=filter)
             self.assertIn("capped", names)
             self.assertIn("non_capped", names)
-            command = results["started"][0].command
+            command = listener.started_events[0].command
             self.assertIn("nameOnly", command)
             self.assertTrue(command["nameOnly"])
+
+    def test_check_exists(self):
+        listener = OvertCommandListener()
+        client = rs_or_single_client(event_listeners=[listener])
+        self.addCleanup(client.close)
+        db = client[self.db.name]
+        db.drop_collection("unique")
+        db.create_collection("unique", check_exists=True)
+        self.assertIn("listCollections", listener.started_command_names())
+        listener.reset()
+        db.drop_collection("unique")
+        db.create_collection("unique", check_exists=False)
+        self.assertTrue(len(listener.started_events) > 0)
+        self.assertNotIn("listCollections", listener.started_command_names())
 
     def test_list_collections(self):
         self.client.drop_database("pymongo_test")
@@ -250,8 +266,8 @@ class TestDatabase(IntegrationTest):
 
         # Checking if is there any collection which don't exists.
         if (
-            len(set(colls) - set(["test", "test.mike"])) == 0
-            or len(set(colls) - set(["test", "test.mike", "system.indexes"])) == 0
+            len(set(colls) - {"test", "test.mike"}) == 0
+            or len(set(colls) - {"test", "test.mike", "system.indexes"}) == 0
         ):
             self.assertTrue(True)
         else:
@@ -289,10 +305,7 @@ class TestDatabase(IntegrationTest):
         coll_cnt = {}
 
         # Checking if is there any collection which don't exists.
-        if (
-            len(set(colls) - set(["test"])) == 0
-            or len(set(colls) - set(["test", "system.indexes"])) == 0
-        ):
+        if len(set(colls) - {"test"}) == 0 or len(set(colls) - {"test", "system.indexes"}) == 0:
             self.assertTrue(True)
         else:
             self.assertTrue(False)
@@ -362,13 +375,16 @@ class TestDatabase(IntegrationTest):
         self.assertTrue(db.validate_collection(db.test, True, True))
 
     @client_context.require_version_min(4, 3, 3)
+    @client_context.require_no_standalone
     def test_validate_collection_background(self):
-        db = self.client.pymongo_test
+        db = self.client.pymongo_test.with_options(write_concern=WriteConcern(w="majority"))
         db.test.insert_one({"dummy": "object"})
         coll = db.test
         self.assertTrue(db.validate_collection(coll, background=False))
         # The inMemory storage engine does not support background=True.
         if client_context.storage_engine != "inMemory":
+            # background=True requires the collection exist in a checkpoint.
+            self.client.admin.command("fsync")
             self.assertTrue(db.validate_collection(coll, background=True))
             self.assertTrue(db.validate_collection(coll, scandata=True, background=True))
             # The server does not support background=True with full=True.
@@ -398,6 +414,23 @@ class TestDatabase(IntegrationTest):
         for doc in result["cursor"]["firstBatch"]:
             self.assertTrue(isinstance(doc["r"], Regex))
 
+    def test_cursor_command(self):
+        db = self.client.pymongo_test
+        db.test.drop()
+
+        docs = [{"_id": i, "doc": i} for i in range(3)]
+        db.test.insert_many(docs)
+
+        cursor = db.cursor_command("find", "test")
+
+        self.assertIsInstance(cursor, CommandCursor)
+
+        result_docs = list(cursor)
+        self.assertEqual(docs, result_docs)
+
+    def test_cursor_command_invalid(self):
+        self.assertRaises(InvalidOperation, self.db.cursor_command, "usersInfo", "test")
+
     def test_password_digest(self):
         self.assertRaises(TypeError, auth._password_digest, 5)
         self.assertRaises(TypeError, auth._password_digest, True)
@@ -423,11 +456,11 @@ class TestDatabase(IntegrationTest):
         db.test.insert_one(SON([("hello", "world"), ("_id", 5)]))
 
         db = self.client.get_database(
-            "pymongo_test", codec_options=CodecOptions(document_class=SON)
+            "pymongo_test", codec_options=CodecOptions(document_class=SON[str, Any])
         )
         cursor = db.test.find()
         for x in cursor:
-            for (k, v) in x.items():
+            for k, _v in x.items():
                 self.assertEqual(k, "_id")
                 break
 
@@ -440,7 +473,7 @@ class TestDatabase(IntegrationTest):
         self.assertRaises(TypeError, db.dereference, None)
 
         self.assertEqual(None, db.dereference(DBRef("test", ObjectId())))
-        obj = {"x": True}
+        obj: dict[str, Any] = {"x": True}
         key = db.test.insert_one(obj).inserted_id
         self.assertEqual(obj, db.dereference(DBRef("test", key)))
         self.assertEqual(obj, db.dereference(DBRef("test", key, "pymongo_test")))
@@ -457,7 +490,7 @@ class TestDatabase(IntegrationTest):
 
         db.test.insert_one({"_id": 4, "foo": "bar"})
         db = self.client.get_database(
-            "pymongo_test", codec_options=CodecOptions(document_class=SON)
+            "pymongo_test", codec_options=CodecOptions(document_class=SON[str, Any])
         )
         self.assertEqual(
             SON([("foo", "bar")]), db.dereference(DBRef("test", 4), projection={"_id": False})

@@ -13,11 +13,15 @@
 # limitations under the License.
 
 """Test retryable reads spec."""
+from __future__ import annotations
 
 import os
 import pprint
 import sys
 import threading
+
+from bson import SON
+from pymongo.errors import AutoReconnect
 
 sys.path[0:0] = [""]
 
@@ -30,9 +34,12 @@ from test import (
 )
 from test.utils import (
     CMAPListener,
+    EventListener,
     OvertCommandListener,
-    TestCreator,
+    SpecTestCreator,
+    rs_client,
     rs_or_single_client,
+    set_fail_point,
 )
 from test.utils_spec_runner import SpecRunner
 
@@ -76,14 +83,14 @@ class TestSpec(SpecRunner):
     # TODO: remove this once PYTHON-1948 is done.
     @client_context.require_no_mmap
     def setUpClass(cls):
-        super(TestSpec, cls).setUpClass()
+        super().setUpClass()
 
     def maybe_skip_scenario(self, test):
-        super(TestSpec, self).maybe_skip_scenario(test)
+        super().maybe_skip_scenario(test)
         skip_names = ["listCollectionObjects", "listIndexNames", "listDatabaseObjects"]
         for name in skip_names:
             if name.lower() in test["description"].lower():
-                self.skipTest("PyMongo does not support %s" % (name,))
+                self.skipTest(f"PyMongo does not support {name}")
 
         # Serverless does not support $out and collation.
         if client_context.serverless:
@@ -107,24 +114,27 @@ class TestSpec(SpecRunner):
         """Override a test's collection name to support GridFS tests."""
         if "bucket_name" in scenario_def:
             return scenario_def["bucket_name"]
-        return super(TestSpec, self).get_scenario_coll_name(scenario_def)
+        return super().get_scenario_coll_name(scenario_def)
 
     def setup_scenario(self, scenario_def):
         """Override a test's setup to support GridFS tests."""
         if "bucket_name" in scenario_def:
+            data = scenario_def["data"]
             db_name = self.get_scenario_db_name(scenario_def)
-            db = client_context.client.get_database(
-                db_name, write_concern=WriteConcern(w="majority")
-            )
-            # Create a bucket for the retryable reads GridFS tests.
-            client_context.client.drop_database(db_name)
-            if scenario_def["data"]:
-                data = scenario_def["data"]
-                # Load data.
+            db = client_context.client[db_name]
+            # Create a bucket for the retryable reads GridFS tests with as few
+            # majority writes as possible.
+            wc = WriteConcern(w="majority")
+            if data:
+                db["fs.chunks"].drop()
+                db["fs.files"].drop()
                 db["fs.chunks"].insert_many(data["fs.chunks"])
-                db["fs.files"].insert_many(data["fs.files"])
+                db.get_collection("fs.files", write_concern=wc).insert_many(data["fs.files"])
+            else:
+                db.get_collection("fs.chunks").drop()
+                db.get_collection("fs.files", write_concern=wc).drop()
         else:
-            super(TestSpec, self).setup_scenario(scenario_def)
+            super().setup_scenario(scenario_def)
 
 
 def create_test(scenario_def, test, name):
@@ -135,7 +145,7 @@ def create_test(scenario_def, test, name):
     return run_scenario
 
 
-test_creator = TestCreator(create_test, TestSpec, _TEST_PATH)
+test_creator = SpecTestCreator(create_test, TestSpec, _TEST_PATH)
 test_creator.create_tests()
 
 
@@ -159,6 +169,9 @@ class TestPoolPausedError(IntegrationTest):
     @client_context.require_failCommand_blockConnection
     @client_knobs(heartbeat_frequency=0.05, min_heartbeat_interval=0.05)
     def test_pool_paused_error_is_retryable(self):
+        if "PyPy" in sys.version:
+            # Tracked in PYTHON-3519
+            self.skipTest("Test is flakey on PyPy")
         cmap_listener = CMAPListener()
         cmd_listener = OvertCommandListener()
         client = rs_or_single_client(maxPoolSize=1, event_listeners=[cmap_listener, cmd_listener])
@@ -205,13 +218,56 @@ class TestPoolPausedError(IntegrationTest):
         # Connection check out failures are not reflected in command
         # monitoring because we only publish command events _after_ checking
         # out a connection.
-        started = cmd_listener.results["started"]
+        started = cmd_listener.started_events
         msg = pprint.pformat(cmd_listener.results)
         self.assertEqual(3, len(started), msg)
-        succeeded = cmd_listener.results["succeeded"]
+        succeeded = cmd_listener.succeeded_events
         self.assertEqual(2, len(succeeded), msg)
-        failed = cmd_listener.results["failed"]
+        failed = cmd_listener.failed_events
         self.assertEqual(1, len(failed), msg)
+
+
+class TestRetryableReads(IntegrationTest):
+    @client_context.require_multiple_mongoses
+    @client_context.require_failCommand_fail_point
+    def test_retryable_reads_in_sharded_cluster_multiple_available(self):
+        fail_command = {
+            "configureFailPoint": "failCommand",
+            "mode": {"times": 1},
+            "data": {
+                "failCommands": ["find"],
+                "closeConnection": True,
+                "appName": "retryableReadTest",
+            },
+        }
+
+        mongos_clients = []
+
+        for mongos in client_context.mongos_seeds().split(","):
+            client = rs_or_single_client(mongos)
+            set_fail_point(client, fail_command)
+            self.addCleanup(client.close)
+            mongos_clients.append(client)
+
+        listener = OvertCommandListener()
+        client = rs_or_single_client(
+            client_context.mongos_seeds(),
+            appName="retryableReadTest",
+            event_listeners=[listener],
+            retryReads=True,
+        )
+
+        with self.fail_point(fail_command):
+            with self.assertRaises(AutoReconnect):
+                client.t.t.find_one({})
+
+        # Disable failpoints on each mongos
+        for client in mongos_clients:
+            fail_command["mode"] = "off"
+            set_fail_point(client, fail_command)
+
+        self.assertEqual(len(listener.failed_events), 2)
+        self.assertEqual(len(listener.succeeded_events), 0)
 
 
 if __name__ == "__main__":

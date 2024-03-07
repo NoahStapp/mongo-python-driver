@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test built in connection-pooling with threads."""
+from __future__ import annotations
 
 import gc
 import random
@@ -23,8 +24,9 @@ import time
 
 from bson.codec_options import DEFAULT_CODEC_OPTIONS
 from bson.son import SON
-from pymongo import MongoClient, message
+from pymongo import MongoClient, message, timeout
 from pymongo.errors import AutoReconnect, ConnectionFailure, DuplicateKeyError
+from pymongo.hello import HelloCompat
 
 sys.path[0:0] = [""]
 
@@ -60,7 +62,7 @@ class MongoThread(threading.Thread):
     """A thread that uses a MongoClient."""
 
     def __init__(self, client):
-        super(MongoThread, self).__init__()
+        super().__init__()
         self.daemon = True  # Don't hang whole test if thread hangs.
         self.client = client
         self.db = self.client[DB]
@@ -107,7 +109,7 @@ class SocketGetter(MongoThread):
     """
 
     def __init__(self, client, pool):
-        super(SocketGetter, self).__init__(client)
+        super().__init__(client)
         self.state = "init"
         self.pool = pool
         self.sock = None
@@ -116,15 +118,15 @@ class SocketGetter(MongoThread):
         self.state = "get_socket"
 
         # Call 'pin_cursor' so we can hold the socket.
-        with self.pool.get_socket() as sock:
+        with self.pool.checkout() as sock:
             sock.pin_cursor()
             self.sock = sock
 
-        self.state = "sock"
+        self.state = "connection"
 
     def __del__(self):
         if self.sock:
-            self.sock.close_socket(None)
+            self.sock.close_conn(None)
 
 
 def run_cases(client, cases):
@@ -132,7 +134,7 @@ def run_cases(client, cases):
     n_runs = 5
 
     for case in cases:
-        for i in range(n_runs):
+        for _i in range(n_runs):
             t = case(client)
             t.start()
             threads.append(t)
@@ -148,7 +150,7 @@ class _TestPoolingBase(IntegrationTest):
     """Base class for all connection-pool tests."""
 
     def setUp(self):
-        super(_TestPoolingBase, self).setUp()
+        super().setUp()
         self.c = rs_or_single_client()
         db = self.c[DB]
         db.unique.drop()
@@ -158,7 +160,7 @@ class _TestPoolingBase(IntegrationTest):
 
     def tearDown(self):
         self.c.close()
-        super(_TestPoolingBase, self).tearDown()
+        super().tearDown()
 
     def create_pool(self, pair=(client_context.host, client_context.port), *args, **kwargs):
         # Start the pool with the correct ssl options.
@@ -188,36 +190,36 @@ class TestPooling(_TestPoolingBase):
         # Test Pool's _check_closed() method doesn't close a healthy socket.
         cx_pool = self.create_pool(max_pool_size=10)
         cx_pool._check_interval_seconds = 0  # Always check.
-        with cx_pool.get_socket() as sock_info:
+        with cx_pool.checkout() as conn:
             pass
 
-        with cx_pool.get_socket() as new_sock_info:
-            self.assertEqual(sock_info, new_sock_info)
+        with cx_pool.checkout() as new_connection:
+            self.assertEqual(conn, new_connection)
 
-        self.assertEqual(1, len(cx_pool.sockets))
+        self.assertEqual(1, len(cx_pool.conns))
 
     def test_get_socket_and_exception(self):
         # get_socket() returns socket after a non-network error.
         cx_pool = self.create_pool(max_pool_size=1, wait_queue_timeout=1)
         with self.assertRaises(ZeroDivisionError):
-            with cx_pool.get_socket() as sock_info:
+            with cx_pool.checkout() as conn:
                 1 / 0
 
         # Socket was returned, not closed.
-        with cx_pool.get_socket() as new_sock_info:
-            self.assertEqual(sock_info, new_sock_info)
+        with cx_pool.checkout() as new_connection:
+            self.assertEqual(conn, new_connection)
 
-        self.assertEqual(1, len(cx_pool.sockets))
+        self.assertEqual(1, len(cx_pool.conns))
 
     def test_pool_removes_closed_socket(self):
         # Test that Pool removes explicitly closed socket.
         cx_pool = self.create_pool()
 
-        with cx_pool.get_socket() as sock_info:
-            # Use SocketInfo's API to close the socket.
-            sock_info.close_socket(None)
+        with cx_pool.checkout() as conn:
+            # Use Connection's API to close the socket.
+            conn.close_conn(None)
 
-        self.assertEqual(0, len(cx_pool.sockets))
+        self.assertEqual(0, len(cx_pool.conns))
 
     def test_pool_removes_dead_socket(self):
         # Test that Pool removes dead socket and the socket doesn't return
@@ -225,20 +227,20 @@ class TestPooling(_TestPoolingBase):
         cx_pool = self.create_pool(max_pool_size=1, wait_queue_timeout=1)
         cx_pool._check_interval_seconds = 0  # Always check.
 
-        with cx_pool.get_socket() as sock_info:
-            # Simulate a closed socket without telling the SocketInfo it's
+        with cx_pool.checkout() as conn:
+            # Simulate a closed socket without telling the Connection it's
             # closed.
-            sock_info.sock.close()
-            self.assertTrue(sock_info.socket_closed())
+            conn.conn.close()
+            self.assertTrue(conn.conn_closed())
 
-        with cx_pool.get_socket() as new_sock_info:
-            self.assertEqual(0, len(cx_pool.sockets))
-            self.assertNotEqual(sock_info, new_sock_info)
+        with cx_pool.checkout() as new_connection:
+            self.assertEqual(0, len(cx_pool.conns))
+            self.assertNotEqual(conn, new_connection)
 
-        self.assertEqual(1, len(cx_pool.sockets))
+        self.assertEqual(1, len(cx_pool.conns))
 
         # Semaphore was released.
-        with cx_pool.get_socket():
+        with cx_pool.checkout():
             pass
 
     def test_socket_closed(self):
@@ -282,13 +284,13 @@ class TestPooling(_TestPoolingBase):
 
     def test_return_socket_after_reset(self):
         pool = self.create_pool()
-        with pool.get_socket() as sock:
+        with pool.checkout() as sock:
             self.assertEqual(pool.active_sockets, 1)
             self.assertEqual(pool.operation_count, 1)
             pool.reset()
 
         self.assertTrue(sock.closed)
-        self.assertEqual(0, len(pool.sockets))
+        self.assertEqual(0, len(pool.conns))
         self.assertEqual(pool.active_sockets, 0)
         self.assertEqual(pool.operation_count, 0)
 
@@ -299,20 +301,20 @@ class TestPooling(_TestPoolingBase):
         cx_pool._check_interval_seconds = 0  # Always check.
         self.addCleanup(cx_pool.close)
 
-        with cx_pool.get_socket() as sock_info:
-            # Simulate a closed socket without telling the SocketInfo it's
+        with cx_pool.checkout() as conn:
+            # Simulate a closed socket without telling the Connection it's
             # closed.
-            sock_info.sock.close()
+            conn.conn.close()
 
         # Swap pool's address with a bad one.
         address, cx_pool.address = cx_pool.address, ("foo.com", 1234)
         with self.assertRaises(AutoReconnect):
-            with cx_pool.get_socket():
+            with cx_pool.checkout():
                 pass
 
         # Back to normal, semaphore was correctly released.
         cx_pool.address = address
-        with cx_pool.get_socket():
+        with cx_pool.checkout():
             pass
 
     def test_wait_queue_timeout(self):
@@ -320,16 +322,16 @@ class TestPooling(_TestPoolingBase):
         pool = self.create_pool(max_pool_size=1, wait_queue_timeout=wait_queue_timeout)
         self.addCleanup(pool.close)
 
-        with pool.get_socket():
+        with pool.checkout():
             start = time.time()
             with self.assertRaises(ConnectionFailure):
-                with pool.get_socket():
+                with pool.checkout():
                     pass
 
         duration = time.time() - start
         self.assertTrue(
             abs(wait_queue_timeout - duration) < 1,
-            "Waited %.2f seconds for a socket, expected %f" % (duration, wait_queue_timeout),
+            f"Waited {duration:.2f} seconds for a socket, expected {wait_queue_timeout:f}",
         )
 
     def test_no_wait_queue_timeout(self):
@@ -338,7 +340,7 @@ class TestPooling(_TestPoolingBase):
         self.addCleanup(pool.close)
 
         # Reach max_size.
-        with pool.get_socket() as s1:
+        with pool.checkout() as s1:
             t = SocketGetter(self.c, pool)
             t.start()
             while t.state != "get_socket":
@@ -347,10 +349,10 @@ class TestPooling(_TestPoolingBase):
             time.sleep(1)
             self.assertEqual(t.state, "get_socket")
 
-        while t.state != "sock":
+        while t.state != "connection":
             time.sleep(0.1)
 
-        self.assertEqual(t.state, "sock")
+        self.assertEqual(t.state, "connection")
         self.assertEqual(t.sock, s1)
 
     def test_checkout_more_than_max_pool_size(self):
@@ -359,7 +361,7 @@ class TestPooling(_TestPoolingBase):
         socks = []
         for _ in range(2):
             # Call 'pin_cursor' so we can hold the socket.
-            with pool.get_socket() as sock:
+            with pool.checkout() as sock:
                 sock.pin_cursor()
                 socks.append(sock)
 
@@ -373,7 +375,7 @@ class TestPooling(_TestPoolingBase):
             self.assertEqual(t.state, "get_socket")
 
         for socket_info in socks:
-            socket_info.close_socket(None)
+            socket_info.close_conn(None)
 
     def test_maxConnecting(self):
         client = rs_or_single_client()
@@ -394,14 +396,14 @@ class TestPooling(_TestPoolingBase):
             thread.join(10)
 
         self.assertEqual(len(docs), 50)
-        self.assertLessEqual(len(pool.sockets), 50)
+        self.assertLessEqual(len(pool.conns), 50)
         # TLS and auth make connection establishment more expensive than
         # the query which leads to more threads hitting maxConnecting.
         # The end result is fewer total connections and better latency.
         if client_context.tls and client_context.auth_enabled:
-            self.assertLessEqual(len(pool.sockets), 30)
+            self.assertLessEqual(len(pool.conns), 30)
         else:
-            self.assertLessEqual(len(pool.sockets), 50)
+            self.assertLessEqual(len(pool.conns), 50)
         # MongoDB 4.4.1 with auth + ssl:
         # maxConnecting = 2:         6 connections in ~0.231+ seconds
         # maxConnecting = unbounded: 50 connections in ~0.642+ seconds
@@ -409,7 +411,85 @@ class TestPooling(_TestPoolingBase):
         # MongoDB 4.4.1 with no-auth no-ssl Python 3.8:
         # maxConnecting = 2:         15-22 connections in ~0.108+ seconds
         # maxConnecting = unbounded: 30+ connections in ~0.140+ seconds
-        print(len(pool.sockets))
+        print(len(pool.conns))
+
+    @client_context.require_failCommand_fail_point
+    def test_csot_timeout_message(self):
+        client = rs_or_single_client(appName="connectionTimeoutApp")
+        # Mock a connection failing due to timeout.
+        mock_connection_timeout = {
+            "configureFailPoint": "failCommand",
+            "mode": "alwaysOn",
+            "data": {
+                "blockConnection": True,
+                "blockTimeMS": 1000,
+                "failCommands": ["find"],
+                "appName": "connectionTimeoutApp",
+            },
+        }
+
+        client.db.t.insert_one({"x": 1})
+
+        with self.fail_point(mock_connection_timeout):
+            with self.assertRaises(Exception) as error:
+                with timeout(0.5):
+                    client.db.t.find_one({"$where": delay(2)})
+
+        self.assertTrue("(configured timeouts: timeoutMS: 500.0ms" in str(error.exception))
+
+    @client_context.require_failCommand_fail_point
+    def test_socket_timeout_message(self):
+        client = rs_or_single_client(socketTimeoutMS=500, appName="connectionTimeoutApp")
+
+        # Mock a connection failing due to timeout.
+        mock_connection_timeout = {
+            "configureFailPoint": "failCommand",
+            "mode": "alwaysOn",
+            "data": {
+                "blockConnection": True,
+                "blockTimeMS": 1000,
+                "failCommands": ["find"],
+                "appName": "connectionTimeoutApp",
+            },
+        }
+
+        client.db.t.insert_one({"x": 1})
+
+        with self.fail_point(mock_connection_timeout):
+            with self.assertRaises(Exception) as error:
+                client.db.t.find_one({"$where": delay(2)})
+
+        self.assertTrue(
+            "(configured timeouts: socketTimeoutMS: 500.0ms, connectTimeoutMS: 20000.0ms)"
+            in str(error.exception)
+        )
+
+    @client_context.require_failCommand_fail_point
+    @client_context.require_version_min(
+        4, 9, 0
+    )  # configureFailPoint does not allow failure on handshake before 4.9, fixed in SERVER-49336
+    def test_connection_timeout_message(self):
+        # Mock a connection failing due to timeout.
+        mock_connection_timeout = {
+            "configureFailPoint": "failCommand",
+            "mode": "alwaysOn",
+            "data": {
+                "blockConnection": True,
+                "blockTimeMS": 1000,
+                "failCommands": [HelloCompat.LEGACY_CMD, "hello"],
+                "appName": "connectionTimeoutApp",
+            },
+        }
+
+        with self.fail_point(mock_connection_timeout):
+            with self.assertRaises(Exception) as error:
+                client = rs_or_single_client(connectTimeoutMS=500, appName="connectionTimeoutApp")
+                client.admin.command("ping")
+
+        self.assertTrue(
+            "(configured timeouts: socketTimeoutMS: 500.0ms, connectTimeoutMS: 500.0ms)"
+            in str(error.exception)
+        )
 
 
 class TestPoolMaxSize(_TestPoolingBase):
@@ -424,7 +504,7 @@ class TestPoolMaxSize(_TestPoolingBase):
         collection.insert_one({})
 
         # nthreads had better be much larger than max_pool_size to ensure that
-        # max_pool_size sockets are actually required at some point in this
+        # max_pool_size connections are actually required at some point in this
         # test's execution.
         cx_pool = get_pool(c)
         nthreads = 10
@@ -435,19 +515,19 @@ class TestPoolMaxSize(_TestPoolingBase):
         def f():
             for _ in range(5):
                 collection.find_one({"$where": delay(0.1)})
-                assert len(cx_pool.sockets) <= max_pool_size
+                assert len(cx_pool.conns) <= max_pool_size
 
             with lock:
                 self.n_passed += 1
 
-        for i in range(nthreads):
+        for _i in range(nthreads):
             t = threading.Thread(target=f)
             threads.append(t)
             t.start()
 
         joinall(threads)
         self.assertEqual(nthreads, self.n_passed)
-        self.assertTrue(len(cx_pool.sockets) > 1)
+        self.assertTrue(len(cx_pool.conns) > 1)
         self.assertEqual(0, cx_pool.requests)
 
     def test_max_pool_size_none(self):
@@ -472,14 +552,14 @@ class TestPoolMaxSize(_TestPoolingBase):
             with lock:
                 self.n_passed += 1
 
-        for i in range(nthreads):
+        for _i in range(nthreads):
             t = threading.Thread(target=f)
             threads.append(t)
             t.start()
 
         joinall(threads)
         self.assertEqual(nthreads, self.n_passed)
-        self.assertTrue(len(cx_pool.sockets) > 1)
+        self.assertTrue(len(cx_pool.conns) > 1)
         self.assertEqual(cx_pool.max_pool_size, float("inf"))
 
     def test_max_pool_size_zero(self):
@@ -500,9 +580,9 @@ class TestPoolMaxSize(_TestPoolingBase):
         # First call to get_socket fails; if pool doesn't release its semaphore
         # then the second call raises "ConnectionFailure: Timed out waiting for
         # socket from pool" instead of AutoReconnect.
-        for i in range(2):
+        for _i in range(2):
             with self.assertRaises(AutoReconnect) as context:
-                with test_pool.get_socket():
+                with test_pool.checkout():
                     pass
 
             # Testing for AutoReconnect instead of ConnectionFailure, above,

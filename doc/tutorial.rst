@@ -4,8 +4,9 @@ Tutorial
 .. testsetup::
 
   from pymongo import MongoClient
+
   client = MongoClient()
-  client.drop_database('test-database')
+  client.drop_database("test-database")
 
 This tutorial is intended as an introduction to working with
 **MongoDB** and **PyMongo**.
@@ -22,7 +23,7 @@ should run without raising an exception:
 
 This tutorial also assumes that a MongoDB instance is running on the
 default host and port. Assuming you have `downloaded and installed
-<http://www.mongodb.org/display/DOCS/Getting+Started>`_ MongoDB, you
+<https://www.mongodb.com/docs/manual/installation/>`_ MongoDB, you
 can start it like so:
 
 .. code-block:: bash
@@ -45,18 +46,18 @@ specify the host and port explicitly, as follows:
 
 .. doctest::
 
-  >>> client = MongoClient('localhost', 27017)
+  >>> client = MongoClient("localhost", 27017)
 
 Or use the MongoDB URI format:
 
 .. doctest::
 
-  >>> client = MongoClient('mongodb://localhost:27017/')
+  >>> client = MongoClient("mongodb://localhost:27017/")
 
 Getting a Database
 ------------------
 A single instance of MongoDB can support multiple independent
-`databases <http://www.mongodb.org/display/DOCS/Databases>`_. When
+`databases <https://www.mongodb.com/docs/manual/core/databases-and-collections>`_. When
 working with PyMongo you access databases using attribute style access
 on :class:`~pymongo.mongo_client.MongoClient` instances:
 
@@ -70,11 +71,11 @@ instead:
 
 .. doctest::
 
-  >>> db = client['test-database']
+  >>> db = client["test-database"]
 
 Getting a Collection
 --------------------
-A `collection <http://www.mongodb.org/display/DOCS/Collections>`_ is a
+A `collection <https://www.mongodb.com/docs/manual/core/databases-and-collections>`_ is a
 group of documents stored in MongoDB, and can be thought of as roughly
 the equivalent of a table in a relational database. Getting a
 collection in PyMongo works the same as getting a database:
@@ -87,7 +88,7 @@ or (using dictionary style access):
 
 .. doctest::
 
-  >>> collection = db['test-collection']
+  >>> collection = db["test-collection"]
 
 An important note about collections (and databases) in MongoDB is that
 they are created lazily - none of the above commands have actually
@@ -104,15 +105,17 @@ post:
 .. doctest::
 
   >>> import datetime
-  >>> post = {"author": "Mike",
-  ...         "text": "My first blog post!",
-  ...         "tags": ["mongodb", "python", "pymongo"],
-  ...         "date": datetime.datetime.utcnow()}
+  >>> post = {
+  ...     "author": "Mike",
+  ...     "text": "My first blog post!",
+  ...     "tags": ["mongodb", "python", "pymongo"],
+  ...     "date": datetime.datetime.now(tz=datetime.timezone.utc),
+  ... }
 
 Note that documents can contain native Python types (like
 :class:`datetime.datetime` instances) which will be automatically
 converted to and from the appropriate `BSON
-<http://www.mongodb.org/display/DOCS/BSON>`_ types.
+<https://bsonspec.org/>`_ types.
 
 .. todo:: link to table of Python <-> BSON types
 
@@ -134,7 +137,7 @@ of ``"_id"`` must be unique across the
 collection. :meth:`~pymongo.collection.Collection.insert_one` returns an
 instance of :class:`~pymongo.results.InsertOneResult`. For more information
 on ``"_id"``, see the `documentation on _id
-<http://www.mongodb.org/display/DOCS/Object+IDs>`_.
+<https://www.mongodb.com/docs/manual/reference/method/ObjectId/>`_.
 
 After inserting the first document, the *posts* collection has
 actually been created on the server. We can verify this by listing all
@@ -212,7 +215,7 @@ Note that an ObjectId is not the same as its string representation:
 .. doctest::
 
   >>> post_id_as_str = str(post_id)
-  >>> posts.find_one({"_id": post_id_as_str}) # No result
+  >>> posts.find_one({"_id": post_id_as_str})  # No result
   >>>
 
 A common task in web applications is to get an ObjectId from the
@@ -240,14 +243,20 @@ command to the server:
 
 .. doctest::
 
-  >>> new_posts = [{"author": "Mike",
-  ...               "text": "Another post!",
-  ...               "tags": ["bulk", "insert"],
-  ...               "date": datetime.datetime(2009, 11, 12, 11, 14)},
-  ...              {"author": "Eliot",
-  ...               "title": "MongoDB is fun",
-  ...               "text": "and pretty easy too!",
-  ...               "date": datetime.datetime(2009, 11, 10, 10, 45)}]
+  >>> new_posts = [
+  ...     {
+  ...         "author": "Mike",
+  ...         "text": "Another post!",
+  ...         "tags": ["bulk", "insert"],
+  ...         "date": datetime.datetime(2009, 11, 12, 11, 14),
+  ...     },
+  ...     {
+  ...         "author": "Eliot",
+  ...         "title": "MongoDB is fun",
+  ...         "text": "and pretty easy too!",
+  ...         "date": datetime.datetime(2009, 11, 10, 10, 45),
+  ...     },
+  ... ]
   >>> result = posts.insert_many(new_posts)
   >>> result.inserted_ids
   [ObjectId('...'), ObjectId('...')]
@@ -274,7 +283,7 @@ document in the ``posts`` collection:
 .. doctest::
 
   >>> for post in posts.find():
-  ...   pprint.pprint(post)
+  ...     pprint.pprint(post)
   ...
   {'_id': ObjectId('...'),
    'author': 'Mike',
@@ -300,7 +309,7 @@ author is "Mike":
 .. doctest::
 
   >>> for post in posts.find({"author": "Mike"}):
-  ...   pprint.pprint(post)
+  ...     pprint.pprint(post)
   ...
   {'_id': ObjectId('...'),
    'author': 'Mike',
@@ -335,7 +344,7 @@ or just of those documents that match a specific query:
 Range Queries
 -------------
 MongoDB supports many different types of `advanced queries
-<http://www.mongodb.org/display/DOCS/Advanced+Queries>`_. As an
+<https://www.mongodb.com/docs/manual/reference/operator/>`_. As an
 example, lets perform a query where we limit results to posts older
 than a certain date, but also sort the results by author:
 
@@ -343,7 +352,7 @@ than a certain date, but also sort the results by author:
 
   >>> d = datetime.datetime(2009, 11, 12, 12)
   >>> for post in posts.find({"date": {"$lt": d}}).sort("author"):
-  ...   pprint.pprint(post)
+  ...     pprint.pprint(post)
   ...
   {'_id': ObjectId('...'),
    'author': 'Eliot',
@@ -366,15 +375,14 @@ Indexing
 Adding indexes can help accelerate certain queries and can also add additional
 functionality to querying and storing documents. In this example, we'll
 demonstrate how to create a `unique index
-<http://docs.mongodb.org/manual/core/index-unique/>`_ on a key that rejects
+<http://mongodb.com/docs/manual/core/index-unique/>`_ on a key that rejects
 documents whose value for that key already exists in the index.
 
 First, we'll need to create the index:
 
 .. doctest::
 
-   >>> result = db.profiles.create_index([('user_id', pymongo.ASCENDING)],
-   ...                                   unique=True)
+   >>> result = db.profiles.create_index([("user_id", pymongo.ASCENDING)], unique=True)
    >>> sorted(list(db.profiles.index_information()))
    ['_id_', 'user_id_1']
 
@@ -386,9 +394,7 @@ Now let's set up some user profiles:
 
 .. doctest::
 
-   >>> user_profiles = [
-   ...     {'user_id': 211, 'name': 'Luke'},
-   ...     {'user_id': 212, 'name': 'Ziltoid'}]
+   >>> user_profiles = [{"user_id": 211, "name": "Luke"}, {"user_id": 212, "name": "Ziltoid"}]
    >>> result = db.profiles.insert_many(user_profiles)
 
 The index prevents us from inserting a document whose ``user_id`` is already in
@@ -397,11 +403,11 @@ the collection:
 .. doctest::
    :options: +IGNORE_EXCEPTION_DETAIL
 
-   >>> new_profile = {'user_id': 213, 'name': 'Drew'}
-   >>> duplicate_profile = {'user_id': 212, 'name': 'Tommy'}
+   >>> new_profile = {"user_id": 213, "name": "Drew"}
+   >>> duplicate_profile = {"user_id": 212, "name": "Tommy"}
    >>> result = db.profiles.insert_one(new_profile)  # This is fine.
    >>> result = db.profiles.insert_one(duplicate_profile)
    Traceback (most recent call last):
    DuplicateKeyError: E11000 duplicate key error index: test_database.profiles.$user_id_1 dup key: { : 212 }
 
-.. seealso:: The MongoDB documentation on `indexes <http://www.mongodb.org/display/DOCS/Indexes>`_
+.. seealso:: The MongoDB documentation on `indexes <https://www.mongodb.com/docs/manual/indexes/>`_

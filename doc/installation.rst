@@ -28,9 +28,18 @@ To upgrade using pip::
 Dependencies
 ------------
 
-PyMongo supports CPython 3.6.2+ and PyPy3.6+.
+PyMongo supports CPython 3.7+ and PyPy3.7+.
 
-Optional dependencies:
+Required dependencies
+.....................
+
+Support for mongodb+srv:// URIs requires `dnspython
+<https://pypi.python.org/pypi/dnspython>`_
+
+.. _optional-deps:
+
+Optional dependencies
+.....................
 
 GSSAPI authentication requires `pykerberos
 <https://pypi.python.org/pypi/pykerberos>`_ on Unix or `WinKerberos
@@ -44,10 +53,7 @@ dependency can be installed automatically along with PyMongo::
 
   $ python3 -m pip install "pymongo[aws]"
 
-Support for mongodb+srv:// URIs requires `dnspython
-<https://pypi.python.org/pypi/dnspython>`_::
 
-  $ python3 -m pip install "pymongo[srv]"
 
 :ref:`OCSP` requires `PyOpenSSL
 <https://pypi.org/project/pyOpenSSL/>`_, `requests
@@ -67,14 +73,15 @@ Wire protocol compression with zstandard requires `zstandard
   $ python3 -m pip install "pymongo[zstd]"
 
 :ref:`Client-Side Field Level Encryption` requires `pymongocrypt
-<https://pypi.org/project/pymongocrypt/>`_::
+<https://pypi.org/project/pymongocrypt/>`_ and
+`pymongo-auth-aws <https://pypi.org/project/pymongo-auth-aws/>`_::
 
   $ python3 -m pip install "pymongo[encryption]"
 
 You can install all dependencies automatically with the following
 command::
 
-  $ python3 -m pip install "pymongo[gssapi,aws,ocsp,snappy,srv,zstd,encryption]"
+  $ python3 -m pip install "pymongo[gssapi,aws,ocsp,snappy,zstd,encryption]"
 
 Installing from source
 ----------------------
@@ -85,7 +92,7 @@ latest source from GitHub and install the driver from the resulting tree::
 
   $ git clone https://github.com/mongodb/mongo-python-driver.git pymongo
   $ cd pymongo/
-  $ python3 setup.py install
+  $ pip install .
 
 Installing from source on Unix
 ..............................
@@ -133,7 +140,7 @@ See `http://bugs.python.org/issue11623 <http://bugs.python.org/issue11623>`_
 for a more detailed explanation.
 
 **Lion (10.7) and newer** - PyMongo's C extensions can be built against
-versions of Python 3.6.2+ downloaded from python.org. In all cases Xcode must be
+versions of Python 3.7+ downloaded from python.org. In all cases Xcode must be
 installed with 'UNIX Development Support'.
 
 **Xcode 5.1**: Starting with version 5.1 the version of clang that ships with
@@ -180,9 +187,9 @@ warning will be printed.
 
 If you wish to install PyMongo without the C extensions, even if the
 extensions build properly, it can be done using a command line option to
-*setup.py*::
+*pip install*::
 
-  $ python3 setup.py --no_ext install
+  $ NO_EXT=1 python -m pip install .
 
 Installing a beta or release candidate
 --------------------------------------
@@ -193,4 +200,4 @@ but can be found on the
 `GitHub tags page <https://github.com/mongodb/mongo-python-driver/tags>`_.
 They can be installed by passing the full URL for the tag to pip::
 
-  $ python3 -m pip install https://github.com/mongodb/mongo-python-driver/archive/3.11.0rc0.tar.gz
+  $ python3 -m pip install https://github.com/mongodb/mongo-python-driver/archive/4.4.0b0.tar.gz

@@ -14,24 +14,34 @@
 
 """Run a target function on a background thread."""
 
+from __future__ import annotations
+
+import sys
 import threading
 import time
 import weakref
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+from pymongo.lock import _create_lock
 
 
-class PeriodicExecutor(object):
-    def __init__(self, interval, min_interval, target, name=None):
+class PeriodicExecutor:
+    def __init__(
+        self,
+        interval: float,
+        min_interval: float,
+        target: Callable[[], bool],
+        name: Optional[str] = None,
+    ):
         """ "Run a target function periodically on a background thread.
 
         If the target's return value is false, the executor stops.
 
-        :Parameters:
-          - `interval`: Seconds between calls to `target`.
-          - `min_interval`: Minimum seconds between calls if `wake` is
+        :param interval: Seconds between calls to `target`.
+        :param min_interval: Minimum seconds between calls if `wake` is
             called very often.
-          - `target`: A function.
-          - `name`: A name to give the underlying thread.
+        :param target: A function.
+        :param name: A name to give the underlying thread.
         """
         # threading.Event and its internal condition variable are expensive
         # in Python 2, see PYTHON-983. Use a boolean to know when to wake.
@@ -45,12 +55,11 @@ class PeriodicExecutor(object):
         self._thread: Optional[threading.Thread] = None
         self._name = name
         self._skip_sleep = False
-
         self._thread_will_exit = False
-        self._lock = threading.Lock()
+        self._lock = _create_lock()
 
-    def __repr__(self):
-        return "<%s(name=%s) object at 0x%x>" % (self.__class__.__name__, self._name, id(self))
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__}(name={self._name}) object at 0x{id(self):x}>"
 
     def open(self) -> None:
         """Start. Multiple calls have no effect.
@@ -83,7 +92,15 @@ class PeriodicExecutor(object):
             thread.daemon = True
             self._thread = weakref.proxy(thread)
             _register_executor(self)
-            thread.start()
+            # Mitigation to RuntimeError firing when thread starts on shutdown
+            # https://github.com/python/cpython/issues/114570
+            try:
+                thread.start()
+            except RuntimeError as e:
+                if "interpreter shutdown" in str(e) or sys.is_finalizing():
+                    self._thread = None
+                    return
+                raise
 
     def close(self, dummy: Any = None) -> None:
         """Stop. To restart, call open().
@@ -111,14 +128,14 @@ class PeriodicExecutor(object):
     def skip_sleep(self) -> None:
         self._skip_sleep = True
 
-    def __should_stop(self):
+    def __should_stop(self) -> bool:
         with self._lock:
             if self._stopped:
                 self._thread_will_exit = True
                 return True
             return False
 
-    def _run(self):
+    def _run(self) -> None:
         while not self.__should_stop():
             try:
                 if not self._target():
@@ -152,16 +169,16 @@ class PeriodicExecutor(object):
 _EXECUTORS = set()
 
 
-def _register_executor(executor):
+def _register_executor(executor: PeriodicExecutor) -> None:
     ref = weakref.ref(executor, _on_executor_deleted)
     _EXECUTORS.add(ref)
 
 
-def _on_executor_deleted(ref):
+def _on_executor_deleted(ref: weakref.ReferenceType[PeriodicExecutor]) -> None:
     _EXECUTORS.remove(ref)
 
 
-def _shutdown_executors():
+def _shutdown_executors() -> None:
     if _EXECUTORS is None:
         return
 

@@ -13,13 +13,14 @@
 # limitations under the License.
 
 """Test PyMongo with a mixed-version cluster."""
+from __future__ import annotations
 
 import time
 import unittest
 from queue import Queue
 
 from mockupdb import MockupDB, go
-from operations import upgrades
+from operations import upgrades  # type: ignore[import]
 
 from pymongo import MongoClient
 
@@ -46,7 +47,7 @@ class TestMixedVersionSharded(unittest.TestCase):
             "ismaster", ismaster=True, msg="isdbgrid", maxWireVersion=upgrade.wire_version
         )
 
-        self.mongoses_uri = "mongodb://%s,%s" % (
+        self.mongoses_uri = "mongodb://{},{}".format(
             self.mongos_old.address_string,
             self.mongos_new.address_string,
         )

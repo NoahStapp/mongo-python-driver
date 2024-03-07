@@ -11,7 +11,7 @@ Percent-Escaping Username and Password
 --------------------------------------
 
 Username and password must be percent-escaped with
-:py:func:`urllib.parse.quote`, to be used in a MongoDB URI. For example::
+:py:func:`urllib.parse.quote_plus`, to be used in a MongoDB URI. For example::
 
   >>> from pymongo import MongoClient
   >>> import urllib.parse
@@ -180,7 +180,7 @@ URI::
   >>> client = MongoClient(uri)
   >>>
 
-The default service name used by MongoDB and PyMongo is `mongodb`. You can
+The default service name used by MongoDB and PyMongo is ``mongodb``. You can
 specify a custom service name with the ``authMechanismProperties`` option::
 
   >>> from pymongo import MongoClient
@@ -264,15 +264,23 @@ security (or session) token.
 
 Credentials can be configured through the MongoDB URI, environment variables,
 or the local EC2 or ECS endpoint. The order in which the client searches for
-credentials is:
+`credentials`_ is the same as the one used by the AWS ``boto3`` library
+when using ``pymongo_auth_aws>=1.1.0``.
 
-#. Credentials passed through the URI
-#. Environment variables
-#. ECS endpoint if and only if ``AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`` is set.
-#. EC2 endpoint
+Because we are now using ``boto3`` to handle credentials, the order and
+locations of credentials are slightly different from before.  Particularly,
+if you have a shared AWS credentials or config file,
+then those credentials will be used by default if AWS auth environment
+variables are not set.  To override this behavior, set
+``AWS_SHARED_CREDENTIALS_FILE=""`` in your shell or add
+``os.environ["AWS_SHARED_CREDENTIALS_FILE"] = ""`` to your script or
+application.  Alternatively, you can create an AWS profile specifically for
+your MongoDB credentials and set ``AWS_PROFILE`` to that profile name.
 
 MONGODB-AWS authenticates against the "$external" virtual database, so none of
 the URIs in this section need to include the ``authSource`` URI option.
+
+.. _credentials: https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html
 
 AWS IAM credentials
 ~~~~~~~~~~~~~~~~~~~
@@ -282,7 +290,7 @@ access key id and secret access key pair as the username and password,
 respectively, in the MongoDB URI. A sample URI would be::
 
   >>> from pymongo import MongoClient
-  >>> uri = "mongodb://<access_key_id>:<secret_access_key>@localhost/?authMechanism=MONGODB-AWS"
+  >>> uri = "mongodb+srv://<access_key_id>:<secret_access_key>@example.mongodb.net/?authMechanism=MONGODB-AWS"
   >>> client = MongoClient(uri)
 
 .. note:: The access_key_id and secret_access_key passed into the URI MUST
@@ -297,11 +305,12 @@ ID, a secret access key, and a security token passed into the URI.
 A sample URI would be::
 
   >>> from pymongo import MongoClient
-  >>> uri = "mongodb://<access_key_id>:<secret_access_key>@example.com/?authMechanism=MONGODB-AWS&authMechanismProperties=AWS_SESSION_TOKEN:<session_token>"
+  >>> uri = "mongodb+srv://<access_key_id>:<secret_access_key>@example.mongodb.net/?authMechanism=MONGODB-AWS&authMechanismProperties=AWS_SESSION_TOKEN:<session_token>"
   >>> client = MongoClient(uri)
 
 .. note:: The access_key_id, secret_access_key, and session_token passed into
           the URI MUST be `percent escaped`_.
+
 
 AWS Lambda (Environment Variables)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -316,12 +325,29 @@ for the access key ID, secret access key, and session token, respectively::
   $ export AWS_SESSION_TOKEN=<session_token>
   $ python
   >>> from pymongo import MongoClient
-  >>> uri = "mongodb://example.com/?authMechanism=MONGODB-AWS"
+  >>> uri = "mongodb+srv://example.mongodb.net/?authMechanism=MONGODB-AWS"
   >>> client = MongoClient(uri)
 
 .. note:: No username, password, or session token is passed into the URI.
           PyMongo will use credentials set via the environment variables.
           These environment variables MUST NOT be `percent escaped`_.
+
+
+.. _EKS Clusters:
+
+EKS Clusters
+~~~~~~~~~~~~
+
+Applications using the `Authenticating users for your cluster from an OpenID Connect identity provider <https://docs.aws.amazon.com/eks/latest/userguide/authenticate-oidc-identity-provider.html>`_ capability on EKS can now
+use the provided credentials, by giving the associated IAM User
+`sts:AssumeRoleWithWebIdentity <https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html>`_
+permission.
+
+When the username and password are not provided, the MONGODB-AWS mechanism
+is set, and ``AWS_WEB_IDENTITY_TOKEN_FILE``, ``AWS_ROLE_ARN``, and
+optional ``AWS_ROLE_SESSION_NAME`` are available, the driver will use
+an ``AssumeRoleWithWebIdentity`` call to retrieve temporary credentials.
+The application must be using ``pymongo_auth_aws`` >= 1.1.0 for EKS support.
 
 ECS Container
 ~~~~~~~~~~~~~
@@ -331,7 +357,7 @@ credentials assigned to the machine. A sample URI on an ECS container
 would be::
 
   >>> from pymongo import MongoClient
-  >>> uri = "mongodb://localhost/?authMechanism=MONGODB-AWS"
+  >>> uri = "mongodb+srv://example.mongodb.com/?authMechanism=MONGODB-AWS"
   >>> client = MongoClient(uri)
 
 .. note:: No username, password, or session token is passed into the URI.
@@ -346,7 +372,7 @@ credentials assigned to the machine. A sample URI on an EC2 machine
 would be::
 
   >>> from pymongo import MongoClient
-  >>> uri = "mongodb://localhost/?authMechanism=MONGODB-AWS"
+  >>> uri = "mongodb+srv://example.mongodb.com/?authMechanism=MONGODB-AWS"
   >>> client = MongoClient(uri)
 
 .. note:: No username, password, or session token is passed into the URI.

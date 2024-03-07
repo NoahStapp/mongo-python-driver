@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Tuple, Type, Union
 from uuid import UUID
@@ -183,6 +184,13 @@ COLUMN_SUBTYPE = 7
 .. versionadded:: 4.0
 """
 
+SENSITIVE_SUBTYPE = 8
+"""BSON binary subtype for sensitive data.
+
+.. versionadded:: 4.5
+"""
+
+
 USER_DEFINED_SUBTYPE = 128
 """BSON binary subtype for any user defined structure.
 """
@@ -197,17 +205,15 @@ class Binary(bytes):
     what should be considered a string when we encode to BSON.
 
     Raises TypeError if `data` is not an instance of :class:`bytes`
-    (:class:`str` in python 2) or `subtype` is not an instance of
-    :class:`int`. Raises ValueError if `subtype` is not in [0, 256).
+    or `subtype` is not an instance of :class:`int`.
+    Raises ValueError if `subtype` is not in [0, 256).
 
     .. note::
-      In python 3 instances of Binary with subtype 0 will be decoded
-      directly to :class:`bytes`.
+      Instances of Binary with subtype 0 will be decoded directly to :class:`bytes`.
 
-    :Parameters:
-      - `data`: the binary data to represent. Can be any bytes-like type
+    :param data: the binary data to represent. Can be any bytes-like type
         that implements the buffer protocol.
-      - `subtype` (optional): the `binary subtype
+    :param subtype: the `binary subtype
         <https://bsonspec.org/spec.html>`_
         to use
 
@@ -219,10 +225,10 @@ class Binary(bytes):
     __subtype: int
 
     def __new__(
-        cls: Type["Binary"],
-        data: Union[memoryview, bytes, "_mmap", "_array"],
+        cls: Type[Binary],
+        data: Union[memoryview, bytes, _mmap, _array[Any]],
         subtype: int = BINARY_SUBTYPE,
-    ) -> "Binary":
+    ) -> Binary:
         if not isinstance(subtype, int):
             raise TypeError("subtype must be an instance of int")
         if subtype >= 256 or subtype < 0:
@@ -234,8 +240,8 @@ class Binary(bytes):
 
     @classmethod
     def from_uuid(
-        cls: Type["Binary"], uuid: UUID, uuid_representation: int = UuidRepresentation.STANDARD
-    ) -> "Binary":
+        cls: Type[Binary], uuid: UUID, uuid_representation: int = UuidRepresentation.STANDARD
+    ) -> Binary:
         """Create a BSON Binary object from a Python UUID.
 
         Creates a :class:`~bson.binary.Binary` object from a
@@ -246,9 +252,8 @@ class Binary(bytes):
         Raises :exc:`TypeError` if `uuid` is not an instance of
         :class:`~uuid.UUID`.
 
-        :Parameters:
-          - `uuid`: A :class:`uuid.UUID` instance.
-          - `uuid_representation`: A member of
+        :param uuid: A :class:`uuid.UUID` instance.
+        :param uuid_representation: A member of
             :class:`~bson.binary.UuidRepresentation`. Default:
             :const:`~bson.binary.UuidRepresentation.STANDARD`.
             See :ref:`handling-uuid-data-example` for details.
@@ -297,8 +302,7 @@ class Binary(bytes):
         Raises :exc:`ValueError` if this :class:`~bson.binary.Binary` instance
         does not contain a UUID.
 
-        :Parameters:
-          - `uuid_representation`: A member of
+        :param uuid_representation: A member of
             :class:`~bson.binary.UuidRepresentation`. Default:
             :const:`~bson.binary.UuidRepresentation.STANDARD`.
             See :ref:`handling-uuid-data-example` for details.
@@ -306,7 +310,7 @@ class Binary(bytes):
         .. versionadded:: 3.11
         """
         if self.subtype not in ALL_UUID_SUBTYPES:
-            raise ValueError("cannot decode subtype %s as a uuid" % (self.subtype,))
+            raise ValueError(f"cannot decode subtype {self.subtype} as a uuid")
 
         if uuid_representation not in ALL_UUID_REPRESENTATIONS:
             raise ValueError(
@@ -330,8 +334,7 @@ class Binary(bytes):
                 return UUID(bytes=self)
 
         raise ValueError(
-            "cannot decode subtype %s to %s"
-            % (self.subtype, UUID_REPRESENTATION_NAMES[uuid_representation])
+            f"cannot decode subtype {self.subtype} to {UUID_REPRESENTATION_NAMES[uuid_representation]}"
         )
 
     @property
@@ -341,7 +344,7 @@ class Binary(bytes):
 
     def __getnewargs__(self) -> Tuple[bytes, int]:  # type: ignore[override]
         # Work around http://bugs.python.org/issue7382
-        data = super(Binary, self).__getnewargs__()[0]
+        data = super().__getnewargs__()[0]
         if not isinstance(data, bytes):
             data = data.encode("latin-1")
         return data, self.__subtype
@@ -355,10 +358,10 @@ class Binary(bytes):
         return False
 
     def __hash__(self) -> int:
-        return super(Binary, self).__hash__() ^ hash(self.__subtype)
+        return super().__hash__() ^ hash(self.__subtype)
 
     def __ne__(self, other: Any) -> bool:
         return not self == other
 
-    def __repr__(self):
-        return "Binary(%s, %s)" % (bytes.__repr__(self), self.__subtype)
+    def __repr__(self) -> str:
+        return f"Binary({bytes.__repr__(self)}, {self.__subtype})"

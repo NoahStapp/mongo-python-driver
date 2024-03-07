@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # Copyright 2009-present MongoDB, Inc.
 #
@@ -14,14 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the gridfs package.
-"""
+"""Tests for the gridfs package."""
+from __future__ import annotations
 
 import datetime
 import sys
 import threading
 import time
 from io import BytesIO
+from unittest.mock import patch
 
 sys.path[0:0] = [""]
 
@@ -31,7 +31,7 @@ from test.utils import joinall, one, rs_client, rs_or_single_client, single_clie
 import gridfs
 from bson.binary import Binary
 from gridfs.errors import CorruptGridFile, FileExists, NoFile
-from gridfs.grid_file import GridOutCursor
+from gridfs.grid_file import DEFAULT_CHUNK_SIZE, GridOutCursor
 from pymongo.database import Database
 from pymongo.errors import (
     ConfigurationError,
@@ -47,7 +47,7 @@ class JustWrite(threading.Thread):
         threading.Thread.__init__(self)
         self.fs = fs
         self.n = n
-        self.setDaemon(True)
+        self.daemon = True
 
     def run(self):
         for _ in range(self.n):
@@ -62,7 +62,7 @@ class JustRead(threading.Thread):
         self.fs = fs
         self.n = n
         self.results = results
-        self.setDaemon(True)
+        self.daemon = True
 
     def run(self):
         for _ in range(self.n):
@@ -90,7 +90,7 @@ class TestGridfs(IntegrationTest):
 
     @classmethod
     def setUpClass(cls):
-        super(TestGridfs, cls).setUpClass()
+        super().setUpClass()
         cls.fs = gridfs.GridFS(cls.db)
         cls.alt = gridfs.GridFS(cls.db, "alt")
 
@@ -141,7 +141,7 @@ class TestGridfs(IntegrationTest):
         self.fs.put(b"foo", filename="test")
         self.fs.put(b"", filename="hello world")
 
-        self.assertEqual(set(["mike", "test", "hello world"]), set(self.fs.list()))
+        self.assertEqual({"mike", "test", "hello world"}, set(self.fs.list()))
 
     def test_empty_file(self):
         oid = self.fs.put(b"")
@@ -210,7 +210,7 @@ class TestGridfs(IntegrationTest):
         self.alt.put(b"foo", filename="test")
         self.alt.put(b"", filename="hello world")
 
-        self.assertEqual(set(["mike", "test", "hello world"]), set(self.alt.list()))
+        self.assertEqual({"mike", "test", "hello world"}, set(self.alt.list()))
 
     def test_threaded_reads(self):
         self.fs.put(b"hello", _id="test")
@@ -345,8 +345,18 @@ class TestGridfs(IntegrationTest):
         one.write(b"some content")
         one.close()
 
+        # Attempt to upload a file with more chunks to the same _id.
+        with patch("gridfs.grid_file._UPLOAD_BUFFER_SIZE", DEFAULT_CHUNK_SIZE):
+            two = self.fs.new_file(_id=123)
+            self.assertRaises(FileExists, two.write, b"x" * DEFAULT_CHUNK_SIZE * 3)
+        # Original file is still readable (no extra chunks were uploaded).
+        self.assertEqual(self.fs.get(123).read(), b"some content")
+
         two = self.fs.new_file(_id=123)
-        self.assertRaises(FileExists, two.write, b"x" * 262146)
+        two.write(b"some content")
+        self.assertRaises(FileExists, two.close)
+        # Original file is still readable.
+        self.assertEqual(self.fs.get(123).read(), b"some content")
 
     def test_exists(self):
         oid = self.fs.put(b"hello")
@@ -394,7 +404,7 @@ class TestGridfs(IntegrationTest):
         f = self.fs.get_last_version(filename="empty")
 
         def iterate_file(grid_file):
-            for chunk in grid_file:
+            for _chunk in grid_file:
                 pass
             return True
 
@@ -496,7 +506,7 @@ class TestGridfsReplicaSet(IntegrationTest):
     @classmethod
     @client_context.require_secondaries_count(1)
     def setUpClass(cls):
-        super(TestGridfsReplicaSet, cls).setUpClass()
+        super().setUpClass()
 
     @classmethod
     def tearDownClass(cls):
@@ -540,7 +550,7 @@ class TestGridfsReplicaSet(IntegrationTest):
 
         # Connects, doesn't create index.
         self.assertRaises(NoFile, fs.get_last_version)
-        self.assertRaises(NotPrimaryError, fs.put, "data")
+        self.assertRaises(NotPrimaryError, fs.put, "data", encoding="utf-8")
 
 
 if __name__ == "__main__":

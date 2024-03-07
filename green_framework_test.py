@@ -13,9 +13,12 @@
 # limitations under the License.
 
 """Test PyMongo with a variety of greenlet-based monkey-patching frameworks."""
+from __future__ import annotations
 
 import getopt
 import sys
+
+import pytest
 
 
 def run_gevent():
@@ -58,19 +61,15 @@ def run(framework_name, *args):
     FRAMEWORKS[framework_name]()
 
     # Run the tests.
-    sys.argv[:] = ["setup.py", "test"] + list(args)
-    import setup  # noqa
+    sys.exit(pytest.main(list(args)))
 
 
 def main():
     """Parse options and run tests."""
-    usage = """python %s FRAMEWORK_NAME
+    usage = f"""python {sys.argv[0]} FRAMEWORK_NAME
 
 Test PyMongo with a variety of greenlet-based monkey-patching frameworks. See
-python %s --help-frameworks.""" % (
-        sys.argv[0],
-        sys.argv[0],
-    )
+python {sys.argv[0]} --help-frameworks."""
 
     try:
         opts, args = getopt.getopt(sys.argv[1:], "h", ["help", "help-frameworks"])
@@ -99,8 +98,9 @@ python %s --help-frameworks.""" % (
         sys.exit(1)
 
     run(
-        args[0], *args[1:]  # Framework name.
-    )  # Command line args to setup.py, like what test to run.
+        args[0],
+        *args[1:],  # Framework name.
+    )  # Command line args to pytest, like what test to run.
 
 
 if __name__ == "__main__":

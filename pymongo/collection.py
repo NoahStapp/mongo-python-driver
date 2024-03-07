@@ -13,29 +13,34 @@
 # limitations under the License.
 
 """Collection level utilities for Mongo."""
+from __future__ import annotations
 
 from collections import abc
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
+    ContextManager,
     Generic,
     Iterable,
-    List,
+    Iterator,
     Mapping,
     MutableMapping,
     NoReturn,
     Optional,
     Sequence,
-    Tuple,
+    Type,
+    TypeVar,
     Union,
+    cast,
 )
 
-from bson.codec_options import CodecOptions
+from bson.codec_options import DEFAULT_CODEC_OPTIONS, CodecOptions
 from bson.objectid import ObjectId
 from bson.raw_bson import RawBSONDocument
 from bson.son import SON
 from bson.timestamp import Timestamp
-from pymongo import common, helpers, message
+from pymongo import ASCENDING, _csot, common, helpers, message
 from pymongo.aggregation import (
     _CollectionAggregationCommand,
     _CollectionRawAggregationCommand,
@@ -44,6 +49,7 @@ from pymongo.bulk import _Bulk
 from pymongo.change_stream import CollectionChangeStream
 from pymongo.collation import validate_collation_or_none
 from pymongo.command_cursor import CommandCursor, RawBatchCommandCursor
+from pymongo.common import _ecoc_coll_name, _esc_coll_name
 from pymongo.cursor import Cursor, RawBatchCursor
 from pymongo.errors import (
     ConfigurationError,
@@ -59,8 +65,12 @@ from pymongo.operations import (
     IndexModel,
     InsertOne,
     ReplaceOne,
+    SearchIndexModel,
     UpdateMany,
     UpdateOne,
+    _IndexKeyHint,
+    _IndexList,
+    _Op,
 )
 from pymongo.read_preferences import ReadPreference, _ServerMode
 from pymongo.results import (
@@ -70,19 +80,25 @@ from pymongo.results import (
     InsertOneResult,
     UpdateResult,
 )
-from pymongo.typings import _CollationIn, _DocumentIn, _DocumentType, _Pipeline
-from pymongo.write_concern import WriteConcern
+from pymongo.typings import _CollationIn, _DocumentType, _DocumentTypeArg, _Pipeline
+from pymongo.write_concern import WriteConcern, validate_boolean
+
+T = TypeVar("T")
 
 _FIND_AND_MODIFY_DOC_FIELDS = {"value": 1}
 
 
-_WriteOp = Union[InsertOne, DeleteOne, DeleteMany, ReplaceOne, UpdateOne, UpdateMany]
-# Hint supports index name, "myIndex", or list of index pairs: [('x', 1), ('y', -1)]
-_IndexList = Sequence[Tuple[str, Union[int, str, Mapping[str, Any]]]]
-_IndexKeyHint = Union[str, _IndexList]
+_WriteOp = Union[
+    InsertOne[_DocumentType],
+    DeleteOne,
+    DeleteMany,
+    ReplaceOne[_DocumentType],
+    UpdateOne,
+    UpdateMany,
+]
 
 
-class ReturnDocument(object):
+class ReturnDocument:
     """An enum used with
     :meth:`~pymongo.collection.Collection.find_one_and_replace` and
     :meth:`~pymongo.collection.Collection.find_one_and_update`.
@@ -97,9 +113,14 @@ class ReturnDocument(object):
 
 
 if TYPE_CHECKING:
+    import bson
+    from pymongo.aggregation import _AggregationCommand
     from pymongo.client_session import ClientSession
+    from pymongo.collation import Collation
     from pymongo.database import Database
+    from pymongo.pool import Connection
     from pymongo.read_concern import ReadConcern
+    from pymongo.server import Server
 
 
 class Collection(common.BaseObject, Generic[_DocumentType]):
@@ -107,22 +128,21 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
     def __init__(
         self,
-        database: "Database[_DocumentType]",
+        database: Database[_DocumentType],
         name: str,
         create: Optional[bool] = False,
-        codec_options: Optional[CodecOptions] = None,
+        codec_options: Optional[CodecOptions[_DocumentTypeArg]] = None,
         read_preference: Optional[_ServerMode] = None,
         write_concern: Optional[WriteConcern] = None,
-        read_concern: Optional["ReadConcern"] = None,
-        session: Optional["ClientSession"] = None,
+        read_concern: Optional[ReadConcern] = None,
+        session: Optional[ClientSession] = None,
         **kwargs: Any,
     ) -> None:
         """Get / create a Mongo collection.
 
         Raises :class:`TypeError` if `name` is not an instance of
-        :class:`basestring` (:class:`str` in python 3). Raises
-        :class:`~pymongo.errors.InvalidName` if `name` is not a valid
-        collection name. Any additional keyword arguments will be used
+        :class:`str`. Raises :class:`~pymongo.errors.InvalidName` if `name` is
+        not a valid collection name. Any additional keyword arguments will be used
         as options passed to the create command. See
         :meth:`~pymongo.database.Database.create_collection` for valid
         options.
@@ -134,30 +154,32 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         use. The optional ``session`` argument is *only* used for the ``create``
         command, it is not associated with the collection afterward.
 
-        :Parameters:
-          - `database`: the database to get a collection from
-          - `name`: the name of the collection to get
-          - `create` (optional): if ``True``, force collection
+        :param database: the database to get a collection from
+        :param name: the name of the collection to get
+        :param create: if ``True``, force collection
             creation even without options being set
-          - `codec_options` (optional): An instance of
+        :param codec_options: An instance of
             :class:`~bson.codec_options.CodecOptions`. If ``None`` (the
             default) database.codec_options is used.
-          - `read_preference` (optional): The read preference to use. If
+        :param read_preference: The read preference to use. If
             ``None`` (the default) database.read_preference is used.
-          - `write_concern` (optional): An instance of
+        :param write_concern: An instance of
             :class:`~pymongo.write_concern.WriteConcern`. If ``None`` (the
             default) database.write_concern is used.
-          - `read_concern` (optional): An instance of
+        :param read_concern: An instance of
             :class:`~pymongo.read_concern.ReadConcern`. If ``None`` (the
             default) database.read_concern is used.
-          - `collation` (optional): An instance of
+        :param collation: An instance of
             :class:`~pymongo.collation.Collation`. If a collation is provided,
             it will be passed to the create collection command.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession` that is used with
             the create collection command
-          - `**kwargs` (optional): additional keyword arguments will
+        :param kwargs: additional keyword arguments will
             be passed as options for the create collection command
+
+        .. versionchanged:: 4.2
+           Added the ``clusteredIndex`` and ``encryptedFields`` parameters.
 
         .. versionchanged:: 4.0
            Removed the reindex, map_reduce, inline_map_reduce,
@@ -191,19 +213,18 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         .. seealso:: The MongoDB documentation on `collections <https://dochub.mongodb.org/core/collections>`_.
         """
-        super(Collection, self).__init__(
+        super().__init__(
             codec_options or database.codec_options,
             read_preference or database.read_preference,
             write_concern or database.write_concern,
             read_concern or database.read_concern,
         )
-
         if not isinstance(name, str):
             raise TypeError("name must be an instance of str")
 
         if not name or ".." in name:
             raise InvalidName("collection names cannot be empty")
-        if "$" in name and not (name.startswith("oplog.$main") or name.startswith("$cmd")):
+        if "$" in name and not (name.startswith(("oplog.$main", "$cmd"))):
             raise InvalidName("collection names must not contain '$': %r" % name)
         if name[0] == "." or name[-1] == ".":
             raise InvalidName("collection names must not start or end with '.': %r" % name)
@@ -213,63 +234,72 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         self.__database: Database[_DocumentType] = database
         self.__name = name
-        self.__full_name = "%s.%s" % (self.__database.name, self.__name)
-        if create or kwargs or collation:
-            self.__create(kwargs, collation, session)
-
+        self.__full_name = f"{self.__database.name}.{self.__name}"
         self.__write_response_codec_options = self.codec_options._replace(
             unicode_decode_error_handler="replace", document_class=dict
         )
+        self._timeout = database.client.options.timeout
+        encrypted_fields = kwargs.pop("encryptedFields", None)
+        if create or kwargs or collation:
+            if encrypted_fields:
+                common.validate_is_mapping("encrypted_fields", encrypted_fields)
+                opts = {"clusteredIndex": {"key": {"_id": 1}, "unique": True}}
+                self.__create(
+                    _esc_coll_name(encrypted_fields, name), opts, None, session, qev2_required=True
+                )
+                self.__create(_ecoc_coll_name(encrypted_fields, name), opts, None, session)
+                self.__create(name, kwargs, collation, session, encrypted_fields=encrypted_fields)
+                self.create_index([("__safeContent__", ASCENDING)], session)
+            else:
+                self.__create(name, kwargs, collation, session)
 
-    def _socket_for_reads(self, session):
-        return self.__database.client._socket_for_reads(self._read_preference_for(session), session)
-
-    def _socket_for_writes(self, session):
-        return self.__database.client._socket_for_writes(session)
+    def _conn_for_writes(
+        self, session: Optional[ClientSession], operation: str
+    ) -> ContextManager[Connection]:
+        return self.__database.client._conn_for_writes(session, operation)
 
     def _command(
         self,
-        sock_info,
-        command,
-        read_preference=None,
-        codec_options=None,
-        check=True,
-        allowable_errors=None,
-        read_concern=None,
-        write_concern=None,
-        collation=None,
-        session=None,
-        retryable_write=False,
-        user_fields=None,
-    ):
+        conn: Connection,
+        command: MutableMapping[str, Any],
+        read_preference: Optional[_ServerMode] = None,
+        codec_options: Optional[CodecOptions] = None,
+        check: bool = True,
+        allowable_errors: Optional[Sequence[Union[str, int]]] = None,
+        read_concern: Optional[ReadConcern] = None,
+        write_concern: Optional[WriteConcern] = None,
+        collation: Optional[_CollationIn] = None,
+        session: Optional[ClientSession] = None,
+        retryable_write: bool = False,
+        user_fields: Optional[Any] = None,
+    ) -> Mapping[str, Any]:
         """Internal command helper.
 
-        :Parameters:
-          - `sock_info` - A SocketInfo instance.
-          - `command` - The command itself, as a :class:`~bson.son.SON` instance.
-          - `codec_options` (optional) - An instance of
+        :param conn` - A Connection instance.
+        :param command` - The command itself, as a :class:`~bson.son.SON` instance.
+        :param read_preference` (optional) - The read preference to use.
+        :param codec_options` (optional) - An instance of
             :class:`~bson.codec_options.CodecOptions`.
-          - `check`: raise OperationFailure if there are errors
-          - `allowable_errors`: errors to ignore if `check` is True
-          - `read_concern` (optional) - An instance of
+        :param check: raise OperationFailure if there are errors
+        :param allowable_errors: errors to ignore if `check` is True
+        :param read_concern` (optional) - An instance of
             :class:`~pymongo.read_concern.ReadConcern`.
-          - `write_concern`: An instance of
+        :param write_concern: An instance of
             :class:`~pymongo.write_concern.WriteConcern`.
-          - `collation` (optional) - An instance of
+        :param collation` (optional) - An instance of
             :class:`~pymongo.collation.Collation`.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `retryable_write` (optional): True if this command is a retryable
+        :param retryable_write: True if this command is a retryable
             write.
-          - `user_fields` (optional): Response fields that should be decoded
+        :param user_fields: Response fields that should be decoded
             using the TypeDecoders from codec_options, passed to
             bson._decode_all_selective.
 
-        :Returns:
-          The result document.
+        :return: The result document.
         """
         with self.__database.client._tmp_session(session) as s:
-            return sock_info.command(
+            return conn.command(
                 self.__database.name,
                 command,
                 read_preference or self._read_preference_for(session),
@@ -286,16 +316,34 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
                 user_fields=user_fields,
             )
 
-    def __create(self, options, collation, session):
+    def __create(
+        self,
+        name: str,
+        options: MutableMapping[str, Any],
+        collation: Optional[_CollationIn],
+        session: Optional[ClientSession],
+        encrypted_fields: Optional[Mapping[str, Any]] = None,
+        qev2_required: bool = False,
+    ) -> None:
         """Sends a create command with the given options."""
-        cmd = SON([("create", self.__name)])
+        cmd: dict[str, Any] = {"create": name}
+        if encrypted_fields:
+            cmd["encryptedFields"] = encrypted_fields
+
         if options:
             if "size" in options:
                 options["size"] = float(options["size"])
             cmd.update(options)
-        with self._socket_for_writes(session) as sock_info:
+        with self._conn_for_writes(session, operation=_Op.CREATE) as conn:
+            if qev2_required and conn.max_wire_version < 21:
+                raise ConfigurationError(
+                    "Driver support of Queryable Encryption is incompatible with server. "
+                    "Upgrade server to use Queryable Encryption. "
+                    f"Got maxWireVersion {conn.max_wire_version} but need maxWireVersion >= 21 (MongoDB >=7.0)"
+                )
+
             self._command(
-                sock_info,
+                conn,
                 cmd,
                 read_preference=ReadPreference.PRIMARY,
                 write_concern=self._write_concern_for(session),
@@ -303,26 +351,25 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
                 session=session,
             )
 
-    def __getattr__(self, name: str) -> "Collection[_DocumentType]":
+    def __getattr__(self, name: str) -> Collection[_DocumentType]:
         """Get a sub-collection of this collection by name.
 
         Raises InvalidName if an invalid collection name is used.
 
-        :Parameters:
-          - `name`: the name of the collection to get
+        :param name: the name of the collection to get
         """
         if name.startswith("_"):
-            full_name = "%s.%s" % (self.__name, name)
+            full_name = f"{self.__name}.{name}"
             raise AttributeError(
-                "Collection has no attribute %r. To access the %s"
-                " collection, use database['%s']." % (name, full_name, full_name)
+                f"Collection has no attribute {name!r}. To access the {full_name}"
+                f" collection, use database['{full_name}']."
             )
         return self.__getitem__(name)
 
-    def __getitem__(self, name: str) -> "Collection[_DocumentType]":
+    def __getitem__(self, name: str) -> Collection[_DocumentType]:
         return Collection(
             self.__database,
-            "%s.%s" % (self.__name, name),
+            f"{self.__name}.{name}",
             False,
             self.codec_options,
             self.read_preference,
@@ -330,8 +377,8 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             self.read_concern,
         )
 
-    def __repr__(self):
-        return "Collection(%r, %r)" % (self.__database, self.__name)
+    def __repr__(self) -> str:
+        return f"Collection({self.__database!r}, {self.__name!r})"
 
     def __eq__(self, other: Any) -> bool:
         if isinstance(other, Collection):
@@ -365,7 +412,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         return self.__name
 
     @property
-    def database(self) -> "Database[_DocumentType]":
+    def database(self) -> Database[_DocumentType]:
         """The :class:`~pymongo.database.Database` that this
         :class:`Collection` is a part of.
         """
@@ -373,11 +420,11 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
     def with_options(
         self,
-        codec_options: Optional[CodecOptions] = None,
+        codec_options: Optional[bson.CodecOptions[_DocumentTypeArg]] = None,
         read_preference: Optional[_ServerMode] = None,
         write_concern: Optional[WriteConcern] = None,
-        read_concern: Optional["ReadConcern"] = None,
-    ) -> "Collection[_DocumentType]":
+        read_concern: Optional[ReadConcern] = None,
+    ) -> Collection[_DocumentType]:
         """Get a clone of this collection changing the specified settings.
 
           >>> coll1.read_preference
@@ -389,20 +436,19 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           >>> coll2.read_preference
           Secondary(tag_sets=None)
 
-        :Parameters:
-          - `codec_options` (optional): An instance of
+        :param codec_options: An instance of
             :class:`~bson.codec_options.CodecOptions`. If ``None`` (the
             default) the :attr:`codec_options` of this :class:`Collection`
             is used.
-          - `read_preference` (optional): The read preference to use. If
+        :param read_preference: The read preference to use. If
             ``None`` (the default) the :attr:`read_preference` of this
             :class:`Collection` is used. See :mod:`~pymongo.read_preferences`
             for options.
-          - `write_concern` (optional): An instance of
+        :param write_concern: An instance of
             :class:`~pymongo.write_concern.WriteConcern`. If ``None`` (the
             default) the :attr:`write_concern` of this :class:`Collection`
             is used.
-          - `read_concern` (optional): An instance of
+        :param read_concern: An instance of
             :class:`~pymongo.read_concern.ReadConcern`. If ``None`` (the
             default) the :attr:`read_concern` of this :class:`Collection`
             is used.
@@ -417,12 +463,13 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             read_concern or self.read_concern,
         )
 
+    @_csot.apply
     def bulk_write(
         self,
-        requests: Sequence[_WriteOp],
+        requests: Sequence[_WriteOp[_DocumentType]],
         ordered: bool = True,
         bypass_document_validation: bool = False,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
         let: Optional[Mapping] = None,
     ) -> BulkWriteResult:
@@ -462,27 +509,25 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           {'y': 1, '_id': ObjectId('54f62ee2fba5226811f634f1')}
           {'z': 1, '_id': ObjectId('54f62ee28891e756a6e1abd5')}
 
-        :Parameters:
-          - `requests`: A list of write operations (see examples above).
-          - `ordered` (optional): If ``True`` (the default) requests will be
+        :param requests: A list of write operations (see examples above).
+        :param ordered: If ``True`` (the default) requests will be
             performed on the server serially, in the order provided. If an error
             occurs all remaining operations are aborted. If ``False`` requests
             will be performed on the server in arbitrary order, possibly in
             parallel, and all operations will be attempted.
-          - `bypass_document_validation`: (optional) If ``True``, allows the
+        :param bypass_document_validation: (optional) If ``True``, allows the
             write to opt-out of document level validation. Default is
             ``False``.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `let` (optional): Map of parameter names and values. Values must be
+        :param let: Map of parameter names and values. Values must be
             constant or closed expressions that do not reference document
             fields. Parameters can then be accessed as variables in an
             aggregate expression context (e.g. "$$var").
 
-        :Returns:
-          An instance of :class:`~pymongo.results.BulkWriteResult`.
+        :return: An instance of :class:`~pymongo.results.BulkWriteResult`.
 
         .. seealso:: :ref:`writes-and-ids`
 
@@ -508,150 +553,105 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             try:
                 request._add_to_bulk(blk)
             except AttributeError:
-                raise TypeError("%r is not a valid request" % (request,))
+                raise TypeError(f"{request!r} is not a valid request") from None
 
         write_concern = self._write_concern_for(session)
-        bulk_api_result = blk.execute(write_concern, session)
+        bulk_api_result = blk.execute(write_concern, session, _Op.INSERT)
         if bulk_api_result is not None:
             return BulkWriteResult(bulk_api_result, True)
         return BulkWriteResult({}, False)
 
     def _insert_one(
-        self, doc, ordered, write_concern, op_id, bypass_doc_val, session, comment=None
-    ):
-        """Internal helper for inserting a single document."""
-        write_concern = write_concern or self.write_concern
-        acknowledged = write_concern.acknowledged
-        command = SON([("insert", self.name), ("ordered", ordered), ("documents", [doc])])
-        if comment is not None:
-            command["comment"] = comment
-        if not write_concern.is_server_default:
-            command["writeConcern"] = write_concern.document
-
-        def _insert_command(session, sock_info, retryable_write):
-            if bypass_doc_val:
-                command["bypassDocumentValidation"] = True
-
-            result = sock_info.command(
-                self.__database.name,
-                command,
-                write_concern=write_concern,
-                codec_options=self.__write_response_codec_options,
-                session=session,
-                client=self.__database.client,
-                retryable_write=retryable_write,
-            )
-
-            _check_write_command_response(result)
-
-        self.__database.client._retryable_write(acknowledged, _insert_command, session)
-
-        if not isinstance(doc, RawBSONDocument):
-            return doc.get("_id")
-
-    async def _insert_one_async(
-        self, doc, ordered, write_concern, op_id, bypass_doc_val, session, comment=None
-    ):
-        """Internal helper for inserting a single document."""
-        write_concern = write_concern or self.write_concern
-        acknowledged = write_concern.acknowledged
-        command = SON([("insert", self.name), ("ordered", ordered), ("documents", [doc])])
-        if comment is not None:
-            command["comment"] = comment
-        if not write_concern.is_server_default:
-            command["writeConcern"] = write_concern.document
-
-        async def _insert_command(session, sock_info, retryable_write):
-            if bypass_doc_val:
-                command["bypassDocumentValidation"] = True
-
-            result = await sock_info.command_async(
-                self.__database.name,
-                command,
-                write_concern=write_concern,
-                codec_options=self.__write_response_codec_options,
-                session=session,
-                client=self.__database.client,
-                retryable_write=retryable_write,
-            )
-
-            _check_write_command_response(result)
-
-        await self.__database.client._retryable_write_async(acknowledged, _insert_command, session)
-
-        if not isinstance(doc, RawBSONDocument):
-            return doc.get("_id")
-
-    async def insert_one_async(
         self,
-        document: _DocumentIn,
-        bypass_document_validation: bool = False,
-        session: Optional["ClientSession"] = None,
+        doc: Mapping[str, Any],
+        ordered: bool,
+        write_concern: WriteConcern,
+        op_id: Optional[int],
+        bypass_doc_val: bool,
+        session: Optional[ClientSession],
         comment: Optional[Any] = None,
-    ) -> InsertOneResult:
-        """Insert a single document.
+    ) -> Any:
+        """Internal helper for inserting a single document."""
+        write_concern = write_concern or self.write_concern
+        acknowledged = write_concern.acknowledged
+        command = {"insert": self.name, "ordered": ordered, "documents": [doc]}
+        if comment is not None:
+            command["comment"] = comment
 
-          >>> db.test.count_documents({'x': 1})
-          0
-          >>> result = db.test.insert_one({'x': 1})
-          >>> result.inserted_id
-          ObjectId('54f112defba522406c9cc208')
-          >>> db.test.find_one({'x': 1})
-          {'x': 1, '_id': ObjectId('54f112defba522406c9cc208')}
+        def _insert_command(
+            session: Optional[ClientSession], conn: Connection, retryable_write: bool
+        ) -> None:
+            if bypass_doc_val:
+                command["bypassDocumentValidation"] = True
 
-        :Parameters:
-          - `document`: The document to insert. Must be a mutable mapping
-            type. If the document does not have an _id field one will be
-            added automatically.
-          - `bypass_document_validation`: (optional) If ``True``, allows the
-            write to opt-out of document level validation. Default is
-            ``False``.
-          - `session` (optional): a
-            :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
-            command.
+            result = conn.command(
+                self.__database.name,
+                command,
+                write_concern=write_concern,
+                codec_options=self.__write_response_codec_options,
+                session=session,
+                client=self.__database.client,
+                retryable_write=retryable_write,
+            )
 
-        :Returns:
-          - An instance of :class:`~pymongo.results.InsertOneResult`.
+            _check_write_command_response(result)
 
-        .. seealso:: :ref:`writes-and-ids`
-
-        .. note:: `bypass_document_validation` requires server version
-          **>= 3.2**
-
-        .. versionchanged:: 4.1
-           Added ``comment`` parameter.
-
-        .. versionchanged:: 3.6
-           Added ``session`` parameter.
-
-        .. versionchanged:: 3.2
-          Added bypass_document_validation support
-
-        .. versionadded:: 3.0
-        """
-        common.validate_is_document_type("document", document)
-        if not (isinstance(document, RawBSONDocument) or "_id" in document):
-            document["_id"] = ObjectId()
-
-        write_concern = self._write_concern_for(session)
-        value = await self._insert_one_async(
-            document,
-            ordered=True,
-            write_concern=write_concern,
-            op_id=None,
-            bypass_doc_val=bypass_document_validation,
-            session=session,
-            comment=comment,
+        self.__database.client._retryable_write(
+            acknowledged, _insert_command, session, operation=_Op.INSERT
         )
 
-        return InsertOneResult(value, write_concern.acknowledged)
+        if not isinstance(doc, RawBSONDocument):
+            return doc.get("_id")
+        return None
+
+    async def _insert_one_async(
+        self,
+        doc: Mapping[str, Any],
+        ordered: bool,
+        write_concern: WriteConcern,
+        op_id: Optional[int],
+        bypass_doc_val: bool,
+        session: Optional[ClientSession],
+        comment: Optional[Any] = None,
+    ) -> Any:
+        """Internal helper for inserting a single document."""
+        write_concern = write_concern or self.write_concern
+        acknowledged = write_concern.acknowledged
+        command = {"insert": self.name, "ordered": ordered, "documents": [doc]}
+        if comment is not None:
+            command["comment"] = comment
+
+        async def _insert_command(
+            session: Optional[ClientSession], conn: Connection, retryable_write: bool
+        ) -> None:
+            if bypass_doc_val:
+                command["bypassDocumentValidation"] = True
+
+            result = await conn.command_async(
+                self.__database.name,
+                command,
+                write_concern=write_concern,
+                codec_options=self.__write_response_codec_options,
+                session=session,
+                client=self.__database.client,
+                retryable_write=retryable_write,
+            )
+
+            _check_write_command_response(result)
+
+        await self.__database.client._retryable_write_async(
+            acknowledged, _insert_command, session, operation=_Op.INSERT
+        )
+
+        if not isinstance(doc, RawBSONDocument):
+            return doc.get("_id")
+        return None
 
     def insert_one(
         self,
-        document: _DocumentIn,
+        document: Union[_DocumentType, RawBSONDocument],
         bypass_document_validation: bool = False,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
     ) -> InsertOneResult:
         """Insert a single document.
@@ -664,20 +664,18 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           >>> db.test.find_one({'x': 1})
           {'x': 1, '_id': ObjectId('54f112defba522406c9cc208')}
 
-        :Parameters:
-          - `document`: The document to insert. Must be a mutable mapping
+        :param document: The document to insert. Must be a mutable mapping
             type. If the document does not have an _id field one will be
             added automatically.
-          - `bypass_document_validation`: (optional) If ``True``, allows the
+        :param bypass_document_validation: (optional) If ``True``, allows the
             write to opt-out of document level validation. Default is
             ``False``.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
 
-        :Returns:
-          - An instance of :class:`~pymongo.results.InsertOneResult`.
+        :return: - An instance of :class:`~pymongo.results.InsertOneResult`.
 
         .. seealso:: :ref:`writes-and-ids`
 
@@ -697,7 +695,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         """
         common.validate_is_document_type("document", document)
         if not (isinstance(document, RawBSONDocument) or "_id" in document):
-            document["_id"] = ObjectId()
+            document["_id"] = ObjectId()  # type: ignore[index]
 
         write_concern = self._write_concern_for(session)
         return InsertOneResult(
@@ -713,12 +711,77 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             write_concern.acknowledged,
         )
 
+    async def insert_one_async(
+        self,
+        document: Union[_DocumentType, RawBSONDocument],
+        bypass_document_validation: bool = False,
+        session: Optional[ClientSession] = None,
+        comment: Optional[Any] = None,
+    ) -> InsertOneResult:
+        """Insert a single document.
+
+          >>> db.test.count_documents({'x': 1})
+          0
+          >>> result = db.test.insert_one({'x': 1})
+          >>> result.inserted_id
+          ObjectId('54f112defba522406c9cc208')
+          >>> db.test.find_one({'x': 1})
+          {'x': 1, '_id': ObjectId('54f112defba522406c9cc208')}
+
+        :param document: The document to insert. Must be a mutable mapping
+            type. If the document does not have an _id field one will be
+            added automatically.
+        :param bypass_document_validation: (optional) If ``True``, allows the
+            write to opt-out of document level validation. Default is
+            ``False``.
+        :param session: a
+            :class:`~pymongo.client_session.ClientSession`.
+        :param comment: A user-provided comment to attach to this
+            command.
+
+        :return: - An instance of :class:`~pymongo.results.InsertOneResult`.
+
+        .. seealso:: :ref:`writes-and-ids`
+
+        .. note:: `bypass_document_validation` requires server version
+          **>= 3.2**
+
+        .. versionchanged:: 4.1
+           Added ``comment`` parameter.
+
+        .. versionchanged:: 3.6
+           Added ``session`` parameter.
+
+        .. versionchanged:: 3.2
+          Added bypass_document_validation support
+
+        .. versionadded:: 3.0
+        """
+        common.validate_is_document_type("document", document)
+        if not (isinstance(document, RawBSONDocument) or "_id" in document):
+            document["_id"] = ObjectId()  # type: ignore[index]
+
+        write_concern = self._write_concern_for(session)
+        return InsertOneResult(
+            await self._insert_one_async(
+                document,
+                ordered=True,
+                write_concern=write_concern,
+                op_id=None,
+                bypass_doc_val=bypass_document_validation,
+                session=session,
+                comment=comment,
+            ),
+            write_concern.acknowledged,
+        )
+
+    @_csot.apply
     def insert_many(
         self,
-        documents: Iterable[_DocumentIn],
+        documents: Iterable[Union[_DocumentType, RawBSONDocument]],
         ordered: bool = True,
         bypass_document_validation: bool = False,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
     ) -> InsertManyResult:
         """Insert an iterable of documents.
@@ -731,23 +794,21 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           >>> db.test.count_documents({})
           2
 
-        :Parameters:
-          - `documents`: A iterable of documents to insert.
-          - `ordered` (optional): If ``True`` (the default) documents will be
+        :param documents: A iterable of documents to insert.
+        :param ordered: If ``True`` (the default) documents will be
             inserted on the server serially, in the order provided. If an error
             occurs all remaining inserts are aborted. If ``False``, documents
             will be inserted on the server in arbitrary order, possibly in
             parallel, and all document inserts will be attempted.
-          - `bypass_document_validation`: (optional) If ``True``, allows the
+        :param bypass_document_validation: (optional) If ``True``, allows the
             write to opt-out of document level validation. Default is
             ``False``.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
 
-        :Returns:
-          An instance of :class:`~pymongo.results.InsertManyResult`.
+        :return: An instance of :class:`~pymongo.results.InsertManyResult`.
 
         .. seealso:: :ref:`writes-and-ids`
 
@@ -771,49 +832,54 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             or not documents
         ):
             raise TypeError("documents must be a non-empty list")
-        inserted_ids: List[ObjectId] = []
+        inserted_ids: list[ObjectId] = []
 
-        def gen():
+        def gen() -> Iterator[tuple[int, Mapping[str, Any]]]:
             """A generator that validates documents and handles _ids."""
             for document in documents:
                 common.validate_is_document_type("document", document)
                 if not isinstance(document, RawBSONDocument):
                     if "_id" not in document:
-                        document["_id"] = ObjectId()
+                        document["_id"] = ObjectId()  # type: ignore[index]
                     inserted_ids.append(document["_id"])
                 yield (message._INSERT, document)
 
         write_concern = self._write_concern_for(session)
         blk = _Bulk(self, ordered, bypass_document_validation, comment=comment)
-        blk.ops = [doc for doc in gen()]
-        blk.execute(write_concern, session=session)
+        blk.ops = list(gen())
+        blk.execute(write_concern, session, _Op.INSERT)
         return InsertManyResult(inserted_ids, write_concern.acknowledged)
 
     def _update(
         self,
-        sock_info,
-        criteria,
-        document,
-        upsert=False,
-        multi=False,
-        write_concern=None,
-        op_id=None,
-        ordered=True,
-        bypass_doc_val=False,
-        collation=None,
-        array_filters=None,
-        hint=None,
-        session=None,
-        retryable_write=False,
-        let=None,
-        comment=None,
-    ):
+        conn: Connection,
+        criteria: Mapping[str, Any],
+        document: Union[Mapping[str, Any], _Pipeline],
+        upsert: bool = False,
+        multi: bool = False,
+        write_concern: Optional[WriteConcern] = None,
+        op_id: Optional[int] = None,
+        ordered: bool = True,
+        bypass_doc_val: Optional[bool] = False,
+        collation: Optional[_CollationIn] = None,
+        array_filters: Optional[Sequence[Mapping[str, Any]]] = None,
+        hint: Optional[_IndexKeyHint] = None,
+        session: Optional[ClientSession] = None,
+        retryable_write: bool = False,
+        let: Optional[Mapping[str, Any]] = None,
+        comment: Optional[Any] = None,
+    ) -> Optional[Mapping[str, Any]]:
         """Internal update / replace helper."""
-        common.validate_boolean("upsert", upsert)
+        validate_boolean("upsert", upsert)
         collation = validate_collation_or_none(collation)
         write_concern = write_concern or self.write_concern
         acknowledged = write_concern.acknowledged
-        update_doc = SON([("q", criteria), ("u", document), ("multi", multi), ("upsert", upsert)])
+        update_doc: dict[str, Any] = {
+            "q": criteria,
+            "u": document,
+            "multi": multi,
+            "upsert": upsert,
+        }
         if collation is not None:
             if not acknowledged:
                 raise ConfigurationError("Collation is unsupported for unacknowledged writes.")
@@ -825,19 +891,17 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             else:
                 update_doc["arrayFilters"] = array_filters
         if hint is not None:
-            if not acknowledged and sock_info.max_wire_version < 8:
+            if not acknowledged and conn.max_wire_version < 8:
                 raise ConfigurationError(
                     "Must be connected to MongoDB 4.2+ to use hint on unacknowledged update commands."
                 )
             if not isinstance(hint, str):
                 hint = helpers._index_document(hint)
             update_doc["hint"] = hint
-        command = SON([("update", self.name), ("ordered", ordered), ("updates", [update_doc])])
+        command = {"update": self.name, "ordered": ordered, "updates": [update_doc]}
         if let is not None:
             common.validate_is_mapping("let", let)
             command["let"] = let
-        if not write_concern.is_server_default:
-            command["writeConcern"] = write_concern.document
 
         if comment is not None:
             command["comment"] = comment
@@ -847,7 +911,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         # The command result has to be published for APM unmodified
         # so we make a shallow copy here before adding updatedExisting.
-        result = sock_info.command(
+        result = conn.command(
             self.__database.name,
             command,
             write_concern=write_concern,
@@ -873,26 +937,29 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
     def _update_retryable(
         self,
-        criteria,
-        document,
-        upsert=False,
-        multi=False,
-        write_concern=None,
-        op_id=None,
-        ordered=True,
-        bypass_doc_val=False,
-        collation=None,
-        array_filters=None,
-        hint=None,
-        session=None,
-        let=None,
-        comment=None,
-    ):
+        criteria: Mapping[str, Any],
+        document: Union[Mapping[str, Any], _Pipeline],
+        operation: str,
+        upsert: bool = False,
+        multi: bool = False,
+        write_concern: Optional[WriteConcern] = None,
+        op_id: Optional[int] = None,
+        ordered: bool = True,
+        bypass_doc_val: Optional[bool] = False,
+        collation: Optional[_CollationIn] = None,
+        array_filters: Optional[Sequence[Mapping[str, Any]]] = None,
+        hint: Optional[_IndexKeyHint] = None,
+        session: Optional[ClientSession] = None,
+        let: Optional[Mapping[str, Any]] = None,
+        comment: Optional[Any] = None,
+    ) -> Optional[Mapping[str, Any]]:
         """Internal update / replace helper."""
 
-        def _update(session, sock_info, retryable_write):
+        def _update(
+            session: Optional[ClientSession], conn: Connection, retryable_write: bool
+        ) -> Optional[Mapping[str, Any]]:
             return self._update(
-                sock_info,
+                conn,
                 criteria,
                 document,
                 upsert=upsert,
@@ -911,7 +978,10 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             )
 
         return self.__database.client._retryable_write(
-            (write_concern or self.write_concern).acknowledged and not multi, _update, session
+            (write_concern or self.write_concern).acknowledged and not multi,
+            _update,
+            session,
+            operation,
         )
 
     def replace_one(
@@ -922,7 +992,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         bypass_document_validation: bool = False,
         collation: Optional[_CollationIn] = None,
         hint: Optional[_IndexKeyHint] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         let: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
     ) -> UpdateResult:
@@ -955,32 +1025,30 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           >>> db.test.find_one({'x': 1})
           {'x': 1, '_id': ObjectId('54f11e5c8891e756a6e1abd4')}
 
-        :Parameters:
-          - `filter`: A query that matches the document to replace.
-          - `replacement`: The new document.
-          - `upsert` (optional): If ``True``, perform an insert if no documents
+        :param filter: A query that matches the document to replace.
+        :param replacement: The new document.
+        :param upsert: If ``True``, perform an insert if no documents
             match the filter.
-          - `bypass_document_validation`: (optional) If ``True``, allows the
+        :param bypass_document_validation: (optional) If ``True``, allows the
             write to opt-out of document level validation. Default is
             ``False``.
-          - `collation` (optional): An instance of
+        :param collation: An instance of
             :class:`~pymongo.collation.Collation`.
-          - `hint` (optional): An index to use to support the query
+        :param hint: An index to use to support the query
             predicate specified either by its string name, or in the same
             format as passed to
             :meth:`~pymongo.collection.Collection.create_index` (e.g.
             ``[('field', ASCENDING)]``). This option is only supported on
             MongoDB 4.2 and above.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `let` (optional): Map of parameter names and values. Values must be
+        :param let: Map of parameter names and values. Values must be
             constant or closed expressions that do not reference document
             fields. Parameters can then be accessed as variables in an
             aggregate expression context (e.g. "$$var").
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-        :Returns:
-          - An instance of :class:`~pymongo.results.UpdateResult`.
+        :return: - An instance of :class:`~pymongo.results.UpdateResult`.
 
         .. versionchanged:: 4.1
            Added ``let`` parameter.
@@ -1005,6 +1073,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             self._update_retryable(
                 filter,
                 replacement,
+                _Op.UPDATE,
                 upsert,
                 write_concern=write_concern,
                 bypass_doc_val=bypass_document_validation,
@@ -1026,7 +1095,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         collation: Optional[_CollationIn] = None,
         array_filters: Optional[Sequence[Mapping[str, Any]]] = None,
         hint: Optional[_IndexKeyHint] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         let: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
     ) -> UpdateResult:
@@ -1050,35 +1119,46 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           {'x': 1, '_id': 1}
           {'x': 1, '_id': 2}
 
-        :Parameters:
-          - `filter`: A query that matches the document to update.
-          - `update`: The modifications to apply.
-          - `upsert` (optional): If ``True``, perform an insert if no documents
+        If ``upsert=True`` and no documents match the filter, create a
+        new document based on the filter criteria and update modifications.
+
+          >>> result = db.test.update_one({'x': -10}, {'$inc': {'x': 3}}, upsert=True)
+          >>> result.matched_count
+          0
+          >>> result.modified_count
+          0
+          >>> result.upserted_id
+          ObjectId('626a678eeaa80587d4bb3fb7')
+          >>> db.test.find_one(result.upserted_id)
+          {'_id': ObjectId('626a678eeaa80587d4bb3fb7'), 'x': -7}
+
+        :param filter: A query that matches the document to update.
+        :param update: The modifications to apply.
+        :param upsert: If ``True``, perform an insert if no documents
             match the filter.
-          - `bypass_document_validation`: (optional) If ``True``, allows the
+        :param bypass_document_validation: (optional) If ``True``, allows the
             write to opt-out of document level validation. Default is
             ``False``.
-          - `collation` (optional): An instance of
+        :param collation: An instance of
             :class:`~pymongo.collation.Collation`.
-          - `array_filters` (optional): A list of filters specifying which
+        :param array_filters: A list of filters specifying which
             array elements an update should apply.
-          - `hint` (optional): An index to use to support the query
+        :param hint: An index to use to support the query
             predicate specified either by its string name, or in the same
             format as passed to
             :meth:`~pymongo.collection.Collection.create_index` (e.g.
             ``[('field', ASCENDING)]``). This option is only supported on
             MongoDB 4.2 and above.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `let` (optional): Map of parameter names and values. Values must be
+        :param let: Map of parameter names and values. Values must be
             constant or closed expressions that do not reference document
             fields. Parameters can then be accessed as variables in an
             aggregate expression context (e.g. "$$var").
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
 
-        :Returns:
-          - An instance of :class:`~pymongo.results.UpdateResult`.
+        :return: - An instance of :class:`~pymongo.results.UpdateResult`.
 
         .. versionchanged:: 4.1
            Added ``let`` parameter.
@@ -1105,6 +1185,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             self._update_retryable(
                 filter,
                 update,
+                _Op.UPDATE,
                 upsert,
                 write_concern=write_concern,
                 bypass_doc_val=bypass_document_validation,
@@ -1127,7 +1208,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         bypass_document_validation: Optional[bool] = None,
         collation: Optional[_CollationIn] = None,
         hint: Optional[_IndexKeyHint] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         let: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
     ) -> UpdateResult:
@@ -1151,35 +1232,33 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           {'x': 4, '_id': 1}
           {'x': 4, '_id': 2}
 
-        :Parameters:
-          - `filter`: A query that matches the documents to update.
-          - `update`: The modifications to apply.
-          - `upsert` (optional): If ``True``, perform an insert if no documents
+        :param filter: A query that matches the documents to update.
+        :param update: The modifications to apply.
+        :param upsert: If ``True``, perform an insert if no documents
             match the filter.
-          - `bypass_document_validation` (optional): If ``True``, allows the
+        :param bypass_document_validation: If ``True``, allows the
             write to opt-out of document level validation. Default is
             ``False``.
-          - `collation` (optional): An instance of
+        :param collation: An instance of
             :class:`~pymongo.collation.Collation`.
-          - `array_filters` (optional): A list of filters specifying which
+        :param array_filters: A list of filters specifying which
             array elements an update should apply.
-          - `hint` (optional): An index to use to support the query
+        :param hint: An index to use to support the query
             predicate specified either by its string name, or in the same
             format as passed to
             :meth:`~pymongo.collection.Collection.create_index` (e.g.
             ``[('field', ASCENDING)]``). This option is only supported on
             MongoDB 4.2 and above.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `let` (optional): Map of parameter names and values. Values must be
+        :param let: Map of parameter names and values. Values must be
             constant or closed expressions that do not reference document
             fields. Parameters can then be accessed as variables in an
             aggregate expression context (e.g. "$$var").
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
 
-        :Returns:
-          - An instance of :class:`~pymongo.results.UpdateResult`.
+        :return: - An instance of :class:`~pymongo.results.UpdateResult`.
 
         .. versionchanged:: 4.1
            Added ``let`` parameter.
@@ -1206,6 +1285,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             self._update_retryable(
                 filter,
                 update,
+                _Op.UPDATE,
                 upsert,
                 multi=True,
                 write_concern=write_concern,
@@ -1222,21 +1302,26 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
     def drop(
         self,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
+        encrypted_fields: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """Alias for :meth:`~pymongo.database.Database.drop_collection`.
 
-        :Parameters:
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
+        :param encrypted_fields: **(BETA)** Document that describes the encrypted fields for
+            Queryable Encryption.
 
         The following two calls are equivalent:
 
           >>> db.foo.drop()
           >>> db.drop_collection("foo")
+
+        .. versionchanged:: 4.2
+           Added ``encrypted_fields`` parameter.
 
         .. versionchanged:: 4.1
            Added ``comment`` parameter.
@@ -1254,28 +1339,30 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             self.write_concern,
             self.read_concern,
         )
-        dbo.drop_collection(self.__name, session=session, comment=comment)
+        dbo.drop_collection(
+            self.__name, session=session, comment=comment, encrypted_fields=encrypted_fields
+        )
 
     def _delete(
         self,
-        sock_info,
-        criteria,
-        multi,
-        write_concern=None,
-        op_id=None,
-        ordered=True,
-        collation=None,
-        hint=None,
-        session=None,
-        retryable_write=False,
-        let=None,
-        comment=None,
-    ):
+        conn: Connection,
+        criteria: Mapping[str, Any],
+        multi: bool,
+        write_concern: Optional[WriteConcern] = None,
+        op_id: Optional[int] = None,
+        ordered: bool = True,
+        collation: Optional[_CollationIn] = None,
+        hint: Optional[_IndexKeyHint] = None,
+        session: Optional[ClientSession] = None,
+        retryable_write: bool = False,
+        let: Optional[Mapping[str, Any]] = None,
+        comment: Optional[Any] = None,
+    ) -> Mapping[str, Any]:
         """Internal delete helper."""
         common.validate_is_mapping("filter", criteria)
         write_concern = write_concern or self.write_concern
         acknowledged = write_concern.acknowledged
-        delete_doc = SON([("q", criteria), ("limit", int(not multi))])
+        delete_doc = {"q": criteria, "limit": int(not multi)}
         collation = validate_collation_or_none(collation)
         if collation is not None:
             if not acknowledged:
@@ -1283,16 +1370,14 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             else:
                 delete_doc["collation"] = collation
         if hint is not None:
-            if not acknowledged and sock_info.max_wire_version < 9:
+            if not acknowledged and conn.max_wire_version < 9:
                 raise ConfigurationError(
                     "Must be connected to MongoDB 4.4+ to use hint on unacknowledged delete commands."
                 )
             if not isinstance(hint, str):
                 hint = helpers._index_document(hint)
             delete_doc["hint"] = hint
-        command = SON([("delete", self.name), ("ordered", ordered), ("deletes", [delete_doc])])
-        if not write_concern.is_server_default:
-            command["writeConcern"] = write_concern.document
+        command = {"delete": self.name, "ordered": ordered, "deletes": [delete_doc]}
 
         if let is not None:
             common.validate_is_document_type("let", let)
@@ -1302,7 +1387,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             command["comment"] = comment
 
         # Delete command.
-        result = sock_info.command(
+        result = conn.command(
             self.__database.name,
             command,
             write_concern=write_concern,
@@ -1316,22 +1401,24 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
     def _delete_retryable(
         self,
-        criteria,
-        multi,
-        write_concern=None,
-        op_id=None,
-        ordered=True,
-        collation=None,
-        hint=None,
-        session=None,
-        let=None,
-        comment=None,
-    ):
+        criteria: Mapping[str, Any],
+        multi: bool,
+        write_concern: Optional[WriteConcern] = None,
+        op_id: Optional[int] = None,
+        ordered: bool = True,
+        collation: Optional[_CollationIn] = None,
+        hint: Optional[_IndexKeyHint] = None,
+        session: Optional[ClientSession] = None,
+        let: Optional[Mapping[str, Any]] = None,
+        comment: Optional[Any] = None,
+    ) -> Mapping[str, Any]:
         """Internal delete helper."""
 
-        def _delete(session, sock_info, retryable_write):
+        def _delete(
+            session: Optional[ClientSession], conn: Connection, retryable_write: bool
+        ) -> Mapping[str, Any]:
             return self._delete(
-                sock_info,
+                conn,
                 criteria,
                 multi,
                 write_concern=write_concern,
@@ -1346,7 +1433,10 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             )
 
         return self.__database.client._retryable_write(
-            (write_concern or self.write_concern).acknowledged and not multi, _delete, session
+            (write_concern or self.write_concern).acknowledged and not multi,
+            _delete,
+            session,
+            operation=_Op.DELETE,
         )
 
     def delete_one(
@@ -1354,7 +1444,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         filter: Mapping[str, Any],
         collation: Optional[_CollationIn] = None,
         hint: Optional[_IndexKeyHint] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         let: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
     ) -> DeleteResult:
@@ -1368,27 +1458,25 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           >>> db.test.count_documents({'x': 1})
           2
 
-        :Parameters:
-          - `filter`: A query that matches the document to delete.
-          - `collation` (optional): An instance of
+        :param filter: A query that matches the document to delete.
+        :param collation: An instance of
             :class:`~pymongo.collation.Collation`.
-          - `hint` (optional): An index to use to support the query
+        :param hint: An index to use to support the query
             predicate specified either by its string name, or in the same
             format as passed to
             :meth:`~pymongo.collection.Collection.create_index` (e.g.
             ``[('field', ASCENDING)]``). This option is only supported on
             MongoDB 4.4 and above.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `let` (optional): Map of parameter names and values. Values must be
+        :param let: Map of parameter names and values. Values must be
             constant or closed expressions that do not reference document
             fields. Parameters can then be accessed as variables in an
             aggregate expression context (e.g. "$$var").
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
 
-        :Returns:
-          - An instance of :class:`~pymongo.results.DeleteResult`.
+        :return: - An instance of :class:`~pymongo.results.DeleteResult`.
 
         .. versionchanged:: 4.1
            Added ``let`` parameter.
@@ -1421,7 +1509,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         filter: Mapping[str, Any],
         collation: Optional[_CollationIn] = None,
         hint: Optional[_IndexKeyHint] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         let: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
     ) -> DeleteResult:
@@ -1435,27 +1523,25 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           >>> db.test.count_documents({'x': 1})
           0
 
-        :Parameters:
-          - `filter`: A query that matches the documents to delete.
-          - `collation` (optional): An instance of
+        :param filter: A query that matches the documents to delete.
+        :param collation: An instance of
             :class:`~pymongo.collation.Collation`.
-          - `hint` (optional): An index to use to support the query
+        :param hint: An index to use to support the query
             predicate specified either by its string name, or in the same
             format as passed to
             :meth:`~pymongo.collection.Collection.create_index` (e.g.
             ``[('field', ASCENDING)]``). This option is only supported on
             MongoDB 4.4 and above.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `let` (optional): Map of parameter names and values. Values must be
+        :param let: Map of parameter names and values. Values must be
             constant or closed expressions that do not reference document
             fields. Parameters can then be accessed as variables in an
             aggregate expression context (e.g. "$$var").
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
 
-        :Returns:
-          - An instance of :class:`~pymongo.results.DeleteResult`.
+        :return: - An instance of :class:`~pymongo.results.DeleteResult`.
 
         .. versionchanged:: 4.1
            Added ``let`` parameter.
@@ -1496,17 +1582,17 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         The :meth:`find_one` method obeys the :attr:`read_preference` of
         this :class:`Collection`.
 
-        :Parameters:
-
-          - `filter` (optional): a dictionary specifying
+        :param filter: a dictionary specifying
             the query to be performed OR any other type to be used as
             the value for a query for ``"_id"``.
 
-          - `*args` (optional): any additional positional arguments
+        :param args: any additional positional arguments
             are the same as the arguments to :meth:`find`.
 
-          - `**kwargs` (optional): any additional keyword arguments
+        :param kwargs: any additional keyword arguments
             are the same as the arguments to :meth:`find`.
+
+            :: code-block: python
 
               >>> collection.find_one(max_time_ms=100)
 
@@ -1540,28 +1626,27 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         The :meth:`find` method obeys the :attr:`read_preference` of
         this :class:`Collection`.
 
-        :Parameters:
-          - `filter` (optional): A query document that selects which documents
+        :param filter: A query document that selects which documents
             to include in the result set. Can be an empty document to include
             all documents.
-          - `projection` (optional): a list of field names that should be
+        :param projection: a list of field names that should be
             returned in the result set or a dict specifying the fields
             to include or exclude. If `projection` is a list "_id" will
             always be returned. Use a dict to exclude fields from
             the result (e.g. projection={'_id': False}).
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `skip` (optional): the number of documents to omit (from
+        :param skip: the number of documents to omit (from
             the start of the result set) when returning the results
-          - `limit` (optional): the maximum number of results to
+        :param limit: the maximum number of results to
             return. A limit of 0 (the default) is equivalent to setting no
             limit.
-          - `no_cursor_timeout` (optional): if False (the default), any
+        :param no_cursor_timeout: if False (the default), any
             returned cursor is closed by the server after 10 minutes of
             inactivity. If set to True, the returned cursor will never
             time out on the server. Care should be taken to ensure that
             cursors with no_cursor_timeout turned on are properly closed.
-          - `cursor_type` (optional): the type of cursor to return. The valid
+        :param cursor_type: the type of cursor to return. The valid
             options are defined by :class:`~pymongo.cursor.CursorType`:
 
             - :attr:`~pymongo.cursor.CursorType.NON_TAILABLE` - the result of
@@ -1573,7 +1658,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
               marks the final document position. If more data is received
               iteration of the cursor will continue from the last document
               received. For details, see the `tailable cursor documentation
-              <http://www.mongodb.org/display/DOCS/Tailable+Cursors>`_.
+              <https://www.mongodb.com/docs/manual/core/tailable-cursors/>`_.
             - :attr:`~pymongo.cursor.CursorType.TAILABLE_AWAIT` - the result
               of this find call will be a tailable cursor with the await flag
               set. The server will wait for a few seconds after returning the
@@ -1584,53 +1669,53 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
               results to the client without waiting for the client to request
               each batch, reducing latency. See notes on compatibility below.
 
-          - `sort` (optional): a list of (key, direction) pairs
+        :param sort: a list of (key, direction) pairs
             specifying the sort order for this query. See
             :meth:`~pymongo.cursor.Cursor.sort` for details.
-          - `allow_partial_results` (optional): if True, mongos will return
+        :param allow_partial_results: if True, mongos will return
             partial results if some shards are down instead of returning an
             error.
-          - `oplog_replay` (optional): **DEPRECATED** - if True, set the
+        :param oplog_replay: **DEPRECATED** - if True, set the
             oplogReplay query flag. Default: False.
-          - `batch_size` (optional): Limits the number of documents returned in
+        :param batch_size: Limits the number of documents returned in
             a single batch.
-          - `collation` (optional): An instance of
+        :param collation: An instance of
             :class:`~pymongo.collation.Collation`.
-          - `return_key` (optional): If True, return only the index keys in
+        :param return_key: If True, return only the index keys in
             each document.
-          - `show_record_id` (optional): If True, adds a field ``$recordId`` in
+        :param show_record_id: If True, adds a field ``$recordId`` in
             each document with the storage engine's internal record identifier.
-          - `snapshot` (optional): **DEPRECATED** - If True, prevents the
+        :param snapshot: **DEPRECATED** - If True, prevents the
             cursor from returning a document more than once because of an
             intervening write operation.
-          - `hint` (optional): An index, in the same format as passed to
+        :param hint: An index, in the same format as passed to
             :meth:`~pymongo.collection.Collection.create_index` (e.g.
             ``[('field', ASCENDING)]``). Pass this as an alternative to calling
             :meth:`~pymongo.cursor.Cursor.hint` on the cursor to tell Mongo the
             proper index to use for the query.
-          - `max_time_ms` (optional): Specifies a time limit for a query
+        :param max_time_ms: Specifies a time limit for a query
             operation. If the specified time is exceeded, the operation will be
             aborted and :exc:`~pymongo.errors.ExecutionTimeout` is raised. Pass
             this as an alternative to calling
             :meth:`~pymongo.cursor.Cursor.max_time_ms` on the cursor.
-          - `max_scan` (optional): **DEPRECATED** - The maximum number of
+        :param max_scan: **DEPRECATED** - The maximum number of
             documents to scan. Pass this as an alternative to calling
             :meth:`~pymongo.cursor.Cursor.max_scan` on the cursor.
-          - `min` (optional): A list of field, limit pairs specifying the
+        :param min: A list of field, limit pairs specifying the
             inclusive lower bound for all keys of a specific index in order.
             Pass this as an alternative to calling
             :meth:`~pymongo.cursor.Cursor.min` on the cursor. ``hint`` must
             also be passed to ensure the query utilizes the correct index.
-          - `max` (optional): A list of field, limit pairs specifying the
+        :param max: A list of field, limit pairs specifying the
             exclusive upper bound for all keys of a specific index in order.
             Pass this as an alternative to calling
             :meth:`~pymongo.cursor.Cursor.max` on the cursor. ``hint`` must
             also be passed to ensure the query utilizes the correct index.
-          - `comment` (optional): A string to attach to the query to help
+        :param comment: A string to attach to the query to help
             interpret and trace the operation in the server logs and in profile
             data. Pass this as an alternative to calling
             :meth:`~pymongo.cursor.Cursor.comment` on the cursor.
-          - `allow_disk_use` (optional): if True, MongoDB may use temporary
+        :param allow_disk_use: if True, MongoDB may use temporary
             disk files to store data exceeding the system memory limit while
             processing a blocking sort operation. The option has no effect if
             MongoDB can satisfy the specified sort using an index, or if the
@@ -1738,12 +1823,19 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             raise InvalidOperation("find_raw_batches does not support auto encryption")
         return RawBatchCursor(self, *args, **kwargs)
 
-    def _count_cmd(self, session, sock_info, read_preference, cmd, collation):
+    def _count_cmd(
+        self,
+        session: Optional[ClientSession],
+        conn: Connection,
+        read_preference: Optional[_ServerMode],
+        cmd: dict[str, Any],
+        collation: Optional[Collation],
+    ) -> int:
         """Internal count command helper."""
         # XXX: "ns missing" checks can be removed when we drop support for
         # MongoDB 3.0, see SERVER-17051.
         res = self._command(
-            sock_info,
+            conn,
             cmd,
             read_preference=read_preference,
             allowable_errors=["ns missing"],
@@ -1756,10 +1848,17 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             return 0
         return int(res["n"])
 
-    def _aggregate_one_result(self, sock_info, read_preference, cmd, collation, session):
+    def _aggregate_one_result(
+        self,
+        conn: Connection,
+        read_preference: Optional[_ServerMode],
+        cmd: dict[str, Any],
+        collation: Optional[_CollationIn],
+        session: Optional[ClientSession],
+    ) -> Optional[Mapping[str, Any]]:
         """Internal helper to run an aggregate that returns a single result."""
         result = self._command(
-            sock_info,
+            conn,
             cmd,
             read_preference,
             allowable_errors=[26],  # Ignore NamespaceNotFound.
@@ -1787,46 +1886,41 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           - `maxTimeMS` (int): The maximum amount of time to allow this
             operation to run, in milliseconds.
 
-        :Parameters:
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): See list of options above.
+        :param kwargs: See list of options above.
 
+        .. versionchanged:: 4.2
+           This method now always uses the `count`_ command. Due to an oversight in versions
+           5.0.0-5.0.8 of MongoDB, the count command was not included in V1 of the
+           :ref:`versioned-api-ref`. Users of the Stable API with estimated_document_count are
+           recommended to upgrade their server version to 5.0.9+ or set
+           :attr:`pymongo.server_api.ServerApi.strict` to ``False`` to avoid encountering errors.
 
         .. versionadded:: 3.7
+        .. _count: https://mongodb.com/docs/manual/reference/command/count/
         """
         if "session" in kwargs:
             raise ConfigurationError("estimated_document_count does not support sessions")
         if comment is not None:
             kwargs["comment"] = comment
 
-        def _cmd(session, server, sock_info, read_preference):
-            if sock_info.max_wire_version >= 12:
-                # MongoDB 4.9+
-                pipeline = [
-                    {"$collStats": {"count": {}}},
-                    {"$group": {"_id": 1, "n": {"$sum": "$count"}}},
-                ]
-                cmd = SON([("aggregate", self.__name), ("pipeline", pipeline), ("cursor", {})])
-                cmd.update(kwargs)
-                result = self._aggregate_one_result(
-                    sock_info, read_preference, cmd, collation=None, session=session
-                )
-                if not result:
-                    return 0
-                return int(result["n"])
-            else:
-                # MongoDB < 4.9
-                cmd = SON([("count", self.__name)])
-                cmd.update(kwargs)
-                return self._count_cmd(session, sock_info, read_preference, cmd, collation=None)
+        def _cmd(
+            session: Optional[ClientSession],
+            _server: Server,
+            conn: Connection,
+            read_preference: Optional[_ServerMode],
+        ) -> int:
+            cmd: dict[str, Any] = {"count": self.__name}
+            cmd.update(kwargs)
+            return self._count_cmd(session, conn, read_preference, cmd, collation=None)
 
-        return self._retryable_non_cursor_read(_cmd, None)
+        return self._retryable_non_cursor_read(_cmd, None, operation=_Op.COUNT)
 
     def count_documents(
         self,
         filter: Mapping[str, Any],
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
     ) -> int:
@@ -1868,23 +1962,22 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
            | $nearSphere | `$geoWithin`_ with `$centerSphere`_ |
            +-------------+-------------------------------------+
 
-        :Parameters:
-          - `filter` (required): A query document that selects which documents
+        :param filter: A query document that selects which documents
             to count in the collection. Can be an empty document to count all
             documents.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): See list of options above.
+        :param kwargs: See list of options above.
 
 
         .. versionadded:: 3.7
 
-        .. _$expr: https://docs.mongodb.com/manual/reference/operator/query/expr/
-        .. _$geoWithin: https://docs.mongodb.com/manual/reference/operator/query/geoWithin/
-        .. _$center: https://docs.mongodb.com/manual/reference/operator/query/center/
-        .. _$centerSphere: https://docs.mongodb.com/manual/reference/operator/query/centerSphere/
+        .. _$expr: https://mongodb.com/docs/manual/reference/operator/query/expr/
+        .. _$geoWithin: https://mongodb.com/docs/manual/reference/operator/query/geoWithin/
+        .. _$center: https://mongodb.com/docs/manual/reference/operator/query/center/
+        .. _$centerSphere: https://mongodb.com/docs/manual/reference/operator/query/centerSphere/
         """
         pipeline = [{"$match": filter}]
         if "skip" in kwargs:
@@ -1894,33 +1987,43 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         if comment is not None:
             kwargs["comment"] = comment
         pipeline.append({"$group": {"_id": 1, "n": {"$sum": 1}}})
-        cmd = SON([("aggregate", self.__name), ("pipeline", pipeline), ("cursor", {})])
+        cmd = {"aggregate": self.__name, "pipeline": pipeline, "cursor": {}}
         if "hint" in kwargs and not isinstance(kwargs["hint"], str):
             kwargs["hint"] = helpers._index_document(kwargs["hint"])
         collation = validate_collation_or_none(kwargs.pop("collation", None))
         cmd.update(kwargs)
 
-        def _cmd(session, server, sock_info, read_preference):
-            result = self._aggregate_one_result(sock_info, read_preference, cmd, collation, session)
+        def _cmd(
+            session: Optional[ClientSession],
+            _server: Server,
+            conn: Connection,
+            read_preference: Optional[_ServerMode],
+        ) -> int:
+            result = self._aggregate_one_result(conn, read_preference, cmd, collation, session)
             if not result:
                 return 0
             return result["n"]
 
-        return self._retryable_non_cursor_read(_cmd, session)
+        return self._retryable_non_cursor_read(_cmd, session, _Op.COUNT)
 
-    def _retryable_non_cursor_read(self, func, session):
+    def _retryable_non_cursor_read(
+        self,
+        func: Callable[[Optional[ClientSession], Server, Connection, Optional[_ServerMode]], T],
+        session: Optional[ClientSession],
+        operation: str,
+    ) -> T:
         """Non-cursor read helper to handle implicit session creation."""
         client = self.__database.client
         with client._tmp_session(session) as s:
-            return client._retryable_read(func, self._read_preference_for(s), s)
+            return client._retryable_read(func, self._read_preference_for(s), s, operation)
 
     def create_indexes(
         self,
         indexes: Sequence[IndexModel],
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
-    ) -> List[str]:
+    ) -> list[str]:
         """Create one or more indexes on this collection.
 
           >>> from pymongo import IndexModel, ASCENDING, DESCENDING
@@ -1930,14 +2033,13 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           >>> db.test.create_indexes([index1, index2])
           ["hello_world", "goodbye_-1"]
 
-        :Parameters:
-          - `indexes`: A list of :class:`~pymongo.operations.IndexModel`
+        :param indexes: A list of :class:`~pymongo.operations.IndexModel`
             instances.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): optional arguments to the createIndexes
+        :param kwargs: optional arguments to the createIndexes
             command (like maxTimeMS) can be passed as keyword arguments.
 
 
@@ -1955,39 +2057,41 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
            when connected to MongoDB >= 3.4.
         .. versionadded:: 3.0
 
-        .. _createIndexes: https://docs.mongodb.com/manual/reference/command/createIndexes/
+        .. _createIndexes: https://mongodb.com/docs/manual/reference/command/createIndexes/
         """
         common.validate_list("indexes", indexes)
         if comment is not None:
             kwargs["comment"] = comment
         return self.__create_indexes(indexes, session, **kwargs)
 
-    def __create_indexes(self, indexes, session, **kwargs):
+    @_csot.apply
+    def __create_indexes(
+        self, indexes: Sequence[IndexModel], session: Optional[ClientSession], **kwargs: Any
+    ) -> list[str]:
         """Internal createIndexes helper.
 
-        :Parameters:
-          - `indexes`: A list of :class:`~pymongo.operations.IndexModel`
+        :param indexes: A list of :class:`~pymongo.operations.IndexModel`
             instances.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `**kwargs` (optional): optional arguments to the createIndexes
+        :param kwargs: optional arguments to the createIndexes
             command (like maxTimeMS) can be passed as keyword arguments.
         """
         names = []
-        with self._socket_for_writes(session) as sock_info:
-            supports_quorum = sock_info.max_wire_version >= 9
+        with self._conn_for_writes(session, operation=_Op.CREATE_INDEXES) as conn:
+            supports_quorum = conn.max_wire_version >= 9
 
-            def gen_indexes():
+            def gen_indexes() -> Iterator[Mapping[str, Any]]:
                 for index in indexes:
                     if not isinstance(index, IndexModel):
                         raise TypeError(
-                            "%r is not an instance of pymongo.operations.IndexModel" % (index,)
+                            f"{index!r} is not an instance of pymongo.operations.IndexModel"
                         )
                     document = index.document
                     names.append(document["name"])
                     yield document
 
-            cmd = SON([("createIndexes", self.name), ("indexes", list(gen_indexes()))])
+            cmd = {"createIndexes": self.name, "indexes": list(gen_indexes())}
             cmd.update(kwargs)
             if "commitQuorum" in kwargs and not supports_quorum:
                 raise ConfigurationError(
@@ -1996,7 +2100,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
                 )
 
             self._command(
-                sock_info,
+                conn,
                 cmd,
                 read_preference=ReadPreference.PRIMARY,
                 codec_options=_UNICODE_REPLACE_CODEC_OPTIONS,
@@ -2008,16 +2112,17 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
     def create_index(
         self,
         keys: _IndexKeyHint,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
     ) -> str:
         """Creates an index on this collection.
 
-        Takes either a single key or a list of (key, direction) pairs.
-        The key(s) must be an instance of :class:`basestring`
-        (:class:`str` in python 3), and the direction(s) must be one of
-        (:data:`~pymongo.ASCENDING`, :data:`~pymongo.DESCENDING`,
+        Takes either a single key or a list containing (key, direction) pairs
+        or keys.  If no direction is given, :data:`~pymongo.ASCENDING` will
+        be assumed.
+        The key(s) must be an instance of :class:`str` and the direction(s) must
+        be one of (:data:`~pymongo.ASCENDING`, :data:`~pymongo.DESCENDING`,
         :data:`~pymongo.GEO2D`, :data:`~pymongo.GEOSPHERE`,
         :data:`~pymongo.HASHED`, :data:`~pymongo.TEXT`).
 
@@ -2030,7 +2135,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         ascending we need to use a list of tuples::
 
           >>> my_collection.create_index([("mike", pymongo.DESCENDING),
-          ...                             ("eliot", pymongo.ASCENDING)])
+          ...                             "eliot"])
 
         All optional index creation parameters should be passed as
         keyword arguments to this method. For example::
@@ -2080,17 +2185,19 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         .. note:: The :attr:`~pymongo.collection.Collection.write_concern` of
            this collection is automatically applied to this operation.
 
-        :Parameters:
-          - `keys`: a single key or a list of (key, direction)
+        :param keys: a single key or a list of (key, direction)
             pairs specifying the index to create
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-            arguments
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): any additional index creation
+        :param kwargs: any additional index creation
             options (see the above list) should be passed as keyword
+            arguments.
 
+        .. versionchanged:: 4.4
+           Allow passing a list containing (key, direction) pairs
+           or keys for the ``keys`` parameter.
         .. versionchanged:: 4.1
            Added ``comment`` parameter.
         .. versionchanged:: 3.11
@@ -2110,7 +2217,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         .. seealso:: The MongoDB documentation on `indexes <https://dochub.mongodb.org/core/indexes>`_.
 
-        .. _wildcard index: https://docs.mongodb.com/master/core/index-wildcard/
+        .. _wildcard index: https://dochub.mongodb.org/core/index-wildcard/
         """
         cmd_options = {}
         if "maxTimeMS" in kwargs:
@@ -2122,25 +2229,21 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
     def drop_indexes(
         self,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
         """Drops all indexes on this collection.
 
-        Can be used on non-existant collections or collections with no indexes.
+        Can be used on non-existent collections or collections with no indexes.
         Raises OperationFailure on an error.
 
-        :Parameters:
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-            arguments
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): optional arguments to the createIndexes
+        :param kwargs: optional arguments to the createIndexes
             command (like maxTimeMS) can be passed as keyword arguments.
-
-
 
         .. note:: The :attr:`~pymongo.collection.Collection.write_concern` of
            this collection is automatically applied to this operation.
@@ -2152,22 +2255,22 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         .. versionchanged:: 3.4
            Apply this collection's write concern automatically to this operation
            when connected to MongoDB >= 3.4.
-
         """
         if comment is not None:
             kwargs["comment"] = comment
         self.drop_index("*", session=session, **kwargs)
 
+    @_csot.apply
     def drop_index(
         self,
         index_or_name: _IndexKeyHint,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
         """Drops the specified index on this collection.
 
-        Can be used on non-existant collections or collections with no
+        Can be used on non-existent collections or collections with no
         indexes.  Raises OperationFailure on an error (e.g. trying to
         drop an index that does not exist). `index_or_name`
         can be either an index name (as returned by `create_index`),
@@ -2181,13 +2284,12 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           passing the `name` parameter to :meth:`create_index`) the index
           **must** be dropped by name.
 
-        :Parameters:
-          - `index_or_name`: index (or name of index) to drop
-          - `session` (optional): a
+        :param index_or_name: index (or name of index) to drop
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): optional arguments to the createIndexes
+        :param kwargs: optional arguments to the createIndexes
             command (like maxTimeMS) can be passed as keyword arguments.
 
 
@@ -2212,13 +2314,13 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         if not isinstance(name, str):
             raise TypeError("index_or_name must be an instance of str or list")
 
-        cmd = SON([("dropIndexes", self.__name), ("index", name)])
+        cmd = {"dropIndexes": self.__name, "index": name}
         cmd.update(kwargs)
         if comment is not None:
             cmd["comment"] = comment
-        with self._socket_for_writes(session) as sock_info:
+        with self._conn_for_writes(session, operation=_Op.DROP_INDEXES) as conn:
             self._command(
-                sock_info,
+                conn,
                 cmd,
                 read_preference=ReadPreference.PRIMARY,
                 allowable_errors=["ns not found", 26],
@@ -2228,7 +2330,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
     def list_indexes(
         self,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
     ) -> CommandCursor[MutableMapping[str, Any]]:
         """Get a cursor over the index documents for this collection.
@@ -2238,14 +2340,12 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           ...
           SON([('v', 2), ('key', SON([('_id', 1)])), ('name', '_id_')])
 
-        :Parameters:
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
 
-        :Returns:
-          An instance of :class:`~pymongo.command_cursor.CommandCursor`.
+        :return: An instance of :class:`~pymongo.command_cursor.CommandCursor`.
 
         .. versionchanged:: 4.1
            Added ``comment`` parameter.
@@ -2256,21 +2356,27 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         .. versionadded:: 3.0
         """
         codec_options: CodecOptions = CodecOptions(SON)
-        coll = self.with_options(
-            codec_options=codec_options, read_preference=ReadPreference.PRIMARY
+        coll = cast(
+            Collection[MutableMapping[str, Any]],
+            self.with_options(codec_options=codec_options, read_preference=ReadPreference.PRIMARY),
         )
         read_pref = (session and session._txn_read_preference()) or ReadPreference.PRIMARY
         explicit_session = session is not None
 
-        def _cmd(session, server, sock_info, read_preference):
-            cmd = SON([("listIndexes", self.__name), ("cursor", {})])
+        def _cmd(
+            session: Optional[ClientSession],
+            _server: Server,
+            conn: Connection,
+            read_preference: _ServerMode,
+        ) -> CommandCursor[MutableMapping[str, Any]]:
+            cmd = {"listIndexes": self.__name, "cursor": {}}
             if comment is not None:
                 cmd["comment"] = comment
 
             try:
-                cursor = self._command(
-                    sock_info, cmd, read_preference, codec_options, session=session
-                )["cursor"]
+                cursor = self._command(conn, cmd, read_preference, codec_options, session=session)[
+                    "cursor"
+                ]
             except OperationFailure as exc:
                 # Ignore NamespaceNotFound errors to match the behavior
                 # of reading from *.system.indexes.
@@ -2280,20 +2386,22 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             cmd_cursor = CommandCursor(
                 coll,
                 cursor,
-                sock_info.address,
+                conn.address,
                 session=session,
                 explicit_session=explicit_session,
                 comment=cmd.get("comment"),
             )
-            cmd_cursor._maybe_pin_connection(sock_info)
+            cmd_cursor._maybe_pin_connection(conn)
             return cmd_cursor
 
         with self.__database.client._tmp_session(session, False) as s:
-            return self.__database.client._retryable_read(_cmd, read_pref, s)
+            return self.__database.client._retryable_read(
+                _cmd, read_pref, s, operation=_Op.LIST_INDEXES
+            )
 
     def index_information(
         self,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
     ) -> MutableMapping[str, Any]:
         """Get information on this collection's indexes.
@@ -2314,10 +2422,9 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         {'_id_': {'key': [('_id', 1)]},
          'x_1': {'unique': True, 'key': [('x', 1)]}}
 
-        :Parameters:
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
 
         .. versionchanged:: 4.1
@@ -2330,13 +2437,207 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         info = {}
         for index in cursor:
             index["key"] = list(index["key"].items())
-            index = dict(index)
+            index = dict(index)  # noqa: PLW2901
             info[index.pop("name")] = index
         return info
 
+    def list_search_indexes(
+        self,
+        name: Optional[str] = None,
+        session: Optional[ClientSession] = None,
+        comment: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> CommandCursor[Mapping[str, Any]]:
+        """Return a cursor over search indexes for the current collection.
+
+        :param name: If given, the name of the index to search
+            for.  Only indexes with matching index names will be returned.
+            If not given, all search indexes for the current collection
+            will be returned.
+        :param session: a :class:`~pymongo.client_session.ClientSession`.
+        :param comment: A user-provided comment to attach to this
+            command.
+
+        :return: A :class:`~pymongo.command_cursor.CommandCursor` over the result
+          set.
+
+        .. note:: requires a MongoDB server version 7.0+ Atlas cluster.
+
+        .. versionadded:: 4.5
+        """
+        if name is None:
+            pipeline: _Pipeline = [{"$listSearchIndexes": {}}]
+        else:
+            pipeline = [{"$listSearchIndexes": {"name": name}}]
+
+        coll = self.with_options(
+            codec_options=DEFAULT_CODEC_OPTIONS, read_preference=ReadPreference.PRIMARY
+        )
+        cmd = _CollectionAggregationCommand(
+            coll,
+            CommandCursor,
+            pipeline,
+            kwargs,
+            explicit_session=session is not None,
+            user_fields={"cursor": {"firstBatch": 1}},
+        )
+
+        return self.__database.client._retryable_read(
+            cmd.get_cursor,
+            cmd.get_read_preference(session),  # type: ignore[arg-type]
+            session,
+            retryable=not cmd._performs_write,
+            operation=_Op.LIST_SEARCH_INDEX,
+        )
+
+    def create_search_index(
+        self,
+        model: Union[Mapping[str, Any], SearchIndexModel],
+        session: Optional[ClientSession] = None,
+        comment: Any = None,
+        **kwargs: Any,
+    ) -> str:
+        """Create a single search index for the current collection.
+
+        :param model: The model for the new search index.
+            It can be given as a :class:`~pymongo.operations.SearchIndexModel`
+            instance or a dictionary with a model "definition"  and optional
+            "name".
+        :param session: a
+            :class:`~pymongo.client_session.ClientSession`.
+        :param comment: A user-provided comment to attach to this
+            command.
+        :param kwargs: optional arguments to the createSearchIndexes
+            command (like maxTimeMS) can be passed as keyword arguments.
+
+        :return: The name of the new search index.
+
+        .. note:: requires a MongoDB server version 7.0+ Atlas cluster.
+
+        .. versionadded:: 4.5
+        """
+        if not isinstance(model, SearchIndexModel):
+            model = SearchIndexModel(model["definition"], model.get("name"))
+        return self.create_search_indexes([model], session, comment, **kwargs)[0]
+
+    def create_search_indexes(
+        self,
+        models: list[SearchIndexModel],
+        session: Optional[ClientSession] = None,
+        comment: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> list[str]:
+        """Create multiple search indexes for the current collection.
+
+        :param models: A list of :class:`~pymongo.operations.SearchIndexModel` instances.
+        :param session: a :class:`~pymongo.client_session.ClientSession`.
+        :param comment: A user-provided comment to attach to this
+            command.
+        :param kwargs: optional arguments to the createSearchIndexes
+            command (like maxTimeMS) can be passed as keyword arguments.
+
+        :return: A list of the newly created search index names.
+
+        .. note:: requires a MongoDB server version 7.0+ Atlas cluster.
+
+        .. versionadded:: 4.5
+        """
+        if comment is not None:
+            kwargs["comment"] = comment
+
+        def gen_indexes() -> Iterator[Mapping[str, Any]]:
+            for index in models:
+                if not isinstance(index, SearchIndexModel):
+                    raise TypeError(
+                        f"{index!r} is not an instance of pymongo.operations.SearchIndexModel"
+                    )
+                yield index.document
+
+        cmd = {"createSearchIndexes": self.name, "indexes": list(gen_indexes())}
+        cmd.update(kwargs)
+
+        with self._conn_for_writes(session, operation=_Op.CREATE_SEARCH_INDEXES) as conn:
+            resp = self._command(
+                conn,
+                cmd,
+                read_preference=ReadPreference.PRIMARY,
+                codec_options=_UNICODE_REPLACE_CODEC_OPTIONS,
+            )
+            return [index["name"] for index in resp["indexesCreated"]]
+
+    def drop_search_index(
+        self,
+        name: str,
+        session: Optional[ClientSession] = None,
+        comment: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Delete a search index by index name.
+
+        :param name: The name of the search index to be deleted.
+        :param session: a
+            :class:`~pymongo.client_session.ClientSession`.
+        :param comment: A user-provided comment to attach to this
+            command.
+        :param kwargs: optional arguments to the dropSearchIndexes
+            command (like maxTimeMS) can be passed as keyword arguments.
+
+        .. note:: requires a MongoDB server version 7.0+ Atlas cluster.
+
+        .. versionadded:: 4.5
+        """
+        cmd = {"dropSearchIndex": self.__name, "name": name}
+        cmd.update(kwargs)
+        if comment is not None:
+            cmd["comment"] = comment
+        with self._conn_for_writes(session, operation=_Op.DROP_SEARCH_INDEXES) as conn:
+            self._command(
+                conn,
+                cmd,
+                read_preference=ReadPreference.PRIMARY,
+                allowable_errors=["ns not found", 26],
+                codec_options=_UNICODE_REPLACE_CODEC_OPTIONS,
+            )
+
+    def update_search_index(
+        self,
+        name: str,
+        definition: Mapping[str, Any],
+        session: Optional[ClientSession] = None,
+        comment: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Update a search index by replacing the existing index definition with the provided definition.
+
+        :param name: The name of the search index to be updated.
+        :param definition: The new search index definition.
+        :param session: a
+            :class:`~pymongo.client_session.ClientSession`.
+        :param comment: A user-provided comment to attach to this
+            command.
+        :param kwargs: optional arguments to the updateSearchIndexes
+            command (like maxTimeMS) can be passed as keyword arguments.
+
+        .. note:: requires a MongoDB server version 7.0+ Atlas cluster.
+
+        .. versionadded:: 4.5
+        """
+        cmd = {"updateSearchIndex": self.__name, "name": name, "definition": definition}
+        cmd.update(kwargs)
+        if comment is not None:
+            cmd["comment"] = comment
+        with self._conn_for_writes(session, operation=_Op.UPDATE_SEARCH_INDEX) as conn:
+            self._command(
+                conn,
+                cmd,
+                read_preference=ReadPreference.PRIMARY,
+                allowable_errors=["ns not found", 26],
+                codec_options=_UNICODE_REPLACE_CODEC_OPTIONS,
+            )
+
     def options(
         self,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
     ) -> MutableMapping[str, Any]:
         """Get the options set on this collection.
@@ -2346,10 +2647,9 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         information on the possible options. Returns an empty
         dictionary if the collection has not been created yet.
 
-        :Parameters:
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
 
         .. versionchanged:: 3.6
@@ -2381,17 +2681,18 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         return options
 
+    @_csot.apply
     def _aggregate(
         self,
-        aggregation_command,
-        pipeline,
-        cursor_class,
-        session,
-        explicit_session,
-        let=None,
-        comment=None,
-        **kwargs,
-    ):
+        aggregation_command: Type[_AggregationCommand],
+        pipeline: _Pipeline,
+        cursor_class: Type[CommandCursor],
+        session: Optional[ClientSession],
+        explicit_session: bool,
+        let: Optional[Mapping[str, Any]] = None,
+        comment: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> CommandCursor[_DocumentType]:
         if comment is not None:
             kwargs["comment"] = comment
         cmd = aggregation_command(
@@ -2406,15 +2707,16 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         return self.__database.client._retryable_read(
             cmd.get_cursor,
-            cmd.get_read_preference(session),
+            cmd.get_read_preference(session),  # type: ignore[arg-type]
             session,
             retryable=not cmd._performs_write,
+            operation=_Op.AGGREGATE,
         )
 
     def aggregate(
         self,
         pipeline: _Pipeline,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         let: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
@@ -2428,17 +2730,24 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         :attr:`~pymongo.read_preferences.ReadPreference.PRIMARY` is used.
 
         .. note:: This method does not support the 'explain' option. Please
-           use :meth:`~pymongo.database.Database.command` instead. An
-           example is included in the :ref:`aggregate-examples` documentation.
+           use `PyMongoExplain <https://pypi.org/project/pymongoexplain/>`_
+           instead. An example is included in the :ref:`aggregate-examples`
+           documentation.
 
         .. note:: The :attr:`~pymongo.collection.Collection.write_concern` of
            this collection is automatically applied to this operation.
 
-        :Parameters:
-          - `pipeline`: a list of aggregation pipeline stages
-          - `session` (optional): a
+        :param pipeline: a list of aggregation pipeline stages
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `**kwargs` (optional): extra `aggregate command`_ parameters.
+        :param let: A dict of parameter names and values. Values must be
+            constant or closed expressions that do not reference document
+            fields. Parameters can then be accessed as variables in an
+            aggregate expression context (e.g. ``"$$var"``). This option is
+            only supported on MongoDB >= 5.0.
+        :param comment: A user-provided comment to attach to this
+            command.
+        :param kwargs: extra `aggregate command`_ parameters.
 
         All optional `aggregate command`_ parameters should be passed as
         keyword arguments to this method. Valid options include, but are not
@@ -2454,17 +2763,9 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             returning aggregate results using a cursor.
           - `collation` (optional): An instance of
             :class:`~pymongo.collation.Collation`.
-          - `let` (dict): A dict of parameter names and values. Values must be
-            constant or closed expressions that do not reference document
-            fields. Parameters can then be accessed as variables in an
-            aggregate expression context (e.g. ``"$$var"``). This option is
-            only supported on MongoDB >= 5.0.
-          - `comment` (optional): A user-provided comment to attach to this
-            command.
 
 
-        :Returns:
-          A :class:`~pymongo.command_cursor.CommandCursor` over the result
+        :return: A :class:`~pymongo.command_cursor.CommandCursor` over the result
           set.
 
         .. versionchanged:: 4.1
@@ -2493,9 +2794,8 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         .. seealso:: :doc:`/examples/aggregation`
 
         .. _aggregate command:
-            https://docs.mongodb.com/manual/reference/command/aggregate
+            https://mongodb.com/docs/manual/reference/command/aggregate
         """
-
         with self.__database.client._tmp_session(session, close=False) as s:
             return self._aggregate(
                 _CollectionAggregationCommand,
@@ -2511,7 +2811,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
     def aggregate_raw_batches(
         self,
         pipeline: _Pipeline,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
     ) -> RawBatchCursor[_DocumentType]:
@@ -2544,13 +2844,16 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         if comment is not None:
             kwargs["comment"] = comment
         with self.__database.client._tmp_session(session, close=False) as s:
-            return self._aggregate(
-                _CollectionRawAggregationCommand,
-                pipeline,
-                RawBatchCommandCursor,
-                session=s,
-                explicit_session=session is not None,
-                **kwargs,
+            return cast(
+                RawBatchCursor[_DocumentType],
+                self._aggregate(
+                    _CollectionRawAggregationCommand,
+                    pipeline,
+                    RawBatchCommandCursor,
+                    session=s,
+                    explicit_session=session is not None,
+                    **kwargs,
+                ),
             )
 
     def watch(
@@ -2562,9 +2865,11 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         batch_size: Optional[int] = None,
         collation: Optional[_CollationIn] = None,
         start_at_operation_time: Optional[Timestamp] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         start_after: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
+        full_document_before_change: Optional[str] = None,
+        show_expanded_events: Optional[bool] = None,
     ) -> CollectionChangeStream[_DocumentType]:
         """Watch changes on this collection.
 
@@ -2591,14 +2896,13 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         .. code-block:: python
 
             try:
-                with db.collection.watch(
-                        [{'$match': {'operationType': 'insert'}}]) as stream:
+                with db.collection.watch([{"$match": {"operationType": "insert"}}]) as stream:
                     for insert_change in stream:
                         print(insert_change)
             except pymongo.errors.PyMongoError:
                 # The ChangeStream encountered an unrecoverable error or the
                 # resume attempt failed to recreate the cursor.
-                logging.error('...')
+                logging.error("...")
 
         For a precise description of the resume process see the
         `change streams specification`_.
@@ -2612,43 +2916,51 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             ``ReadConcern("majority")`` in order to use the ``$changeStream``
             stage.
 
-        :Parameters:
-          - `pipeline` (optional): A list of aggregation pipeline stages to
+        :param pipeline: A list of aggregation pipeline stages to
             append to an initial ``$changeStream`` stage. Not all
             pipeline stages are valid after a ``$changeStream`` stage, see the
             MongoDB documentation on change streams for the supported stages.
-          - `full_document` (optional): The fullDocument to pass as an option
-            to the ``$changeStream`` stage. Allowed values: 'updateLookup'.
-            When set to 'updateLookup', the change notification for partial
-            updates will include both a delta describing the changes to the
-            document, as well as a copy of the entire document that was
-            changed from some time after the change occurred.
-          - `resume_after` (optional): A resume token. If provided, the
+        :param full_document: The fullDocument to pass as an option
+            to the ``$changeStream`` stage. Allowed values: 'updateLookup',
+            'whenAvailable', 'required'. When set to 'updateLookup', the
+            change notification for partial updates will include both a delta
+            describing the changes to the document, as well as a copy of the
+            entire document that was changed from some time after the change
+            occurred.
+        :param full_document_before_change: Allowed values: 'whenAvailable'
+            and 'required'. Change events may now result in a
+            'fullDocumentBeforeChange' response field.
+        :param resume_after: A resume token. If provided, the
             change stream will start returning changes that occur directly
             after the operation specified in the resume token. A resume token
             is the _id value of a change document.
-          - `max_await_time_ms` (optional): The maximum time in milliseconds
+        :param max_await_time_ms: The maximum time in milliseconds
             for the server to wait for changes before responding to a getMore
             operation.
-          - `batch_size` (optional): The maximum number of documents to return
+        :param batch_size: The maximum number of documents to return
             per batch.
-          - `collation` (optional): The :class:`~pymongo.collation.Collation`
+        :param collation: The :class:`~pymongo.collation.Collation`
             to use for the aggregation.
-          - `start_at_operation_time` (optional): If provided, the resulting
+        :param start_at_operation_time: If provided, the resulting
             change stream will only return changes that occurred at or after
             the specified :class:`~bson.timestamp.Timestamp`. Requires
             MongoDB >= 4.0.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `start_after` (optional): The same as `resume_after` except that
+        :param start_after: The same as `resume_after` except that
             `start_after` can resume notifications after an invalidate event.
             This option and `resume_after` are mutually exclusive.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
+        :param show_expanded_events: Include expanded events such as DDL events like `dropIndexes`.
 
-        :Returns:
-          A :class:`~pymongo.change_stream.CollectionChangeStream` cursor.
+        :return: A :class:`~pymongo.change_stream.CollectionChangeStream` cursor.
 
+        .. versionchanged:: 4.3
+           Added `show_expanded_events` parameter.
+
+        .. versionchanged:: 4.2
+           Added ``full_document_before_change`` parameter.
 
         .. versionchanged:: 4.1
            Added ``comment`` parameter.
@@ -2661,10 +2973,10 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         .. versionadded:: 3.6
 
-        .. seealso:: The MongoDB documentation on `changeStreams <https://docs.mongodb.com/manual/changeStreams/>`_.
+        .. seealso:: The MongoDB documentation on `changeStreams <https://mongodb.com/docs/manual/changeStreams/>`_.
 
         .. _change streams specification:
-            https://github.com/mongodb/specifications/blob/master/source/change-streams/change-streams.rst
+            https://github.com/mongodb/specifications/blob/master/source/change-streams/change-streams.md
         """
         return CollectionChangeStream(
             self,
@@ -2677,13 +2989,16 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             start_at_operation_time,
             session,
             start_after,
-            comment=comment,
+            comment,
+            full_document_before_change,
+            show_expanded_events,
         )
 
+    @_csot.apply
     def rename(
         self,
         new_name: str,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
     ) -> MutableMapping[str, Any]:
@@ -2691,17 +3006,16 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         If operating in auth mode, client must be authorized as an
         admin to perform this operation. Raises :class:`TypeError` if
-        `new_name` is not an instance of :class:`basestring`
-        (:class:`str` in python 3). Raises :class:`~pymongo.errors.InvalidName`
+        `new_name` is not an instance of :class:`str`.
+        Raises :class:`~pymongo.errors.InvalidName`
         if `new_name` is not a valid collection name.
 
-        :Parameters:
-          - `new_name`: new name for this collection
-          - `session` (optional): a
+        :param new_name: new name for this collection
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): additional arguments to the rename command
+        :param kwargs: additional arguments to the rename command
             may be passed as keyword arguments to this helper method
             (i.e. ``dropTarget=True``)
 
@@ -2722,20 +3036,20 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         if not new_name or ".." in new_name:
             raise InvalidName("collection names cannot be empty")
         if new_name[0] == "." or new_name[-1] == ".":
-            raise InvalidName("collecion names must not start or end with '.'")
+            raise InvalidName("collection names must not start or end with '.'")
         if "$" in new_name and not new_name.startswith("oplog.$main"):
             raise InvalidName("collection names must not contain '$'")
 
-        new_name = "%s.%s" % (self.__database.name, new_name)
-        cmd = SON([("renameCollection", self.__full_name), ("to", new_name)])
+        new_name = f"{self.__database.name}.{new_name}"
+        cmd = {"renameCollection": self.__full_name, "to": new_name}
         cmd.update(kwargs)
         if comment is not None:
             cmd["comment"] = comment
         write_concern = self._write_concern_for_cmd(cmd, session)
 
-        with self._socket_for_writes(session) as sock_info:
+        with self._conn_for_writes(session, operation=_Op.RENAME) as conn:
             with self.__database.client._tmp_session(session) as s:
-                return sock_info.command(
+                return conn.command(
                     "admin",
                     cmd,
                     write_concern=write_concern,
@@ -2748,15 +3062,15 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         self,
         key: str,
         filter: Optional[Mapping[str, Any]] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
-    ) -> List:
+    ) -> list:
         """Get a list of distinct values for `key` among all documents
         in this collection.
 
         Raises :class:`TypeError` if `key` is not an instance of
-        :class:`basestring` (:class:`str` in python 3).
+        :class:`str`.
 
         All optional distinct parameters should be passed as keyword arguments
         to this method. Valid options include:
@@ -2769,16 +3083,15 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         The :meth:`distinct` method obeys the :attr:`read_preference` of
         this :class:`Collection`.
 
-        :Parameters:
-          - `key`: name of the field for which we want to get the distinct
+        :param key: name of the field for which we want to get the distinct
             values
-          - `filter` (optional): A query document that specifies the documents
+        :param filter: A query document that specifies the documents
             from which to retrieve the distinct values.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): See list of options above.
+        :param kwargs: See list of options above.
 
         .. versionchanged:: 3.6
            Added ``session`` parameter.
@@ -2789,7 +3102,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         """
         if not isinstance(key, str):
             raise TypeError("key must be an instance of str")
-        cmd = SON([("distinct", self.__name), ("key", key)])
+        cmd = {"distinct": self.__name, "key": key}
         if filter is not None:
             if "query" in kwargs:
                 raise ConfigurationError("can't pass both filter and query")
@@ -2799,9 +3112,14 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         if comment is not None:
             cmd["comment"] = comment
 
-        def _cmd(session, server, sock_info, read_preference):
+        def _cmd(
+            session: Optional[ClientSession],
+            _server: Server,
+            conn: Connection,
+            read_preference: Optional[_ServerMode],
+        ) -> list:
             return self._command(
-                sock_info,
+                conn,
                 cmd,
                 read_preference=read_preference,
                 read_concern=self.read_concern,
@@ -2810,9 +3128,11 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
                 user_fields={"values": 1},
             )["values"]
 
-        return self._retryable_non_cursor_read(_cmd, session)
+        return self._retryable_non_cursor_read(_cmd, session, operation=_Op.DISTINCT)
 
-    def _write_concern_for_cmd(self, cmd, session):
+    def _write_concern_for_cmd(
+        self, cmd: Mapping[str, Any], session: Optional[ClientSession]
+    ) -> WriteConcern:
         raw_wc = cmd.get("writeConcern")
         if raw_wc is not None:
             return WriteConcern(**raw_wc)
@@ -2821,26 +3141,25 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
     def __find_and_modify(
         self,
-        filter,
-        projection,
-        sort,
-        upsert=None,
-        return_document=ReturnDocument.BEFORE,
-        array_filters=None,
-        hint=None,
-        session=None,
-        let=None,
-        **kwargs,
-    ):
+        filter: Mapping[str, Any],
+        projection: Optional[Union[Mapping[str, Any], Iterable[str]]],
+        sort: Optional[_IndexList],
+        upsert: Optional[bool] = None,
+        return_document: bool = ReturnDocument.BEFORE,
+        array_filters: Optional[Sequence[Mapping[str, Any]]] = None,
+        hint: Optional[_IndexKeyHint] = None,
+        session: Optional[ClientSession] = None,
+        let: Optional[Mapping] = None,
+        **kwargs: Any,
+    ) -> Any:
         """Internal findAndModify helper."""
-
         common.validate_is_mapping("filter", filter)
         if not isinstance(return_document, bool):
             raise ValueError(
                 "return_document must be ReturnDocument.BEFORE or ReturnDocument.AFTER"
             )
         collation = validate_collation_or_none(kwargs.pop("collation", None))
-        cmd = SON([("findAndModify", self.__name), ("query", filter), ("new", return_document)])
+        cmd = {"findAndModify": self.__name, "query": filter, "new": return_document}
         if let is not None:
             common.validate_is_mapping("let", let)
             cmd["let"] = let
@@ -2850,7 +3169,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         if sort is not None:
             cmd["sort"] = helpers._index_document(sort)
         if upsert is not None:
-            common.validate_boolean("upsert", upsert)
+            validate_boolean("upsert", upsert)
             cmd["upsert"] = upsert
         if hint is not None:
             if not isinstance(hint, str):
@@ -2858,7 +3177,9 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         write_concern = self._write_concern_for_cmd(cmd, session)
 
-        def _find_and_modify(session, sock_info, retryable_write):
+        def _find_and_modify(
+            session: Optional[ClientSession], conn: Connection, retryable_write: bool
+        ) -> Any:
             acknowledged = write_concern.acknowledged
             if array_filters is not None:
                 if not acknowledged:
@@ -2867,19 +3188,17 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
                     )
                 cmd["arrayFilters"] = list(array_filters)
             if hint is not None:
-                if sock_info.max_wire_version < 8:
+                if conn.max_wire_version < 8:
                     raise ConfigurationError(
                         "Must be connected to MongoDB 4.2+ to use hint on find and modify commands."
                     )
-                elif not acknowledged and sock_info.max_wire_version < 9:
+                elif not acknowledged and conn.max_wire_version < 9:
                     raise ConfigurationError(
                         "Must be connected to MongoDB 4.4+ to use hint on unacknowledged find and modify commands."
                     )
                 cmd["hint"] = hint
-            if not write_concern.is_server_default:
-                cmd["writeConcern"] = write_concern.document
             out = self._command(
-                sock_info,
+                conn,
                 cmd,
                 read_preference=ReadPreference.PRIMARY,
                 write_concern=write_concern,
@@ -2893,7 +3212,10 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             return out.get("value")
 
         return self.__database.client._retryable_write(
-            write_concern.acknowledged, _find_and_modify, session
+            write_concern.acknowledged,
+            _find_and_modify,
+            session,
+            operation=_Op.FIND_AND_MODIFY,
         )
 
     def find_one_and_delete(
@@ -2902,7 +3224,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         projection: Optional[Union[Mapping[str, Any], Iterable[str]]] = None,
         sort: Optional[_IndexList] = None,
         hint: Optional[_IndexKeyHint] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         let: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
@@ -2933,30 +3255,29 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           >>> db.test.find_one_and_delete({'x': 1}, projection={'_id': False})
           {'x': 1}
 
-        :Parameters:
-          - `filter`: A query that matches the document to delete.
-          - `projection` (optional): a list of field names that should be
+        :param filter: A query that matches the document to delete.
+        :param projection: a list of field names that should be
             returned in the result document or a mapping specifying the fields
             to include or exclude. If `projection` is a list "_id" will
             always be returned. Use a mapping to exclude fields from
             the result (e.g. projection={'_id': False}).
-          - `sort` (optional): a list of (key, direction) pairs
+        :param sort: a list of (key, direction) pairs
             specifying the sort order for the query. If multiple documents
             match the query, they are sorted and the first is deleted.
-          - `hint` (optional): An index to use to support the query predicate
+        :param hint: An index to use to support the query predicate
             specified either by its string name, or in the same format as
             passed to :meth:`~pymongo.collection.Collection.create_index`
             (e.g. ``[('field', ASCENDING)]``). This option is only supported
             on MongoDB 4.4 and above.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `let` (optional): Map of parameter names and values. Values must be
+        :param let: Map of parameter names and values. Values must be
             constant or closed expressions that do not reference document
             fields. Parameters can then be accessed as variables in an
             aggregate expression context (e.g. "$$var").
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): additional command arguments can be passed
+        :param kwargs: additional command arguments can be passed
             as keyword arguments (for example maxTimeMS can be used with
             recent server versions).
 
@@ -2995,7 +3316,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         upsert: bool = False,
         return_document: bool = ReturnDocument.BEFORE,
         hint: Optional[_IndexKeyHint] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         let: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
@@ -3022,40 +3343,39 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           {'x': 1, '_id': 1}
           {'x': 1, '_id': 2}
 
-        :Parameters:
-          - `filter`: A query that matches the document to replace.
-          - `replacement`: The replacement document.
-          - `projection` (optional): A list of field names that should be
+        :param filter: A query that matches the document to replace.
+        :param replacement: The replacement document.
+        :param projection: A list of field names that should be
             returned in the result document or a mapping specifying the fields
             to include or exclude. If `projection` is a list "_id" will
             always be returned. Use a mapping to exclude fields from
             the result (e.g. projection={'_id': False}).
-          - `sort` (optional): a list of (key, direction) pairs
+        :param sort: a list of (key, direction) pairs
             specifying the sort order for the query. If multiple documents
             match the query, they are sorted and the first is replaced.
-          - `upsert` (optional): When ``True``, inserts a new document if no
+        :param upsert: When ``True``, inserts a new document if no
             document matches the query. Defaults to ``False``.
-          - `return_document`: If
+        :param return_document: If
             :attr:`ReturnDocument.BEFORE` (the default),
             returns the original document before it was replaced, or ``None``
             if no document matches. If
             :attr:`ReturnDocument.AFTER`, returns the replaced
             or inserted document.
-          - `hint` (optional): An index to use to support the query
+        :param hint: An index to use to support the query
             predicate specified either by its string name, or in the same
             format as passed to
             :meth:`~pymongo.collection.Collection.create_index` (e.g.
             ``[('field', ASCENDING)]``). This option is only supported on
             MongoDB 4.4 and above.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `let` (optional): Map of parameter names and values. Values must be
+        :param let: Map of parameter names and values. Values must be
             constant or closed expressions that do not reference document
             fields. Parameters can then be accessed as variables in an
             aggregate expression context (e.g. "$$var").
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): additional command arguments can be passed
+        :param kwargs: additional command arguments can be passed
             as keyword arguments (for example maxTimeMS can be used with
             recent server versions).
 
@@ -3104,7 +3424,7 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         return_document: bool = ReturnDocument.BEFORE,
         array_filters: Optional[Sequence[Mapping[str, Any]]] = None,
         hint: Optional[_IndexKeyHint] = None,
-        session: Optional["ClientSession"] = None,
+        session: Optional[ClientSession] = None,
         let: Optional[Mapping[str, Any]] = None,
         comment: Optional[Any] = None,
         **kwargs: Any,
@@ -3169,41 +3489,40 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
           ...     sort=[('_id', pymongo.DESCENDING)])
           {'_id': 701, 'done': True, 'result': {'count': 17}}
 
-        :Parameters:
-          - `filter`: A query that matches the document to update.
-          - `update`: The update operations to apply.
-          - `projection` (optional): A list of field names that should be
+        :param filter: A query that matches the document to update.
+        :param update: The update operations to apply.
+        :param projection: A list of field names that should be
             returned in the result document or a mapping specifying the fields
             to include or exclude. If `projection` is a list "_id" will
             always be returned. Use a dict to exclude fields from
             the result (e.g. projection={'_id': False}).
-          - `sort` (optional): a list of (key, direction) pairs
+        :param sort: a list of (key, direction) pairs
             specifying the sort order for the query. If multiple documents
             match the query, they are sorted and the first is updated.
-          - `upsert` (optional): When ``True``, inserts a new document if no
+        :param upsert: When ``True``, inserts a new document if no
             document matches the query. Defaults to ``False``.
-          - `return_document`: If
+        :param return_document: If
             :attr:`ReturnDocument.BEFORE` (the default),
             returns the original document before it was updated. If
             :attr:`ReturnDocument.AFTER`, returns the updated
             or inserted document.
-          - `array_filters` (optional): A list of filters specifying which
+        :param array_filters: A list of filters specifying which
             array elements an update should apply.
-          - `hint` (optional): An index to use to support the query
+        :param hint: An index to use to support the query
             predicate specified either by its string name, or in the same
             format as passed to
             :meth:`~pymongo.collection.Collection.create_index` (e.g.
             ``[('field', ASCENDING)]``). This option is only supported on
             MongoDB 4.4 and above.
-          - `session` (optional): a
+        :param session: a
             :class:`~pymongo.client_session.ClientSession`.
-          - `let` (optional): Map of parameter names and values. Values must be
+        :param let: Map of parameter names and values. Values must be
             constant or closed expressions that do not reference document
             fields. Parameters can then be accessed as variables in an
             aggregate expression context (e.g. "$$var").
-          - `comment` (optional): A user-provided comment to attach to this
+        :param comment: A user-provided comment to attach to this
             command.
-          - `**kwargs` (optional): additional command arguments can be passed
+        :param kwargs: additional command arguments can be passed
             as keyword arguments (for example maxTimeMS can be used with
             recent server versions).
 

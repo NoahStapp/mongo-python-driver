@@ -13,10 +13,13 @@
 # limitations under the License.
 
 """Utilities for testing Server Selection and Max Staleness."""
+from __future__ import annotations
 
 import datetime
 import os
 import sys
+
+from pymongo.operations import _Op
 
 sys.path[0:0] = [""]
 
@@ -44,7 +47,7 @@ def get_addresses(server_list):
 
 
 def make_last_write_date(server):
-    epoch = datetime.datetime.utcfromtimestamp(0)
+    epoch = datetime.datetime.fromtimestamp(0, tz=datetime.timezone.utc).replace(tzinfo=None)
     millis = server.get("lastWrite", {}).get("lastWriteDate")
     if millis:
         diff = ((millis % 1000) + 1000) % 1000
@@ -109,9 +112,11 @@ def get_topology_type_name(scenario_def):
 
 
 def get_topology_settings_dict(**kwargs):
-    settings = dict(
-        monitor_class=DummyMonitor, heartbeat_frequency=HEARTBEAT_FREQUENCY, pool_class=MockPool
-    )
+    settings = {
+        "monitor_class": DummyMonitor,
+        "heartbeat_frequency": HEARTBEAT_FREQUENCY,
+        "pool_class": MockPool,
+    }
     settings.update(kwargs)
     return settings
 
@@ -175,7 +180,7 @@ def create_test(scenario_def):
                 with self.assertRaises((ConfigurationError, ValueError)):
                     # Error can be raised when making Read Pref or selecting.
                     pref = parse_read_preference(pref_def)
-                    top_latency.select_server(pref)
+                    top_latency.select_server(pref, _Op.TEST)
                 return
 
             pref = parse_read_preference(pref_def)
@@ -183,18 +188,18 @@ def create_test(scenario_def):
         # Select servers.
         if not scenario_def.get("suitable_servers"):
             with self.assertRaises(AutoReconnect):
-                top_suitable.select_server(pref, server_selection_timeout=0)
+                top_suitable.select_server(pref, _Op.TEST, server_selection_timeout=0)
 
             return
 
         if not scenario_def["in_latency_window"]:
             with self.assertRaises(AutoReconnect):
-                top_latency.select_server(pref, server_selection_timeout=0)
+                top_latency.select_server(pref, _Op.TEST, server_selection_timeout=0)
 
             return
 
-        actual_suitable_s = top_suitable.select_servers(pref, server_selection_timeout=0)
-        actual_latency_s = top_latency.select_servers(pref, server_selection_timeout=0)
+        actual_suitable_s = top_suitable.select_servers(pref, _Op.TEST, server_selection_timeout=0)
+        actual_latency_s = top_latency.select_servers(pref, _Op.TEST, server_selection_timeout=0)
 
         expected_suitable_servers = {}
         for server in scenario_def["suitable_servers"]:
@@ -255,7 +260,7 @@ def create_selection_tests(test_dir):
 
             # Construct test from scenario.
             new_test = create_test(scenario_def)
-            test_name = "test_%s_%s" % (dirname, os.path.splitext(filename)[0])
+            test_name = f"test_{dirname}_{os.path.splitext(filename)[0]}"
 
             new_test.__name__ = test_name
             setattr(TestAllScenarios, new_test.__name__, new_test)

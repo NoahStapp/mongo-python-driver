@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Authentication Tests."""
+from __future__ import annotations
 
 import os
 import sys
@@ -60,14 +61,14 @@ class AutoAuthenticateThread(threading.Thread):
     """Used in testing threaded authentication.
 
     This does collection.find_one() with a 1-second delay to ensure it must
-    check out and authenticate multiple sockets from the pool concurrently.
+    check out and authenticate multiple connections from the pool concurrently.
 
     :Parameters:
       `collection`: An auth-protected collection containing one document.
     """
 
     def __init__(self, collection):
-        super(AutoAuthenticateThread, self).__init__()
+        super().__init__()
         self.collection = collection
         self.success = False
 
@@ -89,10 +90,10 @@ class TestGSSAPI(unittest.TestCase):
         cls.service_realm_required = (
             GSSAPI_SERVICE_REALM is not None and GSSAPI_SERVICE_REALM not in GSSAPI_PRINCIPAL
         )
-        mech_properties = "SERVICE_NAME:%s" % (GSSAPI_SERVICE_NAME,)
-        mech_properties += ",CANONICALIZE_HOST_NAME:%s" % (GSSAPI_CANONICALIZE,)
+        mech_properties = f"SERVICE_NAME:{GSSAPI_SERVICE_NAME}"
+        mech_properties += f",CANONICALIZE_HOST_NAME:{GSSAPI_CANONICALIZE}"
         if GSSAPI_SERVICE_REALM is not None:
-            mech_properties += ",SERVICE_REALM:%s" % (GSSAPI_SERVICE_REALM,)
+            mech_properties += f",SERVICE_REALM:{GSSAPI_SERVICE_REALM}"
         cls.mech_properties = mech_properties
 
     def test_credentials_hashing(self):
@@ -111,8 +112,8 @@ class TestGSSAPI(unittest.TestCase):
             "GSSAPI", None, "user", "pass", {"authmechanismproperties": {"SERVICE_NAME": "B"}}, None
         )
 
-        self.assertEqual(1, len(set([creds1, creds2])))
-        self.assertEqual(3, len(set([creds0, creds1, creds2, creds3])))
+        self.assertEqual(1, len({creds1, creds2}))
+        self.assertEqual(3, len({creds0, creds1, creds2, creds3}))
 
     @ignore_deprecations
     def test_gssapi_simple(self):
@@ -160,7 +161,7 @@ class TestGSSAPI(unittest.TestCase):
         client[GSSAPI_DB].collection.find_one()
 
         # Log in using URI, with authMechanismProperties.
-        mech_uri = uri + "&authMechanismProperties=%s" % (self.mech_properties,)
+        mech_uri = uri + f"&authMechanismProperties={self.mech_properties}"
         client = MongoClient(mech_uri)
         client[GSSAPI_DB].collection.find_one()
 
@@ -179,7 +180,7 @@ class TestGSSAPI(unittest.TestCase):
 
                 client[GSSAPI_DB].list_collection_names()
 
-                uri = uri + "&replicaSet=%s" % (str(set_name),)
+                uri = uri + f"&replicaSet={set_name!s}"
                 client = MongoClient(uri)
                 client[GSSAPI_DB].list_collection_names()
 
@@ -196,7 +197,7 @@ class TestGSSAPI(unittest.TestCase):
 
             client[GSSAPI_DB].list_collection_names()
 
-            mech_uri = mech_uri + "&replicaSet=%s" % (str(set_name),)
+            mech_uri = mech_uri + f"&replicaSet={set_name!s}"
             client = MongoClient(mech_uri)
             client[GSSAPI_DB].list_collection_names()
 
@@ -217,7 +218,7 @@ class TestGSSAPI(unittest.TestCase):
 
         # Need one document in the collection. AutoAuthenticateThread does
         # collection.find_one with a 1-second delay, forcing it to check out
-        # multiple sockets from the pool concurrently, proving that
+        # multiple connections from the pool concurrently, proving that
         # auto-authentication works with GSSAPI.
         collection = db.test
         if not collection.count_documents({}):
@@ -268,7 +269,6 @@ class TestSASLPlain(unittest.TestCase):
             raise SkipTest("Must set SASL_HOST, SASL_USER, and SASL_PASS to test SASL")
 
     def test_sasl_plain(self):
-
         client = MongoClient(
             SASL_HOST,
             SASL_PORT,
@@ -336,12 +336,12 @@ class TestSASLPlain(unittest.TestCase):
 class TestSCRAMSHA1(IntegrationTest):
     @client_context.require_auth
     def setUp(self):
-        super(TestSCRAMSHA1, self).setUp()
+        super().setUp()
         client_context.create_user("pymongo_test", "user", "pass", roles=["userAdmin", "readWrite"])
 
     def tearDown(self):
         client_context.drop_user("pymongo_test", "user")
-        super(TestSCRAMSHA1, self).tearDown()
+        super().tearDown()
 
     def test_scram_sha1(self):
         host, port = client_context.host, client_context.port
@@ -368,16 +368,16 @@ class TestSCRAM(IntegrationTest):
     @client_context.require_auth
     @client_context.require_version_min(3, 7, 2)
     def setUp(self):
-        super(TestSCRAM, self).setUp()
+        super().setUp()
         self._SENSITIVE_COMMANDS = monitoring._SENSITIVE_COMMANDS
-        monitoring._SENSITIVE_COMMANDS = set([])
+        monitoring._SENSITIVE_COMMANDS = set()
         self.listener = AllowListEventListener("saslStart")
 
     def tearDown(self):
         monitoring._SENSITIVE_COMMANDS = self._SENSITIVE_COMMANDS
         client_context.client.testscram.command("dropAllUsersFromDatabase")
         client_context.client.drop_database("testscram")
-        super(TestSCRAM, self).tearDown()
+        super().tearDown()
 
     def test_scram_skip_empty_exchange(self):
         listener = AllowListEventListener("saslStart", "saslContinue")
@@ -392,7 +392,7 @@ class TestSCRAM(IntegrationTest):
 
         if client_context.version < (4, 4, -1):
             # Assert we sent the skipEmptyExchange option.
-            first_event = listener.results["started"][0]
+            first_event = listener.started_events[0]
             self.assertEqual(first_event.command_name, "saslStart")
             self.assertEqual(first_event.command["options"], {"skipEmptyExchange": True})
 
@@ -449,7 +449,7 @@ class TestSCRAM(IntegrationTest):
         )
         client.testscram.command("dbstats")
 
-        self.listener.results.clear()
+        self.listener.reset()
         client = rs_or_single_client_noauth(
             username="both", password="pwd", authSource="testscram", event_listeners=[self.listener]
         )
@@ -457,9 +457,9 @@ class TestSCRAM(IntegrationTest):
         if client_context.version.at_least(4, 4, -1):
             # Speculative authentication in 4.4+ sends saslStart with the
             # handshake.
-            self.assertEqual(self.listener.results["started"], [])
+            self.assertEqual(self.listener.started_events, [])
         else:
-            started = self.listener.results["started"][0]
+            started = self.listener.started_events[0]
             self.assertEqual(started.command.get("mechanism"), "SCRAM-SHA-256")
 
         # Step 3: verify auth failure conditions
@@ -581,7 +581,9 @@ class TestSCRAM(IntegrationTest):
         coll.insert_one({"_id": 1})
 
         # The first thread to call find() will authenticate
-        coll = rs_or_single_client().db.test
+        client = rs_or_single_client()
+        self.addCleanup(client.close)
+        coll = client.db.test
         threads = []
         for _ in range(4):
             threads.append(AutoAuthenticateThread(coll))
@@ -595,14 +597,14 @@ class TestSCRAM(IntegrationTest):
 class TestAuthURIOptions(IntegrationTest):
     @client_context.require_auth
     def setUp(self):
-        super(TestAuthURIOptions, self).setUp()
+        super().setUp()
         client_context.create_user("admin", "admin", "pass")
         client_context.create_user("pymongo_test", "user", "pass", ["userAdmin", "readWrite"])
 
     def tearDown(self):
         client_context.drop_user("pymongo_test", "user")
         client_context.drop_user("admin", "admin")
-        super(TestAuthURIOptions, self).tearDown()
+        super().tearDown()
 
     def test_uri_options(self):
         # Test default to admin

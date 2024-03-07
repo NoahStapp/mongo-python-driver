@@ -26,10 +26,13 @@ everything you need to know to use **PyMongo**.
   Using PyMongo with TLS / SSL.
 
 :doc:`examples/encryption`
-  Using PyMongo with client side encryption.
+  Using PyMongo with In-Use Encryption.
 
 :doc:`examples/type_hints`
   Using PyMongo with type hints.
+
+:doc:`examples/logging`
+  Using PyMongo's logging capabilities.
 
 :doc:`faq`
   Some questions that come up often.
@@ -53,6 +56,9 @@ everything you need to know to use **PyMongo**.
 
 :doc:`developer/index`
   Developer guide for contributors to PyMongo.
+
+:doc:`common-issues`
+  Common issues encountered when using PyMongo.
 
 Getting Help
 ------------
@@ -99,7 +105,8 @@ following command from the root directory of the **PyMongo** source:
 
 .. code-block:: bash
 
-  $ python setup.py doc
+  $ pip install tox
+  $ tox -m doc
 
 Indices and tables
 ------------------
@@ -124,3 +131,4 @@ Indices and tables
    python3
    migrate-to-pymongo4
    developer/index
+   common-issues

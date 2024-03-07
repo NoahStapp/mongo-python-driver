@@ -14,9 +14,10 @@
 
 """Test the keyword argument 'comment' in various helpers."""
 
+from __future__ import annotations
+
 import inspect
 import sys
-from typing import Any, Union
 
 sys.path[0:0] = [""]
 
@@ -28,7 +29,7 @@ from pymongo.command_cursor import CommandCursor
 from pymongo.operations import IndexModel
 
 
-class Empty(object):
+class Empty:
     def __getattr__(self, item):
         try:
             self.__dict__[item]
@@ -41,14 +42,18 @@ class Empty(object):
 
 class TestComment(IntegrationTest):
     def _test_ops(
-        self, helpers, already_supported, listener, db=Empty(), coll=Empty()  # noqa: B008
+        self,
+        helpers,
+        already_supported,
+        listener,
+        db=Empty(),  # noqa: B008
+        coll=Empty(),  # noqa: B008
     ):
-        results = listener.results
         for h, args in helpers:
             c = "testing comment with " + h.__name__
             with self.subTest("collection-" + h.__name__ + "-comment"):
                 for cc in [c, {"key": c}, ["any", 1]]:
-                    results.clear()
+                    listener.reset()
                     kwargs = {"comment": cc}
                     if h == coll.rename:
                         _ = db.get_collection("temp_temp_temp").drop()
@@ -70,21 +75,21 @@ class TestComment(IntegrationTest):
                         "signature of function %s" % (h.__name__),
                     )
                     self.assertEqual(
-                        inspect.signature(h).parameters["comment"].annotation, Union[Any, None]
+                        inspect.signature(h).parameters["comment"].annotation, "Optional[Any]"
                     )
                     if isinstance(maybe_cursor, CommandCursor):
                         maybe_cursor.close()
                     tested = False
                     # For some reason collection.list_indexes creates two commands and the first
                     # one doesn't contain 'comment'.
-                    for i in results["started"]:
+                    for i in listener.started_events:
                         if cc == i.command.get("comment", ""):
                             self.assertEqual(cc, i.command["comment"])
                             tested = True
                     self.assertTrue(tested)
                     if h not in [coll.aggregate_raw_batches]:
                         self.assertIn(
-                            "`comment` (optional):",
+                            ":param comment:",
                             h.__doc__,
                         )
                         if h not in already_supported:
@@ -98,7 +103,7 @@ class TestComment(IntegrationTest):
                                 h.__doc__,
                             )
 
-        results.clear()
+        listener.reset()
 
     @client_context.require_version_min(4, 7, -1)
     @client_context.require_replica_set

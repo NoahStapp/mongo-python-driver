@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test the client_session module."""
+from __future__ import annotations
 
 import copy
 import sys
@@ -47,20 +48,20 @@ from pymongo.read_concern import ReadConcern
 class SessionTestListener(EventListener):
     def started(self, event):
         if not event.command_name.startswith("sasl"):
-            super(SessionTestListener, self).started(event)
+            super().started(event)
 
     def succeeded(self, event):
         if not event.command_name.startswith("sasl"):
-            super(SessionTestListener, self).succeeded(event)
+            super().succeeded(event)
 
     def failed(self, event):
         if not event.command_name.startswith("sasl"):
-            super(SessionTestListener, self).failed(event)
+            super().failed(event)
 
     def first_command_started(self):
-        assert len(self.results["started"]) >= 1, "No command-started events"
+        assert len(self.started_events) >= 1, "No command-started events"
 
-        return self.results["started"][0]
+        return self.started_events[0]
 
 
 def session_ids(client):
@@ -74,7 +75,7 @@ class TestSession(IntegrationTest):
     @classmethod
     @client_context.require_sessions
     def setUpClass(cls):
-        super(TestSession, cls).setUpClass()
+        super().setUpClass()
         # Create a second client so we can make sure clients cannot share
         # sessions.
         cls.client2 = rs_or_single_client()
@@ -87,7 +88,7 @@ class TestSession(IntegrationTest):
     def tearDownClass(cls):
         monitoring._SENSITIVE_COMMANDS.update(cls.sensitive_commands)
         cls.client2.close()
-        super(TestSession, cls).tearDownClass()
+        super().tearDownClass()
 
     def setUp(self):
         self.listener = SessionTestListener()
@@ -97,44 +98,44 @@ class TestSession(IntegrationTest):
         )
         self.addCleanup(self.client.close)
         self.db = self.client.pymongo_test
-        self.initial_lsids = set(s["id"] for s in session_ids(self.client))
+        self.initial_lsids = {s["id"] for s in session_ids(self.client)}
 
     def tearDown(self):
         """All sessions used in the test must be returned to the pool."""
         self.client.drop_database("pymongo_test")
         used_lsids = self.initial_lsids.copy()
-        for event in self.session_checker_listener.results["started"]:
+        for event in self.session_checker_listener.started_events:
             if "lsid" in event.command:
                 used_lsids.add(event.command["lsid"]["id"])
 
-        current_lsids = set(s["id"] for s in session_ids(self.client))
+        current_lsids = {s["id"] for s in session_ids(self.client)}
         self.assertLessEqual(used_lsids, current_lsids)
 
     def _test_ops(self, client, *ops):
         listener = client.options.event_listeners[0]
         for f, args, kw in ops:
             with client.start_session() as s:
+                listener.reset()
+                s._materialize()
                 last_use = s._server_session.last_use
                 start = time.monotonic()
                 self.assertLessEqual(last_use, start)
-                listener.results.clear()
                 # In case "f" modifies its inputs.
                 args = copy.copy(args)
                 kw = copy.copy(kw)
                 kw["session"] = s
                 f(*args, **kw)
-                self.assertGreaterEqual(s._server_session.last_use, start)
-                self.assertGreaterEqual(len(listener.results["started"]), 1)
-                for event in listener.results["started"]:
+                self.assertGreaterEqual(len(listener.started_events), 1)
+                for event in listener.started_events:
                     self.assertTrue(
                         "lsid" in event.command,
-                        "%s sent no lsid with %s" % (f.__name__, event.command_name),
+                        f"{f.__name__} sent no lsid with {event.command_name}",
                     )
 
                     self.assertEqual(
                         s.session_id,
                         event.command["lsid"],
-                        "%s sent wrong lsid with %s" % (f.__name__, event.command_name),
+                        f"{f.__name__} sent wrong lsid with {event.command_name}",
                     )
 
                 self.assertFalse(s.has_ended)
@@ -156,14 +157,14 @@ class TestSession(IntegrationTest):
 
         # No explicit session.
         for f, args, kw in ops:
-            listener.results.clear()
+            listener.reset()
             f(*args, **kw)
-            self.assertGreaterEqual(len(listener.results["started"]), 1)
+            self.assertGreaterEqual(len(listener.started_events), 1)
             lsids = []
-            for event in listener.results["started"]:
+            for event in listener.started_events:
                 self.assertTrue(
                     "lsid" in event.command,
-                    "%s sent no lsid with %s" % (f.__name__, event.command_name),
+                    f"{f.__name__} sent no lsid with {event.command_name}",
                 )
                 lsids.append(event.command["lsid"])
 
@@ -174,7 +175,7 @@ class TestSession(IntegrationTest):
                     self.assertIn(
                         lsid,
                         session_ids(client),
-                        "%s did not return implicit session to pool" % (f.__name__,),
+                        f"{f.__name__} did not return implicit session to pool",
                     )
 
     def test_implicit_sessions_checkout(self):
@@ -198,13 +199,13 @@ class TestSession(IntegrationTest):
                 (client.db.test.find_one_and_replace, [{}, {}]),
                 (client.db.test.aggregate, [[{"$limit": 1}]]),
                 (client.db.test.find, []),
-                (client.server_info, [{}]),
+                (client.server_info, []),
                 (client.db.aggregate, [[{"$listLocalSessions": {}}, {"$limit": 1}]]),
                 (cursor.distinct, ["_id"]),
                 (client.db.list_collections, []),
             ]
             threads = []
-            listener.results.clear()
+            listener.reset()
 
             def thread_target(op, *args):
                 res = op(*args)
@@ -224,7 +225,7 @@ class TestSession(IntegrationTest):
                 self.assertIsNone(thread.exc)
             client.close()
             lsid_set.clear()
-            for i in listener.results["started"]:
+            for i in listener.started_events:
                 if i.command.get("lsid"):
                     lsid_set.add(i.command.get("lsid")["id"])
             if len(lsid_set) == 1:
@@ -273,19 +274,21 @@ class TestSession(IntegrationTest):
         # Start many sessions.
         sessions = [client.start_session() for _ in range(_MAX_END_SESSIONS + 1)]
         for s in sessions:
+            s._materialize()
+        for s in sessions:
             s.end_session()
 
         # Closing the client should end all sessions and clear the pool.
         self.assertEqual(len(client._topology._session_pool), _MAX_END_SESSIONS + 1)
         client.close()
         self.assertEqual(len(client._topology._session_pool), 0)
-        end_sessions = [e for e in listener.results["started"] if e.command_name == "endSessions"]
+        end_sessions = [e for e in listener.started_events if e.command_name == "endSessions"]
         self.assertEqual(len(end_sessions), 2)
 
         # Closing again should not send any commands.
-        listener.results.clear()
+        listener.reset()
         client.close()
-        self.assertEqual(len(listener.results["started"]), 0)
+        self.assertEqual(len(listener.started_events), 0)
 
     def test_client(self):
         client = self.client
@@ -398,19 +401,19 @@ class TestSession(IntegrationTest):
 
         for name, f in ops:
             with client.start_session() as s:
-                listener.results.clear()
+                listener.reset()
                 f(session=s)
-                self.assertGreaterEqual(len(listener.results["started"]), 1)
-                for event in listener.results["started"]:
+                self.assertGreaterEqual(len(listener.started_events), 1)
+                for event in listener.started_events:
                     self.assertTrue(
                         "lsid" in event.command,
-                        "%s sent no lsid with %s" % (name, event.command_name),
+                        f"{name} sent no lsid with {event.command_name}",
                     )
 
                     self.assertEqual(
                         s.session_id,
                         event.command["lsid"],
-                        "%s sent wrong lsid with %s" % (name, event.command_name),
+                        f"{name} sent wrong lsid with {event.command_name}",
                     )
 
             with self.assertRaisesRegex(InvalidOperation, "ended session"):
@@ -418,24 +421,24 @@ class TestSession(IntegrationTest):
 
         # No explicit session.
         for name, f in ops:
-            listener.results.clear()
+            listener.reset()
             f(session=None)
             event0 = listener.first_command_started()
             self.assertTrue(
-                "lsid" in event0.command, "%s sent no lsid with %s" % (name, event0.command_name)
+                "lsid" in event0.command, f"{name} sent no lsid with {event0.command_name}"
             )
 
             lsid = event0.command["lsid"]
 
-            for event in listener.results["started"][1:]:
+            for event in listener.started_events[1:]:
                 self.assertTrue(
-                    "lsid" in event.command, "%s sent no lsid with %s" % (name, event.command_name)
+                    "lsid" in event.command, f"{name} sent no lsid with {event.command_name}"
                 )
 
                 self.assertEqual(
                     lsid,
                     event.command["lsid"],
-                    "%s sent wrong lsid with %s" % (name, event.command_name),
+                    f"{name} sent wrong lsid with {event.command_name}",
                 )
 
     def test_gridfs(self):
@@ -599,7 +602,7 @@ class TestSession(IntegrationTest):
         # 3.6.0 mongos only validates the aggregate pipeline when the
         # database exists.
         coll.insert_one({})
-        listener.results.clear()
+        listener.reset()
 
         with self.assertRaises(OperationFailure):
             coll.aggregate([{"$badOperation": {"bar": 1}}])
@@ -686,49 +689,49 @@ class TestSession(IntegrationTest):
 
         for f, args, kw in ops:
             with client.start_session() as s:
-                listener.results.clear()
+                listener.reset()
                 # In case "f" modifies its inputs.
                 args = copy.copy(args)
                 kw = copy.copy(kw)
                 kw["session"] = s
                 with self.assertRaises(
-                    ConfigurationError, msg="%s did not raise ConfigurationError" % (f.__name__,)
+                    ConfigurationError, msg=f"{f.__name__} did not raise ConfigurationError"
                 ):
                     f(*args, **kw)
                 if f.__name__ == "create_collection":
                     # create_collection runs listCollections first.
-                    event = listener.results["started"].pop(0)
+                    event = listener.started_events.pop(0)
                     self.assertEqual("listCollections", event.command_name)
                     self.assertIn(
                         "lsid",
                         event.command,
-                        "%s sent no lsid with %s" % (f.__name__, event.command_name),
+                        f"{f.__name__} sent no lsid with {event.command_name}",
                     )
 
                 # Should not run any command before raising an error.
-                self.assertFalse(listener.results["started"], "%s sent command" % (f.__name__,))
+                self.assertFalse(listener.started_events, f"{f.__name__} sent command")
 
             self.assertTrue(s.has_ended)
 
         # Unacknowledged write without a session does not send an lsid.
         for f, args, kw in ops:
-            listener.results.clear()
+            listener.reset()
             f(*args, **kw)
-            self.assertGreaterEqual(len(listener.results["started"]), 1)
+            self.assertGreaterEqual(len(listener.started_events), 1)
 
             if f.__name__ == "create_collection":
                 # create_collection runs listCollections first.
-                event = listener.results["started"].pop(0)
+                event = listener.started_events.pop(0)
                 self.assertEqual("listCollections", event.command_name)
                 self.assertIn(
                     "lsid",
                     event.command,
-                    "%s sent no lsid with %s" % (f.__name__, event.command_name),
+                    f"{f.__name__} sent no lsid with {event.command_name}",
                 )
 
-            for event in listener.results["started"]:
+            for event in listener.started_events:
                 self.assertNotIn(
-                    "lsid", event.command, "%s sent lsid with %s" % (f.__name__, event.command_name)
+                    "lsid", event.command, f"{f.__name__} sent lsid with {event.command_name}"
                 )
 
     def test_unacknowledged_writes(self):
@@ -791,33 +794,33 @@ class TestCausalConsistency(unittest.TestCase):
 
     @client_context.require_sessions
     def setUp(self):
-        super(TestCausalConsistency, self).setUp()
+        super().setUp()
 
     @client_context.require_no_standalone
     def test_core(self):
         with self.client.start_session() as sess:
             self.assertIsNone(sess.cluster_time)
             self.assertIsNone(sess.operation_time)
-            self.listener.results.clear()
+            self.listener.reset()
             self.client.pymongo_test.test.find_one(session=sess)
-            started = self.listener.results["started"][0]
+            started = self.listener.started_events[0]
             cmd = started.command
             self.assertIsNone(cmd.get("readConcern"))
             op_time = sess.operation_time
             self.assertIsNotNone(op_time)
-            succeeded = self.listener.results["succeeded"][0]
+            succeeded = self.listener.succeeded_events[0]
             reply = succeeded.reply
             self.assertEqual(op_time, reply.get("operationTime"))
 
             # No explicit session
             self.client.pymongo_test.test.insert_one({})
             self.assertEqual(sess.operation_time, op_time)
-            self.listener.results.clear()
+            self.listener.reset()
             try:
                 self.client.pymongo_test.command("doesntexist", session=sess)
             except:
                 pass
-            failed = self.listener.results["failed"][0]
+            failed = self.listener.failed_events[0]
             failed_op_time = failed.failure.get("operationTime")
             # Some older builds of MongoDB 3.5 / 3.6 return None for
             # operationTime when a command fails. Make sure we don't
@@ -847,14 +850,14 @@ class TestCausalConsistency(unittest.TestCase):
             coll.find_one({}, session=sess)
             operation_time = sess.operation_time
             self.assertIsNotNone(operation_time)
-            self.listener.results.clear()
+            self.listener.reset()
             if exception:
                 with self.assertRaises(exception):
                     op(coll, sess)
             else:
                 op(coll, sess)
             act = (
-                self.listener.results["started"][0]
+                self.listener.started_events[0]
                 .command.get("readConcern", {})
                 .get("afterClusterTime")
             )
@@ -886,10 +889,10 @@ class TestCausalConsistency(unittest.TestCase):
             op(coll, sess)
             operation_time = sess.operation_time
             self.assertIsNotNone(operation_time)
-            self.listener.results.clear()
+            self.listener.reset()
             coll.find_one({}, session=sess)
             act = (
-                self.listener.results["started"][0]
+                self.listener.started_events[0]
                 .command.get("readConcern", {})
                 .get("afterClusterTime")
             )
@@ -897,7 +900,9 @@ class TestCausalConsistency(unittest.TestCase):
 
     @client_context.require_no_standalone
     def test_writes(self):
-        self._test_writes(lambda coll, session: coll.bulk_write([InsertOne({})], session=session))
+        self._test_writes(
+            lambda coll, session: coll.bulk_write([InsertOne[dict]({})], session=session)
+        )
         self._test_writes(lambda coll, session: coll.insert_one({}, session=session))
         self._test_writes(lambda coll, session: coll.insert_many([{}], session=session))
         self._test_writes(
@@ -935,15 +940,15 @@ class TestCausalConsistency(unittest.TestCase):
             coll.find_one({}, session=sess)
             operation_time = sess.operation_time
             self.assertIsNotNone(operation_time)
-            self.listener.results.clear()
+            self.listener.reset()
             op(coll, sess)
-            rc = self.listener.results["started"][0].command.get("readConcern")
+            rc = self.listener.started_events[0].command.get("readConcern")
             self.assertIsNone(rc)
 
     @client_context.require_no_standalone
     def test_writes_do_not_include_read_concern(self):
         self._test_no_read_concern(
-            lambda coll, session: coll.bulk_write([InsertOne({})], session=session)
+            lambda coll, session: coll.bulk_write([InsertOne[dict]({})], session=session)
         )
         self._test_no_read_concern(lambda coll, session: coll.insert_one({}, session=session))
         self._test_no_read_concern(lambda coll, session: coll.insert_many([{}], session=session))
@@ -998,19 +1003,19 @@ class TestCausalConsistency(unittest.TestCase):
             coll.insert_many([{}, {}])
             cursor = coll.find({}).batch_size(1)
             next(cursor)
-            self.listener.results.clear()
+            self.listener.reset()
             list(cursor)
-            started = self.listener.results["started"][0]
+            started = self.listener.started_events[0]
             self.assertEqual(started.command_name, "getMore")
             self.assertIsNone(started.command.get("readConcern"))
 
     def test_session_not_causal(self):
         with self.client.start_session(causal_consistency=False) as s:
             self.client.pymongo_test.test.insert_one({}, session=s)
-            self.listener.results.clear()
+            self.listener.reset()
             self.client.pymongo_test.test.find_one({}, session=s)
             act = (
-                self.listener.results["started"][0]
+                self.listener.started_events[0]
                 .command.get("readConcern", {})
                 .get("afterClusterTime")
             )
@@ -1020,10 +1025,10 @@ class TestCausalConsistency(unittest.TestCase):
     def test_server_not_causal(self):
         with self.client.start_session(causal_consistency=True) as s:
             self.client.pymongo_test.test.insert_one({}, session=s)
-            self.listener.results.clear()
+            self.listener.reset()
             self.client.pymongo_test.test.find_one({}, session=s)
             act = (
-                self.listener.results["started"][0]
+                self.listener.started_events[0]
                 .command.get("readConcern", {})
                 .get("afterClusterTime")
             )
@@ -1035,17 +1040,17 @@ class TestCausalConsistency(unittest.TestCase):
         with self.client.start_session(causal_consistency=True) as s:
             coll = self.client.pymongo_test.test
             coll.insert_one({}, session=s)
-            self.listener.results.clear()
+            self.listener.reset()
             coll.find_one({}, session=s)
-            read_concern = self.listener.results["started"][0].command.get("readConcern")
+            read_concern = self.listener.started_events[0].command.get("readConcern")
             self.assertIsNotNone(read_concern)
             self.assertIsNone(read_concern.get("level"))
             self.assertIsNotNone(read_concern.get("afterClusterTime"))
 
             coll = coll.with_options(read_concern=ReadConcern("majority"))
-            self.listener.results.clear()
+            self.listener.reset()
             coll.find_one({}, session=s)
-            read_concern = self.listener.results["started"][0].command.get("readConcern")
+            read_concern = self.listener.started_events[0].command.get("readConcern")
             self.assertIsNotNone(read_concern)
             self.assertEqual(read_concern.get("level"), "majority")
             self.assertIsNotNone(read_concern.get("afterClusterTime"))
@@ -1053,23 +1058,23 @@ class TestCausalConsistency(unittest.TestCase):
     @client_context.require_no_standalone
     def test_cluster_time_with_server_support(self):
         self.client.pymongo_test.test.insert_one({})
-        self.listener.results.clear()
+        self.listener.reset()
         self.client.pymongo_test.test.find_one({})
-        after_cluster_time = self.listener.results["started"][0].command.get("$clusterTime")
+        after_cluster_time = self.listener.started_events[0].command.get("$clusterTime")
         self.assertIsNotNone(after_cluster_time)
 
     @client_context.require_standalone
     def test_cluster_time_no_server_support(self):
         self.client.pymongo_test.test.insert_one({})
-        self.listener.results.clear()
+        self.listener.reset()
         self.client.pymongo_test.test.find_one({})
-        after_cluster_time = self.listener.results["started"][0].command.get("$clusterTime")
+        after_cluster_time = self.listener.started_events[0].command.get("$clusterTime")
         self.assertIsNone(after_cluster_time)
 
 
 class TestClusterTime(IntegrationTest):
     def setUp(self):
-        super(TestClusterTime, self).setUp()
+        super().setUp()
         if "$clusterTime" not in client_context.hello:
             raise SkipTest("$clusterTime not supported")
 
@@ -1125,33 +1130,32 @@ class TestClusterTime(IntegrationTest):
             ("rename_and_drop", rename_and_drop),
         ]
 
-        for name, f in ops:
-            listener.results.clear()
+        for _name, f in ops:
+            listener.reset()
             # Call f() twice, insert to advance clusterTime, call f() again.
             f()
             f()
             collection.insert_one({})
             f()
 
-            self.assertGreaterEqual(len(listener.results["started"]), 1)
-            for i, event in enumerate(listener.results["started"]):
+            self.assertGreaterEqual(len(listener.started_events), 1)
+            for i, event in enumerate(listener.started_events):
                 self.assertTrue(
                     "$clusterTime" in event.command,
-                    "%s sent no $clusterTime with %s" % (f.__name__, event.command_name),
+                    f"{f.__name__} sent no $clusterTime with {event.command_name}",
                 )
 
                 if i > 0:
-                    succeeded = listener.results["succeeded"][i - 1]
+                    succeeded = listener.succeeded_events[i - 1]
                     self.assertTrue(
                         "$clusterTime" in succeeded.reply,
-                        "%s received no $clusterTime with %s"
-                        % (f.__name__, succeeded.command_name),
+                        f"{f.__name__} received no $clusterTime with {succeeded.command_name}",
                     )
 
                     self.assertTrue(
                         event.command["$clusterTime"]["clusterTime"]
                         >= succeeded.reply["$clusterTime"]["clusterTime"],
-                        "%s sent wrong $clusterTime with %s" % (f.__name__, event.command_name),
+                        f"{f.__name__} sent wrong $clusterTime with {event.command_name}",
                     )
 
 

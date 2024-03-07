@@ -13,9 +13,15 @@
 # limitations under the License.
 
 """Test the read_concern module."""
+from __future__ import annotations
+
+import sys
+import unittest
+
+sys.path[0:0] = [""]
 
 from test import IntegrationTest, client_context
-from test.utils import OvertCommandListener, rs_or_single_client, single_client
+from test.utils import OvertCommandListener, rs_or_single_client
 
 from bson.son import SON
 from pymongo.errors import OperationFailure
@@ -28,9 +34,9 @@ class TestReadConcern(IntegrationTest):
     @classmethod
     @client_context.require_connection
     def setUpClass(cls):
-        super(TestReadConcern, cls).setUpClass()
+        super().setUpClass()
         cls.listener = OvertCommandListener()
-        cls.client = single_client(event_listeners=[cls.listener])
+        cls.client = rs_or_single_client(event_listeners=[cls.listener])
         cls.db = cls.client.pymongo_test
         client_context.client.pymongo_test.create_collection("coll")
 
@@ -38,11 +44,11 @@ class TestReadConcern(IntegrationTest):
     def tearDownClass(cls):
         cls.client.close()
         client_context.client.pymongo_test.drop_collection("coll")
-        super(TestReadConcern, cls).tearDownClass()
+        super().tearDownClass()
 
     def tearDown(self):
-        self.listener.results.clear()
-        super(TestReadConcern, self).tearDown()
+        self.listener.reset()
+        super().tearDown()
 
     def test_read_concern(self):
         rc = ReadConcern()
@@ -60,7 +66,7 @@ class TestReadConcern(IntegrationTest):
         self.assertRaises(TypeError, ReadConcern, 42)
 
     def test_read_concern_uri(self):
-        uri = "mongodb://%s/?readConcernLevel=majority" % (client_context.pair,)
+        uri = f"mongodb://{client_context.pair}/?readConcernLevel=majority"
         client = rs_or_single_client(uri, connect=False)
         self.assertEqual(ReadConcern("majority"), client.read_concern)
 
@@ -74,9 +80,9 @@ class TestReadConcern(IntegrationTest):
         # readConcern not sent in command if not specified.
         coll = self.db.coll
         tuple(coll.find({"field": "value"}))
-        self.assertNotIn("readConcern", self.listener.results["started"][0].command)
+        self.assertNotIn("readConcern", self.listener.started_events[0].command)
 
-        self.listener.results.clear()
+        self.listener.reset()
 
         # Explicitly set readConcern to 'local'.
         coll = self.db.get_collection("coll", read_concern=ReadConcern("local"))
@@ -89,23 +95,21 @@ class TestReadConcern(IntegrationTest):
                     ("readConcern", {"level": "local"}),
                 ]
             ),
-            self.listener.results["started"][0].command,
+            self.listener.started_events[0].command,
         )
 
     def test_command_cursor(self):
         # readConcern not sent in command if not specified.
         coll = self.db.coll
         tuple(coll.aggregate([{"$match": {"field": "value"}}]))
-        self.assertNotIn("readConcern", self.listener.results["started"][0].command)
+        self.assertNotIn("readConcern", self.listener.started_events[0].command)
 
-        self.listener.results.clear()
+        self.listener.reset()
 
         # Explicitly set readConcern to 'local'.
         coll = self.db.get_collection("coll", read_concern=ReadConcern("local"))
         tuple(coll.aggregate([{"$match": {"field": "value"}}]))
-        self.assertEqual(
-            {"level": "local"}, self.listener.results["started"][0].command["readConcern"]
-        )
+        self.assertEqual({"level": "local"}, self.listener.started_events[0].command["readConcern"])
 
     def test_aggregate_out(self):
         coll = self.db.get_collection("coll", read_concern=ReadConcern("local"))
@@ -113,6 +117,10 @@ class TestReadConcern(IntegrationTest):
 
         # Aggregate with $out supports readConcern MongoDB 4.2 onwards.
         if client_context.version >= (4, 1):
-            self.assertIn("readConcern", self.listener.results["started"][0].command)
+            self.assertIn("readConcern", self.listener.started_events[0].command)
         else:
-            self.assertNotIn("readConcern", self.listener.results["started"][0].command)
+            self.assertNotIn("readConcern", self.listener.started_events[0].command)
+
+
+if __name__ == "__main__":
+    unittest.main()

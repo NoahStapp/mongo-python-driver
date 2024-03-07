@@ -1,7 +1,12 @@
+.. _In-Use Encryption:
+
+In-Use Encryption
+=================
+
 .. _Client-Side Field Level Encryption:
 
 Client-Side Field Level Encryption
-==================================
+----------------------------------
 
 New in MongoDB 4.2, client-side field level encryption allows an application
 to encrypt specific data fields in addition to pre-existing MongoDB
@@ -19,13 +24,14 @@ encrypted data.
 .. seealso:: The MongoDB documentation on `Client Side Field Level Encryption <https://dochub.mongodb.org/core/client-side-field-level-encryption>`_.
 
 Dependencies
-------------
+~~~~~~~~~~~~
 
 To get started using client-side field level encryption in your project,
 you will need to install the
-`pymongocrypt <https://pypi.org/project/pymongocrypt/>`_ library
+`pymongocrypt <https://pypi.org/project/pymongocrypt/>`_ and
+`pymongo-auth-aws <https://pypi.org/project/pymongo-auth-aws/>`_ libraries
 as well as the driver itself. Install both the driver and a compatible
-version of pymongocrypt like this::
+version of the dependencies like this::
 
   $ python -m pip install 'pymongo[encryption]'
 
@@ -34,8 +40,30 @@ support. For more information about installing pymongocrypt see
 `the installation instructions on the project's PyPI page
 <https://pypi.org/project/pymongocrypt/>`_.
 
+Additionally, either `crypt_shared`_ or `mongocryptd`_ are required in order
+to use *automatic* client-side encryption.
+
+crypt_shared
+````````````
+
+The Automatic Encryption Shared Library (crypt_shared) provides the same
+functionality as `mongocryptd`_, but does not require you to spawn another
+process to perform automatic encryption.
+
+By default, pymongo attempts to load crypt_shared from the system and if
+found uses it automatically. To load crypt_shared from another location,
+use the ``crypt_shared_lib_path`` argument to
+:class:`~pymongo.encryption_options.AutoEncryptionOpts`.
+If pymongo cannot load crypt_shared it will attempt to fallback to using
+`mongocryptd`_ by default. Set ``crypt_shared_lib_required=True`` to make
+the app always use crypt_shared and fail if it could not be loaded.
+
+For detailed installation instructions see
+`the MongoDB documentation on Automatic Encryption Shared Library
+<https://www.mongodb.com/docs/manual/core/queryable-encryption/reference/shared-library>`_.
+
 mongocryptd
------------
+```````````
 
 The ``mongocryptd`` binary is required for automatic client-side encryption
 and is included as a component in the `MongoDB Enterprise Server package
@@ -97,8 +125,8 @@ examples show how to setup automatic client-side field level encryption
 using :class:`~pymongo.encryption.ClientEncryption` to create a new
 encryption data key.
 
-.. note:: Automatic client-side field level encryption requires MongoDB 4.2
-   enterprise or a MongoDB 4.2 Atlas cluster. The community version of the
+.. note:: Automatic client-side field level encryption requires MongoDB >=4.2
+   enterprise or a MongoDB >=4.2 Atlas cluster. The community version of the
    server supports automatic decryption as well as
    :ref:`explicit-client-side-encryption`.
 
@@ -118,21 +146,19 @@ the client into sending unencrypted data that should be encrypted.
 JSON Schemas supplied in the ``schema_map`` only apply to configuring
 automatic client-side field level encryption. Other validation
 rules in the JSON schema will not be enforced by the driver and
-will result in an error.::
+will result in an error.
+
+.. code-block:: python
 
   import os
-
   from bson.codec_options import CodecOptions
   from bson import json_util
-
   from pymongo import MongoClient
-  from pymongo.encryption import (Algorithm,
-                                  ClientEncryption)
+  from pymongo.encryption import Algorithm, ClientEncryption
   from pymongo.encryption_options import AutoEncryptionOpts
 
 
-  def create_json_schema_file(kms_providers, key_vault_namespace,
-                              key_vault_client):
+  def create_json_schema_file(kms_providers, key_vault_namespace, key_vault_client):
       client_encryption = ClientEncryption(
           kms_providers,
           key_vault_namespace,
@@ -142,31 +168,33 @@ will result in an error.::
           # on MongoClient, Database, or Collection. We will not be calling
           # encrypt() or decrypt() in this example so we can use any
           # CodecOptions.
-          CodecOptions())
+          CodecOptions(),
+      )
 
       # Create a new data key and json schema for the encryptedField.
       # https://dochub.mongodb.org/core/client-side-field-level-encryption-automatic-encryption-rules
       data_key_id = client_encryption.create_data_key(
-          'local', key_alt_names=['pymongo_encryption_example_1'])
+          "local", key_alt_names=["pymongo_encryption_example_1"]
+      )
       schema = {
           "properties": {
               "encryptedField": {
                   "encrypt": {
                       "keyId": [data_key_id],
                       "bsonType": "string",
-                      "algorithm":
-                          Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic
+                      "algorithm": Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic,
                   }
               }
           },
-          "bsonType": "object"
+          "bsonType": "object",
       }
       # Use CANONICAL_JSON_OPTIONS so that other drivers and tools will be
       # able to parse the MongoDB extended JSON file.
       json_schema_string = json_util.dumps(
-          schema, json_options=json_util.CANONICAL_JSON_OPTIONS)
+          schema, json_options=json_util.CANONICAL_JSON_OPTIONS
+      )
 
-      with open('jsonSchema.json', 'w') as file:
+      with open("jsonSchema.json", "w") as file:
           file.write(json_schema_string)
 
 
@@ -193,19 +221,20 @@ will result in an error.::
       key_vault.create_index(
           "keyAltNames",
           unique=True,
-          partialFilterExpression={"keyAltNames": {"$exists": True}})
+          partialFilterExpression={"keyAltNames": {"$exists": True}},
+      )
 
-      create_json_schema_file(
-          kms_providers, key_vault_namespace, key_vault_client)
+      create_json_schema_file(kms_providers, key_vault_namespace, key_vault_client)
 
       # Load the JSON Schema and construct the local schema_map option.
-      with open('jsonSchema.json', 'r') as file:
+      with open("jsonSchema.json", "r") as file:
           json_schema_string = file.read()
       json_schema = json_util.loads(json_schema_string)
       schema_map = {encrypted_namespace: json_schema}
 
       auto_encryption_opts = AutoEncryptionOpts(
-          kms_providers, key_vault_namespace, schema_map=schema_map)
+          kms_providers, key_vault_namespace, schema_map=schema_map
+      )
 
       client = MongoClient(auto_encryption_opts=auto_encryption_opts)
       db_name, coll_name = encrypted_namespace.split(".", 1)
@@ -214,18 +243,19 @@ will result in an error.::
       coll.drop()
 
       coll.insert_one({"encryptedField": "123456789"})
-      print('Decrypted document: %s' % (coll.find_one(),))
+      print("Decrypted document: %s" % (coll.find_one(),))
       unencrypted_coll = MongoClient()[db_name][coll_name]
-      print('Encrypted document: %s' % (unencrypted_coll.find_one(),))
+      print("Encrypted document: %s" % (unencrypted_coll.find_one(),))
 
 
   if __name__ == "__main__":
       main()
 
+
 Server-Side Field Level Encryption Enforcement
 ``````````````````````````````````````````````
 
-The MongoDB 4.2 server supports using schema validation to enforce encryption
+MongoDB >=4.2 servers supports using schema validation to enforce encryption
 of specific fields in a collection. This schema validation will prevent an
 application from inserting unencrypted values for any fields marked with the
 ``"encrypt"`` JSON schema keyword.
@@ -235,7 +265,9 @@ encryption using
 :class:`~pymongo.encryption.ClientEncryption` to create a new encryption
 data key and create a collection with the
 `Automatic Encryption JSON Schema Syntax
-<https://dochub.mongodb.org/core/client-side-field-level-encryption-automatic-encryption-rules>`_::
+<https://dochub.mongodb.org/core/client-side-field-level-encryption-automatic-encryption-rules>`_:
+
+.. code-block:: python
 
   import os
 
@@ -243,8 +275,7 @@ data key and create a collection with the
   from bson.binary import STANDARD
 
   from pymongo import MongoClient
-  from pymongo.encryption import (Algorithm,
-                                  ClientEncryption)
+  from pymongo.encryption import Algorithm, ClientEncryption
   from pymongo.encryption_options import AutoEncryptionOpts
   from pymongo.errors import OperationFailure
   from pymongo.write_concern import WriteConcern
@@ -273,7 +304,8 @@ data key and create a collection with the
       key_vault.create_index(
           "keyAltNames",
           unique=True,
-          partialFilterExpression={"keyAltNames": {"$exists": True}})
+          partialFilterExpression={"keyAltNames": {"$exists": True}},
+      )
 
       client_encryption = ClientEncryption(
           kms_providers,
@@ -284,27 +316,27 @@ data key and create a collection with the
           # on MongoClient, Database, or Collection. We will not be calling
           # encrypt() or decrypt() in this example so we can use any
           # CodecOptions.
-          CodecOptions())
+          CodecOptions(),
+      )
 
       # Create a new data key and json schema for the encryptedField.
       data_key_id = client_encryption.create_data_key(
-          'local', key_alt_names=['pymongo_encryption_example_2'])
+          "local", key_alt_names=["pymongo_encryption_example_2"]
+      )
       json_schema = {
           "properties": {
               "encryptedField": {
                   "encrypt": {
                       "keyId": [data_key_id],
                       "bsonType": "string",
-                      "algorithm":
-                          Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic
+                      "algorithm": Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic,
                   }
               }
           },
-          "bsonType": "object"
+          "bsonType": "object",
       }
 
-      auto_encryption_opts = AutoEncryptionOpts(
-          kms_providers, key_vault_namespace)
+      auto_encryption_opts = AutoEncryptionOpts(kms_providers, key_vault_namespace)
       client = MongoClient(auto_encryption_opts=auto_encryption_opts)
       db_name, coll_name = encrypted_namespace.split(".", 1)
       db = client[db_name]
@@ -320,21 +352,23 @@ data key and create a collection with the
           # JSON Schema.
           codec_options=CodecOptions(uuid_representation=STANDARD),
           write_concern=WriteConcern(w="majority"),
-          validator={"$jsonSchema": json_schema})
+          validator={"$jsonSchema": json_schema},
+      )
       coll = client[db_name][coll_name]
 
       coll.insert_one({"encryptedField": "123456789"})
-      print('Decrypted document: %s' % (coll.find_one(),))
+      print("Decrypted document: %s" % (coll.find_one(),))
       unencrypted_coll = MongoClient()[db_name][coll_name]
-      print('Encrypted document: %s' % (unencrypted_coll.find_one(),))
+      print("Encrypted document: %s" % (unencrypted_coll.find_one(),))
       try:
           unencrypted_coll.insert_one({"encryptedField": "123456789"})
       except OperationFailure as exc:
-          print('Unencrypted insert failed: %s' % (exc.details,))
+          print("Unencrypted insert failed: %s" % (exc.details,))
 
 
   if __name__ == "__main__":
       main()
+
 
 .. _explicit-client-side-encryption:
 
@@ -343,13 +377,14 @@ Explicit Encryption
 
 Explicit encryption is a MongoDB community feature and does not use the
 ``mongocryptd`` process. Explicit encryption is provided by the
-:class:`~pymongo.encryption.ClientEncryption` class, for example::
+:class:`~pymongo.encryption.ClientEncryption` class, for example:
+
+.. code-block:: python
 
   import os
 
   from pymongo import MongoClient
-  from pymongo.encryption import (Algorithm,
-                                  ClientEncryption)
+  from pymongo.encryption import Algorithm, ClientEncryption
 
 
   def main():
@@ -376,7 +411,8 @@ Explicit encryption is a MongoDB community feature and does not use the
       key_vault.create_index(
           "keyAltNames",
           unique=True,
-          partialFilterExpression={"keyAltNames": {"$exists": True}})
+          partialFilterExpression={"keyAltNames": {"$exists": True}},
+      )
 
       client_encryption = ClientEncryption(
           kms_providers,
@@ -387,24 +423,27 @@ Explicit encryption is a MongoDB community feature and does not use the
           # The CodecOptions class used for encrypting and decrypting.
           # This should be the same CodecOptions instance you have configured
           # on MongoClient, Database, or Collection.
-          coll.codec_options)
+          coll.codec_options,
+      )
 
       # Create a new data key for the encryptedField.
       data_key_id = client_encryption.create_data_key(
-          'local', key_alt_names=['pymongo_encryption_example_3'])
+          "local", key_alt_names=["pymongo_encryption_example_3"]
+      )
 
       # Explicitly encrypt a field:
       encrypted_field = client_encryption.encrypt(
           "123456789",
           Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic,
-          key_id=data_key_id)
+          key_id=data_key_id,
+      )
       coll.insert_one({"encryptedField": encrypted_field})
       doc = coll.find_one()
-      print('Encrypted document: %s' % (doc,))
+      print("Encrypted document: %s" % (doc,))
 
       # Explicitly decrypt the field:
       doc["encryptedField"] = client_encryption.decrypt(doc["encryptedField"])
-      print('Decrypted document: %s' % (doc,))
+      print("Decrypted document: %s" % (doc,))
 
       # Cleanup resources.
       client_encryption.close()
@@ -418,17 +457,18 @@ Explicit encryption is a MongoDB community feature and does not use the
 Explicit Encryption with Automatic Decryption
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Although automatic encryption requires MongoDB 4.2 enterprise or a
-MongoDB 4.2 Atlas cluster, automatic *decryption* is supported for all users.
+Although automatic encryption requires MongoDB >=4.2 enterprise or a
+MongoDB >=4.2 Atlas cluster, automatic *decryption* is supported for all users.
 To configure automatic *decryption* without automatic *encryption* set
 ``bypass_auto_encryption=True`` in
-:class:`~pymongo.encryption_options.AutoEncryptionOpts`::
+:class:`~pymongo.encryption_options.AutoEncryptionOpts`:
+
+.. code-block:: python
 
   import os
 
   from pymongo import MongoClient
-  from pymongo.encryption import (Algorithm,
-                                  ClientEncryption)
+  from pymongo.encryption import Algorithm, ClientEncryption
   from pymongo.encryption_options import AutoEncryptionOpts
 
 
@@ -447,7 +487,8 @@ To configure automatic *decryption* without automatic *encryption* set
       # the automatic _decryption_ behavior. bypass_auto_encryption will
       # also disable spawning mongocryptd.
       auto_encryption_opts = AutoEncryptionOpts(
-          kms_providers, key_vault_namespace, bypass_auto_encryption=True)
+          kms_providers, key_vault_namespace, bypass_auto_encryption=True
+      )
 
       client = MongoClient(auto_encryption_opts=auto_encryption_opts)
       coll = client.test.coll
@@ -461,7 +502,8 @@ To configure automatic *decryption* without automatic *encryption* set
       key_vault.create_index(
           "keyAltNames",
           unique=True,
-          partialFilterExpression={"keyAltNames": {"$exists": True}})
+          partialFilterExpression={"keyAltNames": {"$exists": True}},
+      )
 
       client_encryption = ClientEncryption(
           kms_providers,
@@ -472,23 +514,26 @@ To configure automatic *decryption* without automatic *encryption* set
           # The CodecOptions class used for encrypting and decrypting.
           # This should be the same CodecOptions instance you have configured
           # on MongoClient, Database, or Collection.
-          coll.codec_options)
+          coll.codec_options,
+      )
 
       # Create a new data key for the encryptedField.
       data_key_id = client_encryption.create_data_key(
-          'local', key_alt_names=['pymongo_encryption_example_4'])
+          "local", key_alt_names=["pymongo_encryption_example_4"]
+      )
 
       # Explicitly encrypt a field:
       encrypted_field = client_encryption.encrypt(
           "123456789",
           Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Deterministic,
-          key_alt_name='pymongo_encryption_example_4')
+          key_alt_name="pymongo_encryption_example_4",
+      )
       coll.insert_one({"encryptedField": encrypted_field})
       # Automatically decrypts any encrypted fields.
       doc = coll.find_one()
-      print('Decrypted document: %s' % (doc,))
+      print("Decrypted document: %s" % (doc,))
       unencrypted_coll = MongoClient().test.coll
-      print('Encrypted document: %s' % (unencrypted_coll.find_one(),))
+      print("Encrypted document: %s" % (unencrypted_coll.find_one(),))
 
       # Cleanup resources.
       client_encryption.close()
@@ -497,3 +542,303 @@ To configure automatic *decryption* without automatic *encryption* set
 
   if __name__ == "__main__":
       main()
+
+
+.. _CSFLE on-demand credentials:
+
+
+CSFLE on-demand credentials
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``pymongocrypt`` 1.4 adds support for fetching on-demand KMS credentials for
+AWS, GCP, and Azure cloud environments.
+
+To enable the driver's behavior to obtain credentials from the environment, add the appropriate key ("aws", "gcp", or "azure") with an empty map to
+"kms_providers" in either :class:`~pymongo.encryption_options.AutoEncryptionOpts` or :class:`~pymongo.encryption.ClientEncryption` options.
+
+An application using AWS credentials would look like:
+
+.. code-block:: python
+
+    from pymongo import MongoClient
+    from pymongo.encryption import ClientEncryption
+
+    client = MongoClient()
+    client_encryption = ClientEncryption(
+        # The empty dictionary enables on-demand credentials.
+        kms_providers={"aws": {}},
+        key_vault_namespace="keyvault.datakeys",
+        key_vault_client=client,
+        codec_options=client.codec_options,
+    )
+    master_key = {
+        "region": "us-east-1",
+        "key": ("arn:aws:kms:us-east-1:123456789:key/89fcc2c4-08b0-4bd9-9f25-e30687b580d0"),
+    }
+    client_encryption.create_data_key("aws", master_key)
+
+The above will enable the same behavior of obtaining AWS credentials from the environment as is used for :ref:`MONGODB-AWS` authentication, including the
+caching to avoid rate limiting.
+
+An application using GCP credentials would look like:
+
+.. code-block:: python
+
+    from pymongo import MongoClient
+    from pymongo.encryption import ClientEncryption
+
+    client = MongoClient()
+    client_encryption = ClientEncryption(
+        # The empty dictionary enables on-demand credentials.
+        kms_providers={"gcp": {}},
+        key_vault_namespace="keyvault.datakeys",
+        key_vault_client=client,
+        codec_options=client.codec_options,
+    )
+    master_key = {
+        "projectId": "my-project",
+        "location": "global",
+        "keyRing": "key-ring-csfle",
+        "keyName": "key-name-csfle",
+    }
+    client_encryption.create_data_key("gcp", master_key)
+
+The driver will query the `VM instance metadata <https://cloud.google.com/compute/docs/metadata/default-metadata-values>`_ to obtain credentials.
+
+An application using Azure credentials would look like, this time using
+:class:`~pymongo.encryption_options.AutoEncryptionOpts`:
+
+.. code-block:: python
+
+    from pymongo import MongoClient
+    from pymongo.encryption_options import AutoEncryptionOpts
+
+    # The empty dictionary enables on-demand credentials.
+    kms_providers = ({"azure": {}},)
+    key_vault_namespace = "keyvault.datakeys"
+    auto_encryption_opts = AutoEncryptionOpts(kms_providers, key_vault_namespace)
+    client = MongoClient(auto_encryption_opts=auto_encryption_opts)
+    coll = client.test.coll
+    coll.insert_one({"encryptedField": "123456789"})
+
+The driver will `acquire an access token <https://learn.microsoft.com/en-us/azure/active-directory/managed-identities-azure-resources/how-to-use-vm-token>`_ from the Azure VM.
+
+.. _Queryable Encryption:
+
+Queryable Encryption
+--------------------
+
+.. _automatic-queryable-client-side-encryption:
+
+Automatic Queryable Encryption
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Automatic Queryable Encryption requires MongoDB 7.0+ Enterprise or a MongoDB 7.0+ Atlas cluster.
+
+Queryable Encryption is the second version of Client-Side Field Level Encryption.
+Data is encrypted client-side. Queryable Encryption supports indexed encrypted fields,
+which are further processed server-side.
+
+Automatic encryption in Queryable Encryption is configured with an ``encrypted_fields`` mapping,
+as demonstrated by the following example:
+
+.. code-block:: python
+
+  import os
+  from bson.codec_options import CodecOptions
+  from pymongo import MongoClient
+  from pymongo.encryption import Algorithm, ClientEncryption, QueryType
+  from pymongo.encryption_options import AutoEncryptionOpts
+
+  local_master_key = os.urandom(96)
+  kms_providers = {"local": {"key": local_master_key}}
+  key_vault_namespace = "keyvault.datakeys"
+  key_vault_client = MongoClient()
+  client_encryption = ClientEncryption(
+      kms_providers, key_vault_namespace, key_vault_client, CodecOptions()
+  )
+  key_vault = key_vault_client["keyvault"]["datakeys"]
+  key_vault.drop()
+  # Ensure that two data keys cannot share the same keyAltName.
+  key_vault.create_index(
+      "keyAltNames",
+      unique=True,
+      partialFilterExpression={"keyAltNames": {"$exists": True}},
+  )
+  key1_id = client_encryption.create_data_key("local", key_alt_names=["firstName"])
+  key2_id = client_encryption.create_data_key("local", key_alt_names=["lastName"])
+
+  encrypted_fields_map = {
+      "default.encryptedCollection": {
+          "escCollection": "encryptedCollection.esc",
+          "ecocCollection": "encryptedCollection.ecoc",
+          "fields": [
+              {
+                  "path": "firstName",
+                  "bsonType": "string",
+                  "keyId": key1_id,
+                  "queries": [{"queryType": "equality"}],
+              },
+              {
+                  "path": "lastName",
+                  "bsonType": "string",
+                  "keyId": key2_id,
+              },
+          ],
+      }
+  }
+
+  auto_encryption_opts = AutoEncryptionOpts(
+      kms_providers,
+      key_vault_namespace,
+      encrypted_fields_map=encrypted_fields_map,
+  )
+  client = MongoClient(auto_encryption_opts=auto_encryption_opts)
+  client.default.drop_collection("encryptedCollection")
+  coll = client.default.create_collection("encryptedCollection")
+  coll.insert_one({"_id": 1, "firstName": "Jane", "lastName": "Doe"})
+  docs = list(coll.find({"firstName": "Jane"}))
+  print(docs)
+
+In the above example, the ``firstName`` and ``lastName`` fields are
+automatically encrypted and decrypted.
+
+Explicit Queryable Encryption
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Explicit Queryable Encryption requires MongoDB 7.0+.
+
+Queryable Encryption is the second version of Client-Side Field Level Encryption.
+Data is encrypted client-side. Queryable Encryption supports indexed encrypted fields,
+which are further processed server-side.
+
+Explicit encryption in Queryable Encryption is performed using the ``encrypt`` and ``decrypt``
+methods. Automatic encryption (to allow the ``find_one`` to automatically decrypt) is configured
+using an ``encrypted_fields`` mapping, as demonstrated by the following example:
+
+.. code-block:: python
+
+    import os
+    from pymongo import MongoClient
+    from pymongo.encryption import (
+        Algorithm,
+        AutoEncryptionOpts,
+        ClientEncryption,
+        QueryType,
+    )
+
+
+    def main():
+        # This must be the same master key that was used to create
+        # the encryption key.
+        local_master_key = os.urandom(96)
+        kms_providers = {"local": {"key": local_master_key}}
+
+        # The MongoDB namespace (db.collection) used to store
+        # the encryption data keys.
+        key_vault_namespace = "encryption.__pymongoTestKeyVault"
+        key_vault_db_name, key_vault_coll_name = key_vault_namespace.split(".", 1)
+
+        # Set up the key vault (key_vault_namespace) for this example.
+        client = MongoClient()
+        key_vault = client[key_vault_db_name][key_vault_coll_name]
+
+        # Ensure that two data keys cannot share the same keyAltName.
+        key_vault.drop()
+        key_vault.create_index(
+            "keyAltNames",
+            unique=True,
+            partialFilterExpression={"keyAltNames": {"$exists": True}},
+        )
+
+        client_encryption = ClientEncryption(
+            kms_providers,
+            key_vault_namespace,
+            # The MongoClient to use for reading/writing to the key vault.
+            # This can be the same MongoClient used by the main application.
+            client,
+            # The CodecOptions class used for encrypting and decrypting.
+            # This should be the same CodecOptions instance you have configured
+            # on MongoClient, Database, or Collection.
+            client.codec_options,
+        )
+
+        # Create a new data key for the encryptedField.
+        indexed_key_id = client_encryption.create_data_key("local")
+        unindexed_key_id = client_encryption.create_data_key("local")
+
+        encrypted_fields = {
+            "escCollection": "enxcol_.default.esc",
+            "ecocCollection": "enxcol_.default.ecoc",
+            "fields": [
+                {
+                    "keyId": indexed_key_id,
+                    "path": "encryptedIndexed",
+                    "bsonType": "string",
+                    "queries": {"queryType": "equality"},
+                },
+                {
+                    "keyId": unindexed_key_id,
+                    "path": "encryptedUnindexed",
+                    "bsonType": "string",
+                },
+            ],
+        }
+
+        opts = AutoEncryptionOpts(
+            {"local": {"key": local_master_key}},
+            key_vault.full_name,
+            bypass_query_analysis=True,
+            key_vault_client=client,
+        )
+
+        # The MongoClient used to read/write application data.
+        encrypted_client = MongoClient(auto_encryption_opts=opts)
+        encrypted_client.drop_database("test")
+        db = encrypted_client.test
+
+        # Create the collection with encrypted fields.
+        coll = db.create_collection("coll", encryptedFields=encrypted_fields)
+
+        # Create and encrypt an indexed and unindexed value.
+        val = "encrypted indexed value"
+        unindexed_val = "encrypted unindexed value"
+        insert_payload_indexed = client_encryption.encrypt(
+            val, Algorithm.INDEXED, indexed_key_id, contention_factor=1
+        )
+        insert_payload_unindexed = client_encryption.encrypt(
+            unindexed_val, Algorithm.UNINDEXED, unindexed_key_id
+        )
+
+        # Insert the payloads.
+        coll.insert_one(
+            {
+                "encryptedIndexed": insert_payload_indexed,
+                "encryptedUnindexed": insert_payload_unindexed,
+            }
+        )
+
+        # Encrypt our find payload using QueryType.EQUALITY.
+        # The value of "indexed_key_id" must be the same as used to encrypt
+        # the values above.
+        find_payload = client_encryption.encrypt(
+            val,
+            Algorithm.INDEXED,
+            indexed_key_id,
+            query_type=QueryType.EQUALITY,
+            contention_factor=1,
+        )
+
+        # Find the document we inserted using the encrypted payload.
+        # The returned document is automatically decrypted.
+        doc = coll.find_one({"encryptedIndexed": find_payload})
+        print("Returned document: %s" % (doc,))
+
+        # Cleanup resources.
+        client_encryption.close()
+        encrypted_client.close()
+        client.close()
+
+
+    if __name__ == "__main__":
+        main()

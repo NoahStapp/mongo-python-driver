@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Test the collection module."""
+from __future__ import annotations
 
 import os
 import sys
@@ -21,7 +22,7 @@ sys.path[0:0] = [""]
 
 from test import IntegrationTest, unittest
 from test.utils import (
-    TestCreator,
+    SpecTestCreator,
     camel_to_snake,
     camel_to_snake_args,
     camel_to_upper_camel,
@@ -55,7 +56,7 @@ def check_result(self, expected_result, result):
     if isinstance(result, _WriteResult):
         for res in expected_result:
             prop = camel_to_snake(res)
-            msg = "%s : %r != %r" % (prop, expected_result, result)
+            msg = f"{prop} : {expected_result!r} != {result!r}"
             # SPEC-869: Only BulkWriteResult has upserted_count.
             if prop == "upserted_count" and not isinstance(result, BulkWriteResult):
                 if result.upserted_id is not None:  # type: ignore
@@ -171,7 +172,7 @@ def create_test(scenario_def, test, name):
     return run_scenario
 
 
-test_creator = TestCreator(create_test, TestAllScenarios, _TEST_PATH)
+test_creator = SpecTestCreator(create_test, TestAllScenarios, _TEST_PATH)
 test_creator.create_tests()
 
 
@@ -184,15 +185,45 @@ class TestWriteOpsComparison(unittest.TestCase):
 
     def test_DeleteOneEquals(self):
         self.assertEqual(DeleteOne({"foo": 42}), DeleteOne({"foo": 42}))
+        self.assertEqual(
+            DeleteOne({"foo": 42}, {"locale": "en_US"}), DeleteOne({"foo": 42}, {"locale": "en_US"})
+        )
+        self.assertEqual(
+            DeleteOne({"foo": 42}, {"locale": "en_US"}, {"hint": 1}),
+            DeleteOne({"foo": 42}, {"locale": "en_US"}, {"hint": 1}),
+        )
 
     def test_DeleteOneNotEquals(self):
         self.assertNotEqual(DeleteOne({"foo": 42}), DeleteOne({"foo": 23}))
+        self.assertNotEqual(
+            DeleteOne({"foo": 42}, {"locale": "en_US"}), DeleteOne({"foo": 42}, {"locale": "en_GB"})
+        )
+        self.assertNotEqual(
+            DeleteOne({"foo": 42}, {"locale": "en_US"}, {"hint": 1}),
+            DeleteOne({"foo": 42}, {"locale": "en_US"}, {"hint": 2}),
+        )
 
     def test_DeleteManyEquals(self):
         self.assertEqual(DeleteMany({"foo": 42}), DeleteMany({"foo": 42}))
+        self.assertEqual(
+            DeleteMany({"foo": 42}, {"locale": "en_US"}),
+            DeleteMany({"foo": 42}, {"locale": "en_US"}),
+        )
+        self.assertEqual(
+            DeleteMany({"foo": 42}, {"locale": "en_US"}, {"hint": 1}),
+            DeleteMany({"foo": 42}, {"locale": "en_US"}, {"hint": 1}),
+        )
 
     def test_DeleteManyNotEquals(self):
         self.assertNotEqual(DeleteMany({"foo": 42}), DeleteMany({"foo": 23}))
+        self.assertNotEqual(
+            DeleteMany({"foo": 42}, {"locale": "en_US"}),
+            DeleteMany({"foo": 42}, {"locale": "en_GB"}),
+        )
+        self.assertNotEqual(
+            DeleteMany({"foo": 42}, {"locale": "en_US"}, {"hint": 1}),
+            DeleteMany({"foo": 42}, {"locale": "en_US"}, {"hint": 2}),
+        )
 
     def test_DeleteOneNotEqualsDeleteMany(self):
         self.assertNotEqual(DeleteOne({"foo": 42}), DeleteMany({"foo": 42}))

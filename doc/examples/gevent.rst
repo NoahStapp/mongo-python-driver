@@ -4,7 +4,7 @@ Gevent
 PyMongo supports `Gevent <http://www.gevent.org/>`_. Simply call Gevent's
 ``monkey.patch_all()`` before loading any other modules:
 
-.. doctest::
+.. code-block:: pycon
 
   >>> # You must call patch_all() *before* importing any other modules
   >>> from gevent import monkey
@@ -38,9 +38,11 @@ handler to end background greenlets when your application receives SIGHUP:
 
     import signal
 
+
     def graceful_reload(signum, traceback):
         """Explicitly close some global MongoClient object."""
         client.close()
+
 
     signal.signal(signal.SIGHUP, graceful_reload)
 

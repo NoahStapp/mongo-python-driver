@@ -13,10 +13,12 @@
 # limitations under the License.
 
 """Test the pymongo uri_parser module."""
+from __future__ import annotations
 
 import copy
 import sys
 import warnings
+from typing import Any
 from urllib.parse import quote_plus
 
 sys.path[0:0] = [""]
@@ -142,10 +144,20 @@ class TestURI(unittest.TestCase):
         self.assertEqual({"authsource": "foobar"}, split_options("authSource=foobar"))
         self.assertEqual({"maxpoolsize": 50}, split_options("maxpoolsize=50"))
 
+        # Test suggestions given when invalid kwarg passed
+
+        expected = r"Unknown option: auth. Did you mean one of \(authsource, authmechanism, timeoutms\) or maybe a camelCase version of one\? Refer to docstring."
+        with self.assertRaisesRegex(ConfigurationError, expected):
+            split_options("auth=GSSAPI")
+
     def test_parse_uri(self):
         self.assertRaises(InvalidURI, parse_uri, "http://foobar.com")
         self.assertRaises(InvalidURI, parse_uri, "http://foo@foobar.com")
         self.assertRaises(ValueError, parse_uri, "mongodb://::1", 27017)
+
+        # Extra whitespace should be visible in error message.
+        with self.assertRaisesRegex(ValueError, "'27017 '"):
+            parse_uri("mongodb://localhost:27017 ")
 
         orig: dict = {
             "nodelist": [("localhost", 27017)],
@@ -465,7 +477,7 @@ class TestURI(unittest.TestCase):
             "&authMechanismProperties=AWS_SESSION_TOKEN:" + quoted_val
         )
         res = parse_uri(uri)
-        options = {
+        options: dict[str, Any] = {
             "authmechanism": "MONGODB-AWS",
             "authmechanismproperties": {"AWS_SESSION_TOKEN": unquoted_val},
         }
@@ -504,7 +516,7 @@ class TestURI(unittest.TestCase):
     def test_special_chars(self):
         user = "user@ /9+:?~!$&'()*+,;="
         pwd = "pwd@ /9+:?~!$&'()*+,;="
-        uri = "mongodb://%s:%s@localhost" % (quote_plus(user), quote_plus(pwd))
+        uri = f"mongodb://{quote_plus(user)}:{quote_plus(pwd)}@localhost"
         res = parse_uri(uri)
         self.assertEqual(user, res["username"])
         self.assertEqual(pwd, res["password"])

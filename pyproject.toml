@@ -1,0 +1,240 @@
+[build-system]
+requires = ["setuptools>=63.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pymongo"
+dynamic = ["version"]
+description = "Python driver for MongoDB <http://www.mongodb.org>"
+readme = "README.md"
+license = {file="LICENSE"}
+requires-python = ">=3.7"
+authors = [
+    { name = "The MongoDB Python Team" },
+]
+keywords = [
+    "bson",
+    "gridfs",
+    "mongo",
+    "mongodb",
+    "pymongo",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+dependencies = [
+    "dnspython>=1.16.0,<3.0.0",
+]
+
+[project.optional-dependencies]
+aws = [
+    "pymongo-auth-aws<2.0.0",
+]
+encryption = [
+    "pymongo[aws]",
+    "pymongocrypt>=1.6.0,<2.0.0",
+    "certifi;os.name=='nt' or sys_platform=='darwin'",
+]
+gssapi = [
+    "pykerberos;os.name!='nt'",
+    "winkerberos>=0.5.0;os.name=='nt'"
+]
+# PyOpenSSL 17.0.0 introduced support for OCSP. 17.1.0 introduced
+# a related feature we need. 17.2.0 fixes a bug
+# in set_default_verify_paths we should really avoid.
+# service_identity 18.1.0 introduced support for IP addr matching.
+# Fallback to certifi on Windows if we can't load CA certs from the system
+# store and just use certifi on macOS.
+# https://www.pyopenssl.org/en/stable/api/ssl.html#OpenSSL.SSL.Context.set_default_verify_paths
+ocsp = [
+    "certifi;os.name=='nt' or sys_platform=='darwin'",
+    "pyopenssl>=17.2.0",
+    "requests<3.0.0",
+    "cryptography>=2.5",
+    "service_identity>=18.1.0",
+]
+snappy = [
+    "python-snappy",
+]
+# PYTHON-3423 Removed in 4.3 but kept here to avoid pip warnings.
+srv = []
+tls = []
+# PYTHON-2133 Removed in 4.0 but kept here to avoid pip warnings.
+zstd = [
+    "zstandard",
+]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://www.mongodb.org"
+Documentation = "https://pymongo.readthedocs.io"
+Source = "https://github.com/mongodb/pymongo"
+Tracker = "https://jira.mongodb.org/projects/PYTHON/issues"
+
+[tool.setuptools.dynamic]
+version = {attr = "pymongo._version.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["bson","gridfs", "pymongo"]
+
+[tool.setuptools.package-data]
+bson=["py.typed", "*.pyi"]
+pymongo=["py.typed", "*.pyi"]
+gridfs=["py.typed", "*.pyi"]
+
+[tool.pytest.ini_options]
+minversion = "7"
+addopts = ["-ra", "--strict-config", "--strict-markers", "--junitxml=xunit-results/TEST-results.xml"]
+testpaths = ["test"]
+log_cli_level = "INFO"
+norecursedirs = ["test/*"]
+faulthandler_timeout = 1500
+xfail_strict = true
+filterwarnings = [
+    "error",
+    # Internal warnings raised during tests.
+    "module:use an explicit session with no_cursor_timeout=True:UserWarning",
+    "module:serverselectiontimeoutms must be:UserWarning",
+    "module:Unsupported compressor:UserWarning",
+    "module:zlibcompressionlevel must be:UserWarning",
+    "module:Wire protocol compression with:UserWarning",
+    # TODO: Remove as part of PYTHON-3923.
+    "module:unclosed <eventlet.green.ssl.GreenSSLSocket:ResourceWarning",
+    "module:unclosed <socket.socket:ResourceWarning",
+    "module:unclosed <ssl.SSLSocket:ResourceWarning",
+    "module:unclosed <socket object:ResourceWarning",
+    # https://github.com/eventlet/eventlet/issues/818
+    "module:please use dns.resolver.Resolver.resolve:DeprecationWarning",
+    # https://github.com/dateutil/dateutil/issues/1314
+    "module:datetime.datetime.utc:DeprecationWarning:dateutil",
+]
+
+[tool.mypy]
+python_version = "3.7"
+strict = true
+show_error_codes = true
+pretty = true
+disable_error_code = ["type-arg", "no-any-return"]
+
+[[tool.mypy.overrides]]
+module = ["test.*"]
+disable_error_code = ["no-untyped-def", "no-untyped-call"]
+
+[tool.ruff]
+target-version = "py37"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "W", # flake8
+  "B",           # flake8-bugbear
+  "I",           # isort
+  "ARG",         # flake8-unused-arguments
+  "C4",          # flake8-comprehensions
+  "EM",          # flake8-errmsg
+  "ICN",         # flake8-import-conventions
+  "G",           # flake8-logging-format
+  "PGH",         # pygrep-hooks
+  "PIE",         # flake8-pie
+  "PL",          # pylint
+  "PT",          # flake8-pytest-style
+  "PTH",         # flake8-use-pathlib
+  "RET",         # flake8-return
+  "RUF",         # Ruff-specific
+  "S",           # flake8-bandit
+  "SIM",         # flake8-simplify
+  "T20",         # flake8-print
+  "UP",          # pyupgrade
+  "YTT",         # flake8-2020
+  "EXE",         # flake8-executable
+]
+ignore = [
+  "PLR",    # Design related pylint codes
+  "E501",   # Line too long
+  "PT004",  # Use underscore for non-returning fixture (use usefixture instead)
+  "UP007",  # Use `X | Y` for type annotation
+  "EM101",  # Exception must not use a string literal, assign to variable first
+  "EM102",  # Exception must not use an f-string literal, assign to variable first
+  "G004",   # Logging statement uses f-string"
+  "UP006",  # Use `type` instead of `Type` for type annotation"
+  "RET505", # Unnecessary `elif` after `return` statement"
+  "RET506", # Unnecessary `elif` after `raise` statement
+  "SIM108", # Use ternary operator"
+  "PTH123", # `open()` should be replaced by `Path.open()`"
+  "SIM102", # Use a single `if` statement instead of nested `if` statements
+  "SIM105", # Use `contextlib.suppress(OSError)` instead of `try`-`except`-`pass`
+  "ARG002", # Unused method argument:
+  "S101",   # Use of `assert` detected
+  "SIM114", # Combine `if` branches using logical `or` operator
+  "PGH003", # Use specific rule codes when ignoring type issues
+  "RUF012", # Mutable class attributes should be annotated with `typing.ClassVar`
+  "EM103",  # Exception must not use a `.format()` string directly, assign to variable first
+  "C408",   # Unnecessary `dict` call (rewrite as a literal)
+  "SIM117", # Use a single `with` statement with multiple contexts instead of nested `with` statements
+]
+unfixable = [
+  "RUF100", # Unused noqa
+  "T20",  # Removes print statements
+  "F841", # Removes unused variables
+]
+exclude = []
+flake8-unused-arguments.ignore-variadic-names = true
+isort.required-imports = ["from __future__ import annotations"]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?)|dummy.*)$"
+
+[tool.ruff.lint.per-file-ignores]
+"pymongo/__init__.py" = ["E402"]
+"test/*.py" = ["PT", "E402", "PLW", "SIM", "E741", "PTH", "S", "B904", "E722", "T201",
+    "RET", "ARG", "F405", "B028", "PGH001", "B018", "F403", "RUF015", "E731", "B007",
+    "UP031", "F401", "B023", "F811"]
+"green_framework_test.py" = ["T201"]
+
+[tool.coverage.run]
+branch = true
+source = ["pymongo", "bson", "gridfs" ]
+relative_files = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "if (.*and +)*_use_c( and.*)*:",
+    "def has_c",
+    "def get_version_string",
+    "^except AttributeError:",
+    "except ImportError:",
+    "raise NotImplementedError",
+    "return NotImplemented",
+    "_use_c = true",
+    "if __name__ == '__main__':",
+    "if TYPE_CHECKING:"
+    ]
+partial_branches = ["if (.*and +)*not _use_c( and.*)*:"]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.cibuildwheel]
+skip = "pp* *-musllinux*"
+build-frontend = "build"
+test-command = "python {project}/tools/fail_if_no_c.py"
+
+[tool.cibuildwheel.linux]
+archs = "x86_64 aarch64 ppc64le s390x i686"
+[tool.cibuildwheel.macos]
+archs = "x86_64 arm64"

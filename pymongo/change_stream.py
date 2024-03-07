@@ -13,15 +13,17 @@
 # permissions and limitations under the License.
 
 """Watch changes on a collection, a database, or the entire cluster."""
+from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any, Dict, Generic, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, Generic, Mapping, Optional, Type, Union
 
-from bson import _bson_to_dict
+from bson import CodecOptions, _bson_to_dict
 from bson.raw_bson import RawBSONDocument
 from bson.timestamp import Timestamp
-from pymongo import common
+from pymongo import _csot, common
 from pymongo.aggregation import (
+    _AggregationCommand,
     _CollectionAggregationCommand,
     _DatabaseAggregationCommand,
 )
@@ -34,6 +36,7 @@ from pymongo.errors import (
     OperationFailure,
     PyMongoError,
 )
+from pymongo.operations import _Op
 from pymongo.typings import _CollationIn, _DocumentType, _Pipeline
 
 # The change streams spec considers the following server errors from the
@@ -57,7 +60,6 @@ _RESUMABLE_GETMORE_ERRORS = frozenset(
         13388,  # StaleConfig
         234,  # RetryChangeStream
         133,  # FailedToSatisfyReadPreference
-        216,  # ElectionInProgress
     ]
 )
 
@@ -67,6 +69,20 @@ if TYPE_CHECKING:
     from pymongo.collection import Collection
     from pymongo.database import Database
     from pymongo.mongo_client import MongoClient
+    from pymongo.pool import Connection
+
+
+def _resumable(exc: PyMongoError) -> bool:
+    """Return True if given a resumable change stream error."""
+    if isinstance(exc, (ConnectionFailure, CursorNotFound)):
+        return True
+    if isinstance(exc, OperationFailure):
+        if exc._max_wire_version is None:
+            return False
+        return (
+            exc._max_wire_version >= 9 and exc.has_error_label("ResumableChangeStreamError")
+        ) or (exc._max_wire_version < 9 and exc.code in _RESUMABLE_GETMORE_ERRORS)
+    return False
 
 
 class ChangeStream(Generic[_DocumentType]):
@@ -78,13 +94,13 @@ class ChangeStream(Generic[_DocumentType]):
     :meth:`pymongo.mongo_client.MongoClient.watch` instead.
 
     .. versionadded:: 3.6
-    .. seealso:: The MongoDB documentation on `changeStreams <https://docs.mongodb.com/manual/changeStreams/>`_.
+    .. seealso:: The MongoDB documentation on `changeStreams <https://mongodb.com/docs/manual/changeStreams/>`_.
     """
 
     def __init__(
         self,
         target: Union[
-            "MongoClient[_DocumentType]", "Database[_DocumentType]", "Collection[_DocumentType]"
+            MongoClient[_DocumentType], Database[_DocumentType], Collection[_DocumentType]
         ],
         pipeline: Optional[_Pipeline],
         full_document: Optional[str],
@@ -93,9 +109,11 @@ class ChangeStream(Generic[_DocumentType]):
         batch_size: Optional[int],
         collation: Optional[_CollationIn],
         start_at_operation_time: Optional[Timestamp],
-        session: Optional["ClientSession"],
+        session: Optional[ClientSession],
         start_after: Optional[Mapping[str, Any]],
         comment: Optional[Any] = None,
+        full_document_before_change: Optional[str] = None,
+        show_expanded_events: Optional[bool] = None,
     ) -> None:
         if pipeline is None:
             pipeline = []
@@ -105,7 +123,7 @@ class ChangeStream(Generic[_DocumentType]):
         common.validate_non_negative_integer_or_none("batchSize", batch_size)
 
         self._decode_custom = False
-        self._orig_codec_options = target.codec_options
+        self._orig_codec_options: CodecOptions[_DocumentType] = target.codec_options
         if target.codec_options.type_registry._decoder_map:
             self._decode_custom = True
             # Keep the type registry so that we support encoding custom types
@@ -118,6 +136,7 @@ class ChangeStream(Generic[_DocumentType]):
 
         self._pipeline = copy.deepcopy(pipeline)
         self._full_document = full_document
+        self._full_document_before_change = full_document_before_change
         self._uses_start_after = start_after is not None
         self._uses_resume_after = resume_after is not None
         self._resume_token = copy.deepcopy(start_after or resume_after)
@@ -127,25 +146,32 @@ class ChangeStream(Generic[_DocumentType]):
         self._start_at_operation_time = start_at_operation_time
         self._session = session
         self._comment = comment
+        self._closed = False
+        self._timeout = self._target._timeout
+        self._show_expanded_events = show_expanded_events
         # Initialize cursor.
         self._cursor = self._create_cursor()
 
     @property
-    def _aggregation_command_class(self):
+    def _aggregation_command_class(self) -> Type[_AggregationCommand]:
         """The aggregation command class to be used."""
         raise NotImplementedError
 
     @property
-    def _client(self):
+    def _client(self) -> MongoClient:
         """The client against which the aggregation commands for
-        this ChangeStream will be run."""
+        this ChangeStream will be run.
+        """
         raise NotImplementedError
 
-    def _change_stream_options(self):
+    def _change_stream_options(self) -> dict[str, Any]:
         """Return the options dict for the $changeStream pipeline stage."""
-        options: Dict[str, Any] = {}
+        options: dict[str, Any] = {}
         if self._full_document is not None:
             options["fullDocument"] = self._full_document
+
+        if self._full_document_before_change is not None:
+            options["fullDocumentBeforeChange"] = self._full_document_before_change
 
         resume_token = self.resume_token
         if resume_token is not None:
@@ -156,9 +182,13 @@ class ChangeStream(Generic[_DocumentType]):
 
         if self._start_at_operation_time is not None:
             options["startAtOperationTime"] = self._start_at_operation_time
+
+        if self._show_expanded_events:
+            options["showExpandedEvents"] = self._show_expanded_events
+
         return options
 
-    def _command_options(self):
+    def _command_options(self) -> dict[str, Any]:
         """Return the options dict for the aggregation command."""
         options = {}
         if self._max_await_time_ms is not None:
@@ -167,14 +197,14 @@ class ChangeStream(Generic[_DocumentType]):
             options["batchSize"] = self._batch_size
         return options
 
-    def _aggregation_pipeline(self):
+    def _aggregation_pipeline(self) -> list[dict[str, Any]]:
         """Return the full aggregation pipeline for this ChangeStream."""
         options = self._change_stream_options()
         full_pipeline: list = [{"$changeStream": options}]
         full_pipeline.extend(self._pipeline)
         return full_pipeline
 
-    def _process_result(self, result, sock_info):
+    def _process_result(self, result: Mapping[str, Any], conn: Connection) -> None:
         """Callback that caches the postBatchResumeToken or
         startAtOperationTime from a changeStream aggregate command response
         containing an empty batch of change documents.
@@ -189,17 +219,19 @@ class ChangeStream(Generic[_DocumentType]):
                 self._start_at_operation_time is None
                 and self._uses_resume_after is False
                 and self._uses_start_after is False
-                and sock_info.max_wire_version >= 7
+                and conn.max_wire_version >= 7
             ):
                 self._start_at_operation_time = result.get("operationTime")
                 # PYTHON-2181: informative error on missing operationTime.
                 if self._start_at_operation_time is None:
                     raise OperationFailure(
                         "Expected field 'operationTime' missing from command "
-                        "response : %r" % (result,)
+                        f"response : {result!r}"
                     )
 
-    def _run_aggregation_cmd(self, session, explicit_session):
+    def _run_aggregation_cmd(
+        self, session: Optional[ClientSession], explicit_session: bool
+    ) -> CommandCursor:
         """Run the full aggregation pipeline for this ChangeStream and return
         the corresponding CommandCursor.
         """
@@ -213,14 +245,17 @@ class ChangeStream(Generic[_DocumentType]):
             comment=self._comment,
         )
         return self._client._retryable_read(
-            cmd.get_cursor, self._target._read_preference_for(session), session
+            cmd.get_cursor,
+            self._target._read_preference_for(session),
+            session,
+            operation=_Op.AGGREGATE,
         )
 
-    def _create_cursor(self):
+    def _create_cursor(self) -> CommandCursor:
         with self._client._tmp_session(self._session, close=False) as s:
             return self._run_aggregation_cmd(session=s, explicit_session=self._session is not None)
 
-    def _resume(self):
+    def _resume(self) -> None:
         """Reestablish this change stream after a resumable error."""
         try:
             self._cursor.close()
@@ -230,9 +265,10 @@ class ChangeStream(Generic[_DocumentType]):
 
     def close(self) -> None:
         """Close this ChangeStream."""
+        self._closed = True
         self._cursor.close()
 
-    def __iter__(self) -> "ChangeStream[_DocumentType]":
+    def __iter__(self) -> ChangeStream[_DocumentType]:
         return self
 
     @property
@@ -244,6 +280,7 @@ class ChangeStream(Generic[_DocumentType]):
         """
         return copy.deepcopy(self._resume_token)
 
+    @_csot.apply
     def next(self) -> _DocumentType:
         """Advance the cursor.
 
@@ -294,8 +331,9 @@ class ChangeStream(Generic[_DocumentType]):
 
         .. versionadded:: 3.8
         """
-        return self._cursor.alive
+        return not self._closed
 
+    @_csot.apply
     def try_next(self) -> Optional[_DocumentType]:
         """Advance the cursor without blocking indefinitely.
 
@@ -322,29 +360,36 @@ class ChangeStream(Generic[_DocumentType]):
         document is returned, otherwise, if the getMore returns no documents
         (because there have been no changes) then ``None`` is returned.
 
-        :Returns:
-          The next change document or ``None`` when no document is available
+        :return: The next change document or ``None`` when no document is available
           after running a single getMore or when the cursor is closed.
 
         .. versionadded:: 3.8
         """
+        if not self._closed and not self._cursor.alive:
+            self._resume()
+
         # Attempt to get the next change with at most one getMore and at most
         # one resume attempt.
         try:
-            change = self._cursor._try_next(True)
-        except (ConnectionFailure, CursorNotFound):
-            self._resume()
-            change = self._cursor._try_next(False)
-        except OperationFailure as exc:
-            if exc._max_wire_version is None:
-                raise
-            is_resumable = (
-                exc._max_wire_version >= 9 and exc.has_error_label("ResumableChangeStreamError")
-            ) or (exc._max_wire_version < 9 and exc.code in _RESUMABLE_GETMORE_ERRORS)
-            if not is_resumable:
-                raise
-            self._resume()
-            change = self._cursor._try_next(False)
+            try:
+                change = self._cursor._try_next(True)
+            except PyMongoError as exc:
+                if not _resumable(exc):
+                    raise
+                self._resume()
+                change = self._cursor._try_next(False)
+        except PyMongoError as exc:
+            # Close the stream after a fatal error.
+            if not _resumable(exc) and not exc.timeout:
+                self.close()
+            raise
+        except Exception:
+            self.close()
+            raise
+
+        # Check if the cursor was invalidated.
+        if not self._cursor.alive:
+            self._closed = True
 
         # If no changes are available.
         if change is None:
@@ -364,7 +409,7 @@ class ChangeStream(Generic[_DocumentType]):
             self.close()
             raise InvalidOperation(
                 "Cannot provide resume functionality when the resume token is missing."
-            )
+            ) from None
 
         # If this is the last change document from the current batch, cache the
         # postBatchResumeToken.
@@ -383,14 +428,14 @@ class ChangeStream(Generic[_DocumentType]):
             return _bson_to_dict(change.raw, self._orig_codec_options)
         return change
 
-    def __enter__(self) -> "ChangeStream":
+    def __enter__(self) -> ChangeStream[_DocumentType]:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
 
-class CollectionChangeStream(ChangeStream, Generic[_DocumentType]):
+class CollectionChangeStream(ChangeStream[_DocumentType]):
     """A change stream that watches changes on a single collection.
 
     Should not be called directly by application developers. Use
@@ -399,16 +444,18 @@ class CollectionChangeStream(ChangeStream, Generic[_DocumentType]):
     .. versionadded:: 3.7
     """
 
+    _target: Collection[_DocumentType]
+
     @property
-    def _aggregation_command_class(self):
+    def _aggregation_command_class(self) -> Type[_CollectionAggregationCommand]:
         return _CollectionAggregationCommand
 
     @property
-    def _client(self):
+    def _client(self) -> MongoClient[_DocumentType]:
         return self._target.database.client
 
 
-class DatabaseChangeStream(ChangeStream, Generic[_DocumentType]):
+class DatabaseChangeStream(ChangeStream[_DocumentType]):
     """A change stream that watches changes on all collections in a database.
 
     Should not be called directly by application developers. Use
@@ -417,16 +464,18 @@ class DatabaseChangeStream(ChangeStream, Generic[_DocumentType]):
     .. versionadded:: 3.7
     """
 
+    _target: Database[_DocumentType]
+
     @property
-    def _aggregation_command_class(self):
+    def _aggregation_command_class(self) -> Type[_DatabaseAggregationCommand]:
         return _DatabaseAggregationCommand
 
     @property
-    def _client(self):
+    def _client(self) -> MongoClient[_DocumentType]:
         return self._target.client
 
 
-class ClusterChangeStream(DatabaseChangeStream, Generic[_DocumentType]):
+class ClusterChangeStream(DatabaseChangeStream[_DocumentType]):
     """A change stream that watches changes on all collections in the cluster.
 
     Should not be called directly by application developers. Use
@@ -435,7 +484,7 @@ class ClusterChangeStream(DatabaseChangeStream, Generic[_DocumentType]):
     .. versionadded:: 3.7
     """
 
-    def _change_stream_options(self):
-        options = super(ClusterChangeStream, self)._change_stream_options()
+    def _change_stream_options(self) -> dict[str, Any]:
+        options = super()._change_stream_options()
         options["allChangesForCluster"] = True
         return options

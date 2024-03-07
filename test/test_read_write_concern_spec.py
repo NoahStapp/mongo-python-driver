@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Run the read and write concern tests."""
+from __future__ import annotations
 
 import json
 import os
@@ -24,7 +25,7 @@ sys.path[0:0] = [""]
 from test import IntegrationTest, client_context, unittest
 from test.utils import (
     EventListener,
-    TestCreator,
+    SpecTestCreator,
     disable_replication,
     enable_replication,
     rs_or_single_client,
@@ -85,20 +86,20 @@ class TestReadWriteConcernSpec(IntegrationTest):
         ]
 
         for name, f in ops:
-            listener.results.clear()
+            listener.reset()
             f()
 
-            self.assertGreaterEqual(len(listener.results["started"]), 1)
-            for i, event in enumerate(listener.results["started"]):
+            self.assertGreaterEqual(len(listener.started_events), 1)
+            for _i, event in enumerate(listener.started_events):
                 self.assertNotIn(
                     "readConcern",
                     event.command,
-                    "%s sent default readConcern with %s" % (name, event.command_name),
+                    f"{name} sent default readConcern with {event.command_name}",
                 )
                 self.assertNotIn(
                     "writeConcern",
                     event.command,
-                    "%s sent default writeConcern with %s" % (name, event.command_name),
+                    f"{name} sent default writeConcern with {event.command_name}",
                 )
 
     def assertWriteOpsRaise(self, write_concern, expected_exception):
@@ -221,7 +222,7 @@ class TestReadWriteConcernSpec(IntegrationTest):
         self.assertIsNotNone(ctx.exception.details)
         assert ctx.exception.details is not None
         self.assertIsNotNone(ctx.exception.details.get("errInfo"))
-        for event in listener.results["succeeded"]:
+        for event in listener.succeeded_events:
             if event.command_name == "insert":
                 self.assertEqual(event.reply["writeErrors"][0], ctx.exception.details)
                 break
@@ -280,7 +281,7 @@ def create_document_test(test_case):
                 self.assertEqual(write_concern.acknowledged, test_case["isAcknowledged"])
                 self.assertEqual(write_concern.is_server_default, test_case["isServerDefault"])
         if "readConcern" in test_case:
-            # Any string for 'level' is equaly valid
+            # Any string for 'level' is equally valid
             read_concern = ReadConcern(**test_case["readConcern"])
             self.assertEqual(read_concern.document, test_case["readConcernDocument"])
             self.assertEqual(not bool(read_concern.level), test_case["isServerDefault"])
@@ -307,7 +308,7 @@ def create_tests():
             fname = os.path.splitext(filename)[0]
             for test_case in test_cases:
                 new_test = create_test(test_case)
-                test_name = "test_%s_%s_%s" % (
+                test_name = "test_{}_{}_{}".format(
                     dirname.replace("-", "_"),
                     fname.replace("-", "_"),
                     str(test_case["description"].lower().replace(" ", "_")),
@@ -337,7 +338,7 @@ def create_operation_test(scenario_def, test, name):
     return run_scenario
 
 
-test_creator = TestCreator(create_operation_test, TestOperation, TestOperation.TEST_PATH)
+test_creator = SpecTestCreator(create_operation_test, TestOperation, TestOperation.TEST_PATH)
 test_creator.create_tests()
 
 
