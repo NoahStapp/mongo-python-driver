@@ -28,7 +28,7 @@ from pymongo.asynchronous.periodic_executor import _shutdown_executors
 from pymongo.asynchronous.pool import _is_faas
 from pymongo.asynchronous.read_preferences import MovingAverage
 from pymongo.asynchronous.server_description import ServerDescription
-from pymongo.asynchronous.srv_resolver import _SrvResolver
+from pymongo.asynchronous.srv_resolver import _AsyncSrvResolver
 from pymongo.errors import NetworkTimeout, NotPrimaryError, OperationFailure, _OperationCancelled
 from pymongo.lock import _create_lock
 
@@ -358,7 +358,7 @@ class SrvMonitor(MonitorBase):
         Returns a list of ServerDescriptions.
         """
         try:
-            resolver = _SrvResolver(
+            resolver = _AsyncSrvResolver(
                 self._fqdn,
                 self._settings.pool_options.connect_timeout,
                 self._settings.srv_service_name,

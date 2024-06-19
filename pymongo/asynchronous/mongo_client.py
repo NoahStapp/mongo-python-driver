@@ -734,9 +734,9 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
 
         # _pool_class, _monitor_class, and _condition_class are for deep
         # customization of PyMongo, e.g. Motor.
-        pool_class = kwargs.pop("_pool_class", None)
-        monitor_class = kwargs.pop("_monitor_class", None)
-        condition_class = kwargs.pop("_condition_class", None)
+        self._pool_class = kwargs.pop("_pool_class", None)
+        self._monitor_class = kwargs.pop("_monitor_class", None)
+        self._condition_class = kwargs.pop("_condition_class", None)
 
         # Parse options passed as kwargs.
         keyword_opts = common._CaseInsensitiveDictionary(kwargs)
@@ -750,6 +750,7 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
         fqdn = None
         srv_service_name = keyword_opts.get("srvservicename")
         srv_max_hosts = keyword_opts.get("srvmaxhosts")
+        self._is_srv = False
         if len([h for h in host if "/" in h]) > 1:
             raise ConfigurationError("host must not contain multiple MongoDB URIs")
         for entity in host:
@@ -763,30 +764,60 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
                     timeout = common.validate_timeout_or_none_or_zero(
                         keyword_opts.cased_key("connecttimeoutms"), timeout
                     )
-                res = uri_parser.parse_uri(
-                    entity,
-                    port,
-                    validate=True,
-                    warn=True,
-                    normalize=False,
-                    connect_timeout=timeout,
-                    srv_service_name=srv_service_name,
-                    srv_max_hosts=srv_max_hosts,
-                )
-                seeds.update(res["nodelist"])
-                username = res["username"] or username
-                password = res["password"] or password
-                dbase = res["database"] or dbase
-                opts = res["options"]
-                fqdn = res["fqdn"]
-            else:
-                seeds.update(uri_parser.split_hosts(entity, port))
-        if not seeds:
-            raise ConfigurationError("need to specify at least one host")
+                self._is_srv = uri_parser.is_srv_uri(entity)
+                if not self._is_srv:
+                    res = uri_parser.parse_uri(
+                        entity,
+                        port,
+                        validate=True,
+                        warn=True,
+                        normalize=False,
+                        srv_service_name=srv_service_name,
+                        srv_max_hosts=srv_max_hosts,
+                    )
+                    seeds.update(res["nodelist"])
+                    username = res["username"] or username
+                    password = res["password"] or password
+                    dbase = res["database"] or dbase
+                    opts = res["options"]
+                    fqdn = res["fqdn"]
+                else:
+                    res = uri_parser._parse_uri_helper(
+                        entity,
+                        validate=True,
+                        warn=True,
+                        normalize=False,
+                        srv_service_name=srv_service_name,
+                        srv_max_hosts=srv_max_hosts,
+                    )
+                    username = res["username"] or username
+                    password = res["password"] or password
+                    dbase = res["database"] or dbase
+                    opts = res["options"]
+                    fqdn = res["fqdn"]
+                    srv_service_name = res["srv_service_name"]
+                    srv_max_hosts = res["srv_max_hosts"]
 
-        for hostname in [node[0] for node in seeds]:
-            if _detect_external_db(hostname):
-                break
+                    self._uri_args = {
+                        "uri": entity,
+                        "validate": True,
+                        "warn": True,
+                        "normalize": False,
+                        "connect_timeout": timeout,
+                        "srv_service_name": srv_service_name,
+                        "srv_max_hosts": srv_max_hosts,
+                    }
+                    self._resolved_srv = False
+            else:
+                self._is_srv = False
+                seeds.update(uri_parser.split_hosts(entity, port))
+        if not self._is_srv:
+            if not seeds:
+                raise ConfigurationError("need to specify at least one host")
+
+            for hostname in [node[0] for node in seeds]:
+                if _detect_external_db(hostname):
+                    break
 
         # Add options with named keyword arguments to the parsed kwarg options.
         if type_registry is not None:
@@ -838,10 +869,10 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
         self._topology_settings = TopologySettings(
             seeds=seeds,
             replica_set_name=options.replica_set_name,
-            pool_class=pool_class,
+            pool_class=self._pool_class,
             pool_options=options.pool_options,
-            monitor_class=monitor_class,
-            condition_class=condition_class,
+            monitor_class=self._monitor_class,
+            condition_class=self._condition_class,
             local_threshold_ms=options.local_threshold_ms,
             server_selection_timeout=options.server_selection_timeout,
             server_selector=options.server_selector,
@@ -1532,6 +1563,10 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
         If this client was created with "connect=False", calling _get_topology
         launches the connection process in the background.
         """
+        if self._is_srv and not self._resolved_srv:
+            async with self._lock:
+                await self._resolve_srv()
+                self._topology = Topology(self._topology_settings)
         if not self._opened:
             await self._topology.open()
             async with self._lock:
@@ -2020,6 +2055,9 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
         maintain connection pool parameters.
         """
         try:
+            if self._is_srv and not self._resolved_srv:
+                async with self._lock:
+                    await self._resolve_srv()
             await self._process_kill_cursors()
             await self._topology.update_pool()
         except Exception as exc:
@@ -2027,6 +2065,36 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
                 return
             else:
                 helpers._handle_exception()
+
+    async def _resolve_srv(self):
+        res = await uri_parser.parse_srv_uri(**self._uri_args)
+        seeds = res["nodelist"]
+        fqdn = res["fqdn"]
+
+        for hostname in [node[0] for node in seeds]:
+            if _detect_external_db(hostname):
+                break
+
+        self._topology_settings = TopologySettings(
+            seeds=seeds,
+            replica_set_name=self._options.replica_set_name,
+            pool_class=self._pool_class,
+            pool_options=self._options.pool_options,
+            monitor_class=self._monitor_class,
+            condition_class=self._condition_class,
+            local_threshold_ms=self._options.local_threshold_ms,
+            server_selection_timeout=self._options.server_selection_timeout,
+            server_selector=self._options.server_selector,
+            heartbeat_frequency=self._options.heartbeat_frequency,
+            fqdn=fqdn,
+            direct_connection=self._options.direct_connection,
+            load_balanced=self._options.load_balanced,
+            srv_service_name=self._uri_args.get("srv_service_name"),
+            srv_max_hosts=self._uri_args.get("srv_max_hosts"),
+            server_monitoring_mode=self._options.server_monitoring_mode,
+        )
+
+        self._resolved_srv = True
 
     def _return_server_session(
         self, server_session: Union[_ServerSession, _EmptyServerSession]

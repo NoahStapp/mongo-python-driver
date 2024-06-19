@@ -573,7 +573,8 @@ class ClientUnitTest(unittest.TestCase):
                 MongoClient(host)
             for host in srv_hosts:
                 mock_get_hosts.return_value = [(host, 1)]
-                MongoClient(host)
+                c = MongoClient(host)
+                wait_until(lambda: c._resolved_srv, "resolve SRV uri")
             MongoClient(multi_host)
             logs = [record.message for record in cm.records if record.name == "pymongo.client"]
             self.assertEqual(len(logs), 7)
@@ -596,7 +597,8 @@ class ClientUnitTest(unittest.TestCase):
             for host in srv_hosts:
                 mock_get_hosts.return_value = [(host, 1)]
                 with self.assertWarns(UserWarning):
-                    MongoClient(host)
+                    c = MongoClient(host)
+                    wait_until(lambda: c._resolved_srv, "resolve SRV uri")
             with self.assertWarns(UserWarning):
                 MongoClient(multi_host)
 
@@ -1783,6 +1785,7 @@ class TestClient(IntegrationTest):
 
     def test_srv_max_hosts_kwarg(self):
         client = MongoClient("mongodb+srv://test1.test.build.10gen.cc/")
+        wait_until(lambda: client._resolved_srv, "resolve SRV")
         self.assertGreater(len(client.topology_description.server_descriptions()), 1)
         client = MongoClient("mongodb+srv://test1.test.build.10gen.cc/", srvmaxhosts=1)
         self.assertEqual(len(client.topology_description.server_descriptions()), 1)

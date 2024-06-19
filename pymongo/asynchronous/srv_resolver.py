@@ -46,12 +46,12 @@ def maybe_decode(text: Union[str, bytes]) -> str:
 
 
 # PYTHON-2667 Lazily call dns.resolver methods for compatibility with eventlet.
-def _resolve(*args: Any, **kwargs: Any) -> resolver.Answer:
-    from dns import resolver
+async def _resolve(*args: Any, **kwargs: Any) -> resolver.Answer:
+    from dns import asyncresolver, resolver
 
-    if hasattr(resolver, "resolve"):
+    if hasattr(asyncresolver, "resolve"):
         # dnspython >= 2
-        return resolver.resolve(*args, **kwargs)
+        return await asyncresolver.resolve(*args, **kwargs)
     # dnspython 1.X
     return resolver.query(*args, **kwargs)
 
@@ -62,7 +62,7 @@ _INVALID_HOST_MSG = (
 )
 
 
-class _SrvResolver:
+class _AsyncSrvResolver:
     def __init__(
         self,
         fqdn: str,
@@ -89,11 +89,11 @@ class _SrvResolver:
         if self.__slen < 2:
             raise ConfigurationError(_INVALID_HOST_MSG % (fqdn,))
 
-    def get_options(self) -> Optional[str]:
+    async def get_options(self) -> Optional[str]:
         from dns import resolver
 
         try:
-            results = _resolve(self.__fqdn, "TXT", lifetime=self.__connect_timeout)
+            results = await _resolve(self.__fqdn, "TXT", lifetime=self.__connect_timeout)
         except (resolver.NoAnswer, resolver.NXDOMAIN):
             # No TXT records
             return None
@@ -103,9 +103,9 @@ class _SrvResolver:
             raise ConfigurationError("Only one TXT record is supported")
         return (b"&".join([b"".join(res.strings) for res in results])).decode("utf-8")
 
-    def _resolve_uri(self, encapsulate_errors: bool) -> resolver.Answer:
+    async def _resolve_uri(self, encapsulate_errors: bool) -> resolver.Answer:
         try:
-            results = _resolve(
+            results = await _resolve(
                 "_" + self.__srv + "._tcp." + self.__fqdn, "SRV", lifetime=self.__connect_timeout
             )
         except Exception as exc:
@@ -116,10 +116,10 @@ class _SrvResolver:
             raise ConfigurationError(str(exc)) from None
         return results
 
-    def _get_srv_response_and_hosts(
+    async def _get_srv_response_and_hosts(
         self, encapsulate_errors: bool
     ) -> tuple[resolver.Answer, list[tuple[str, Any]]]:
-        results = self._resolve_uri(encapsulate_errors)
+        results = await self._resolve_uri(encapsulate_errors)
 
         # Construct address tuples
         nodes = [
@@ -138,12 +138,12 @@ class _SrvResolver:
             nodes = random.sample(nodes, min(self.__srv_max_hosts, len(nodes)))
         return results, nodes
 
-    def get_hosts(self) -> list[tuple[str, Any]]:
-        _, nodes = self._get_srv_response_and_hosts(True)
+    async def get_hosts(self) -> list[tuple[str, Any]]:
+        _, nodes = await self._get_srv_response_and_hosts(True)
         return nodes
 
-    def get_hosts_and_min_ttl(self) -> tuple[list[tuple[str, Any]], int]:
-        results, nodes = self._get_srv_response_and_hosts(False)
+    async def get_hosts_and_min_ttl(self) -> tuple[list[tuple[str, Any]], int]:
+        results, nodes = await self._get_srv_response_and_hosts(False)
         rrset = results.rrset
         ttl = rrset.ttl if rrset else 0
         return nodes, ttl
