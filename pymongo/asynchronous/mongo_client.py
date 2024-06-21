@@ -1564,9 +1564,8 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
         launches the connection process in the background.
         """
         if self._is_srv and not self._resolved_srv:
-            async with self._lock:
-                await self._resolve_srv()
-                self._topology = Topology(self._topology_settings)
+            await self._resolve_srv()
+            self._topology = Topology(self._topology_settings)
         if not self._opened:
             await self._topology.open()
             async with self._lock:
@@ -2056,8 +2055,7 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
         """
         try:
             if self._is_srv and not self._resolved_srv:
-                async with self._lock:
-                    await self._resolve_srv()
+                await self._resolve_srv()
             await self._process_kill_cursors()
             await self._topology.update_pool()
         except Exception as exc:

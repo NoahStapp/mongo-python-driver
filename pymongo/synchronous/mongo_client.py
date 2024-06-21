@@ -1561,9 +1561,8 @@ class MongoClient(common.BaseObject, Generic[_DocumentType]):
         launches the connection process in the background.
         """
         if self._is_srv and not self._resolved_srv:
-            with self._lock:
-                self._resolve_srv()
-                self._topology = Topology(self._topology_settings)
+            self._resolve_srv()
+            self._topology = Topology(self._topology_settings)
         if not self._opened:
             self._topology.open()
             with self._lock:
@@ -2053,8 +2052,7 @@ class MongoClient(common.BaseObject, Generic[_DocumentType]):
         """
         try:
             if self._is_srv and not self._resolved_srv:
-                with self._lock:
-                    self._resolve_srv()
+                self._resolve_srv()
             self._process_kill_cursors()
             self._topology.update_pool()
         except Exception as exc:
