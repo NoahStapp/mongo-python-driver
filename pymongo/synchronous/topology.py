@@ -25,10 +25,11 @@ import time
 import warnings
 import weakref
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence, Union, cast
 
 from pymongo import _csot, helpers_constants
 from pymongo.errors import (
+    ConfigurationError,
     ConnectionFailure,
     InvalidOperation,
     NetworkTimeout,
@@ -39,15 +40,19 @@ from pymongo.errors import (
     WriteError,
 )
 from pymongo.lock import _create_lock
-from pymongo.synchronous import common, periodic_executor
+from pymongo.synchronous import common, periodic_executor, uri_parser
 from pymongo.synchronous.client_session import _ServerSession, _ServerSessionPool
 from pymongo.synchronous.hello import Hello
 from pymongo.synchronous.logger import (
+    _CLIENT_LOGGER,
     _SERVER_SELECTION_LOGGER,
     _debug_log,
+    _log_or_warn,
     _ServerSelectionStatusMessage,
 )
 from pymongo.synchronous.monitor import SrvMonitor
+from pymongo.synchronous.monitoring import _EventListeners
+from pymongo.synchronous.periodic_executor import PeriodicExecutor
 from pymongo.synchronous.pool import Pool, PoolOptions
 from pymongo.synchronous.server import Server
 from pymongo.synchronous.server_description import ServerDescription
@@ -58,6 +63,7 @@ from pymongo.synchronous.server_selectors import (
     secondary_server_selector,
     writable_server_selector,
 )
+from pymongo.synchronous.settings import TopologySettings
 from pymongo.synchronous.topology_description import (
     SRV_POLLING_TOPOLOGIES,
     TOPOLOGY_TYPE,
@@ -65,10 +71,15 @@ from pymongo.synchronous.topology_description import (
     _updated_topology_description_srv_polling,
     updated_topology_description,
 )
+from pymongo.synchronous.topology_options import TopologyOptions
+from pymongo.synchronous.uri_parser import (
+    _check_options,
+    _handle_security_options,
+    _normalize_options,
+)
 
 if TYPE_CHECKING:
     from bson import ObjectId
-    from pymongo.synchronous.settings import TopologySettings
     from pymongo.synchronous.typings import ClusterTime, _Address
 
 _IS_SYNC = True
@@ -96,11 +107,145 @@ def process_events_queue(queue_ref: weakref.ReferenceType[queue.Queue]) -> bool:
 class Topology:
     """Monitor a topology of one or more servers."""
 
-    def __init__(self, topology_settings: TopologySettings):
-        self._topology_id = topology_settings._topology_id
-        self._listeners = topology_settings._pool_options._event_listeners
+    def __init__(self, host: Union[str, Sequence[str]], port: int, **kwargs: Any):
+        # _pool_class, _monitor_class, and _condition_class are for deep
+        # customization of PyMongo, e.g. Motor.
+        self._host = host
+        self._port = port
+        self._keyword_opts = common._CaseInsensitiveDictionary(kwargs)
+        self._pool_class = kwargs.pop("_pool_class", None)
+        self._monitor_class = kwargs.pop("_monitor_class", None)
+        self._condition_class = kwargs.pop("_condition_class", None)
+
+        self._resolved_host = False
+        self._opened = False
+        self._closed = False
+        self._servers: dict[_Address, Server] = {}
+        self._pid: Optional[int] = None
+        self._max_cluster_time: Optional[ClusterTime] = None
+        self._session_pool = _ServerSessionPool()
+
+        # Every instance variable below will be assigned after opening
+        self._lock = None
+        self._condition = None
+        self._topology_id: ObjectId = None
+        self._listeners: _EventListeners = None
+        self._publish_server: bool = None
+        self._publish_tp: bool = None
+
+        # Create events queue if there are publishers.
+        self._events: Optional[queue.Queue] = None
+        self.__events_executor: Optional[PeriodicExecutor] = None
+
+        self._settings: TopologySettings = None
+        self._description: TopologyDescription = None
+        self._seed_addresses: list[dict[_Address, ServerDescription]] = None
+
+        self._srv_monitor: Optional[SrvMonitor] = None
+
+    def _resolve_uri(self):
+        """Resolve a connection URI and determine the associated Topology settings."""
+        seeds = set()
+        username = None
+        password = None
+        dbase = None
+        opts = common._CaseInsensitiveDictionary()
+        fqdn = None
+        srv_service_name = self._keyword_opts.get("srvservicename")
+        srv_max_hosts = self._keyword_opts.get("srvmaxhosts")
+        if len([h for h in self._host if "/" in h]) > 1:
+            raise ConfigurationError("host must not contain multiple MongoDB URIs")
+        for entity in self._host:
+            # A hostname can only include a-z, 0-9, '-' and '.'. If we find a '/'
+            # it must be a URI,
+            # https://en.wikipedia.org/wiki/Hostname#Restrictions_on_valid_host_names
+            if "/" in entity:
+                # Determine connection timeout from kwargs.
+                timeout = self._keyword_opts.get("connecttimeoutms")
+                if timeout is not None:
+                    timeout = common.validate_timeout_or_none_or_zero(
+                        self._keyword_opts.cased_key("connecttimeoutms"), timeout
+                    )
+                res = uri_parser.parse_uri(
+                    entity,
+                    self._port,
+                    validate=True,
+                    warn=True,
+                    normalize=False,
+                    connect_timeout=timeout,
+                    srv_service_name=srv_service_name,
+                    srv_max_hosts=srv_max_hosts,
+                )
+                seeds.update(res["nodelist"])
+                username = res["username"] or username
+                password = res["password"] or password
+                dbase = res["database"] or dbase
+                opts = res["options"]
+                fqdn = res["fqdn"]
+            else:
+                seeds.update(uri_parser.split_hosts(entity, self._port))
+        if not seeds:
+            raise ConfigurationError("need to specify at least one host")
+
+        for hostname in [node[0] for node in seeds]:
+            if _detect_external_db(hostname):
+                break
+
+        # Validate kwarg options.
+        self._keyword_opts = common._CaseInsensitiveDictionary(
+            dict(
+                common.validate(self._keyword_opts.cased_key(k), v)
+                for k, v in self._keyword_opts.items()
+            )
+        )
+
+        # Override connection string options with kwarg options.
+        opts.update(self._keyword_opts)
+
+        if srv_service_name is None:
+            srv_service_name = opts.get("srvServiceName", common.SRV_SERVICE_NAME)
+
+        srv_max_hosts = srv_max_hosts or opts.get("srvmaxhosts")
+        # Handle security-option conflicts in combined options.
+        opts = _handle_security_options(opts)
+        # Normalize combined options.
+        opts = _normalize_options(opts)
+        _check_options(seeds, opts)
+
+        # Username and password passed as kwargs override user info in URI.
+        username = opts.get("username", username)
+        password = opts.get("password", password)
+        self._options = options = TopologyOptions(username, password, dbase, opts)
+
+        self._init(
+            TopologySettings(
+                seeds=seeds,
+                replica_set_name=options.replica_set_name,
+                pool_class=self._pool_class,
+                pool_options=options.pool_options,
+                monitor_class=self._monitor_class,
+                condition_class=self._condition_class,
+                local_threshold_ms=options.local_threshold_ms,
+                server_selection_timeout=options.server_selection_timeout,
+                server_selector=options.server_selector,
+                heartbeat_frequency=options.heartbeat_frequency,
+                fqdn=fqdn,
+                direct_connection=options.direct_connection,
+                load_balanced=options.load_balanced,
+                srv_service_name=srv_service_name,
+                srv_max_hosts=srv_max_hosts,
+                server_monitoring_mode=options.server_monitoring_mode,
+            )
+        )
+
+    def _init(self, settings: TopologySettings):
+        self._topology_id = settings._topology_id
+        self._listeners = settings._pool_options._event_listeners
         self._publish_server = self._listeners is not None and self._listeners.enabled_for_server
         self._publish_tp = self._listeners is not None and self._listeners.enabled_for_topology
+
+        self._lock = _create_lock()
+        self._condition = settings.condition_class(self._lock)  # type: ignore[arg-type]
 
         # Create events queue if there are publishers.
         self._events = None
@@ -112,14 +257,14 @@ class Topology:
         if self._publish_tp:
             assert self._events is not None
             self._events.put((self._listeners.publish_topology_opened, (self._topology_id,)))
-        self._settings = topology_settings
+        self._settings = settings
         topology_description = TopologyDescription(
-            topology_settings.get_topology_type(),
-            topology_settings.get_server_descriptions(),
-            topology_settings.replica_set_name,
+            settings.get_topology_type(),
+            settings.get_server_descriptions(),
+            settings.replica_set_name,
             None,
             None,
-            topology_settings,
+            settings,
         )
 
         self._description = topology_description
@@ -135,21 +280,13 @@ class Topology:
                 )
             )
 
-        for seed in topology_settings.seeds:
+        for seed in settings.seeds:
             if self._publish_server:
                 assert self._events is not None
                 self._events.put((self._listeners.publish_server_opened, (seed, self._topology_id)))
 
         # Store the seed list to help diagnose errors in _error_message().
         self._seed_addresses = list(topology_description.server_descriptions())
-        self._opened = False
-        self._closed = False
-        self._lock = _create_lock()
-        self._condition = self._settings.condition_class(self._lock)  # type: ignore[arg-type]
-        self._servers: dict[_Address, Server] = {}
-        self._pid: Optional[int] = None
-        self._max_cluster_time: Optional[ClusterTime] = None
-        self._session_pool = _ServerSessionPool()
 
         if self._publish_server or self._publish_tp:
             assert self._events is not None
@@ -188,6 +325,9 @@ class Topology:
           forking.
 
         """
+        if not self._resolved_host:
+            self._resolve_uri()
+            self._resolved_host = True
         pid = os.getpid()
         if self._pid is None:
             self._pid = pid
@@ -1017,3 +1157,28 @@ def _filter_servers(
 
     # If not possible to pick a prioritized server, return the original list
     return filtered or candidates
+
+
+def _detect_external_db(entity: str) -> bool:
+    """Detects external database hosts and logs an informational message at the INFO level."""
+    entity = entity.lower()
+    cosmos_db_hosts = [".cosmos.azure.com"]
+    document_db_hosts = [".docdb.amazonaws.com", ".docdb-elastic.amazonaws.com"]
+
+    for host in cosmos_db_hosts:
+        if entity.endswith(host):
+            _log_or_warn(
+                _CLIENT_LOGGER,
+                "You appear to be connected to a CosmosDB cluster. For more information regarding feature "
+                "compatibility and support please visit https://www.mongodb.com/supportability/cosmosdb",
+            )
+            return True
+    for host in document_db_hosts:
+        if entity.endswith(host):
+            _log_or_warn(
+                _CLIENT_LOGGER,
+                "You appear to be connected to a DocumentDB cluster. For more information regarding feature "
+                "compatibility and support please visit https://www.mongodb.com/supportability/documentdb",
+            )
+            return True
+    return False

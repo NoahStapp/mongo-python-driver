@@ -31,7 +31,6 @@ from typing import (
 )
 from urllib.parse import unquote_plus
 
-from pymongo.asynchronous.client_options import _parse_ssl_options
 from pymongo.asynchronous.common import (
     INTERNAL_URI_OPTION_NAME_MAP,
     SRV_SERVICE_NAME,
@@ -40,6 +39,7 @@ from pymongo.asynchronous.common import (
     get_validated_options,
 )
 from pymongo.asynchronous.srv_resolver import _AsyncSrvResolver, _have_dnspython
+from pymongo.asynchronous.topology_options import _parse_ssl_options
 from pymongo.asynchronous.typings import _Address
 from pymongo.errors import ConfigurationError, InvalidURI
 
@@ -320,7 +320,7 @@ def split_options(
     """Takes the options portion of a MongoDB URI, validates each option
     and returns the options in a dictionary.
 
-    :param opt: A string representing MongoDB URI options.
+    :param opts: A string representing MongoDB URI options.
     :param validate: If ``True`` (the default), validate and normalize all
           options.
     :param warn: If ``False`` (the default), suppress all warnings raised
@@ -406,126 +406,13 @@ def _check_options(nodes: Sized, options: Mapping[str, Any]) -> None:
             raise ConfigurationError("Cannot specify replicaSet with loadBalanced=true")
 
 
-def parse_uri(
+async def parse_uri(
     uri: str,
     default_port: Optional[int] = DEFAULT_PORT,
     validate: bool = True,
     warn: bool = False,
     normalize: bool = True,
-    srv_service_name: Optional[str] = None,
-    srv_max_hosts: Optional[int] = None,
-) -> dict[str, Any]:
-    """Parse and validate a non-SRV MongoDB URI."""
-    parsed = _parse_uri_helper(uri, validate, warn, normalize, srv_service_name, srv_max_hosts)
-    options = parsed.get("options")
-    hosts = parsed.get("hosts")
-
-    if srv_service_name is not None or options.get("srvServiceName") is not None:
-        raise ConfigurationError(
-            "The srvServiceName option is only allowed with 'mongodb+srv://' URIs"
-        )
-    elif srv_max_hosts or options.get("srvMaxHosts"):
-        raise ConfigurationError(
-            "The srvMaxHosts option is only allowed with 'mongodb+srv://' URIs"
-        )
-    else:
-        nodes = split_hosts(hosts, default_port=default_port)
-
-    _check_options(nodes, options)
-
-    return {
-        "nodelist": nodes,
-        "username": parsed.get("username"),
-        "password": parsed.get("password"),
-        "database": parsed.get("database"),
-        "collection": parsed.get("collection"),
-        "options": options,
-        "fqdn": None,
-    }
-
-
-async def parse_srv_uri(
-    uri: str,
-    validate: bool = True,
-    warn: bool = False,
-    normalize: bool = True,
     connect_timeout: Optional[float] = None,
-    srv_service_name: Optional[str] = None,
-    srv_max_hosts: Optional[int] = None,
-) -> dict[str, Any]:
-    """Parse and validate an SRV MongoDB URI."""
-    parsed = _parse_uri_helper(uri, validate, warn, normalize, srv_service_name, srv_max_hosts)
-    options = parsed.get("options")
-    hosts = parsed.get("hosts")
-    srv_service_name = srv_service_name or parsed.get("srv_service_name")
-    srv_max_hosts = srv_max_hosts or parsed.get("srv_max_hosts")
-
-    if options.get("directConnection"):
-        raise ConfigurationError(f"Cannot specify directConnection=true with {SRV_SCHEME} URIs")
-    nodes = split_hosts(hosts, default_port=None)
-    if len(nodes) != 1:
-        raise InvalidURI(f"{SRV_SCHEME} URIs must include one, and only one, hostname")
-    fqdn, port = nodes[0]
-    if port is not None:
-        raise InvalidURI(f"{SRV_SCHEME} URIs must not include a port number")
-
-    # Use the connection timeout. connectTimeoutMS passed as a keyword
-    # argument overrides the same option passed in the connection string.
-    connect_timeout = connect_timeout or options.get("connectTimeoutMS")
-    dns_resolver = _AsyncSrvResolver(fqdn, connect_timeout, srv_service_name, srv_max_hosts)
-    nodes = await dns_resolver.get_hosts()
-    dns_options = await dns_resolver.get_options()
-    if dns_options:
-        parsed_dns_options = split_options(dns_options, validate, warn, normalize)
-        if set(parsed_dns_options) - _ALLOWED_TXT_OPTS:
-            raise ConfigurationError(
-                "Only authSource, replicaSet, and loadBalanced are supported from DNS"
-            )
-        for opt, val in parsed_dns_options.items():
-            if opt not in options:
-                options[opt] = val
-    if options.get("loadBalanced") and srv_max_hosts:
-        raise InvalidURI("You cannot specify loadBalanced with srvMaxHosts")
-    if options.get("replicaSet") and srv_max_hosts:
-        raise InvalidURI("You cannot specify replicaSet with srvMaxHosts")
-    if "tls" not in options and "ssl" not in options:
-        options["tls"] = True if validate else "true"
-
-    _check_options(nodes, options)
-
-    return {
-        "nodelist": nodes,
-        "username": parsed.get("username"),
-        "password": parsed.get("password"),
-        "database": parsed.get("database"),
-        "collection": parsed.get("collection"),
-        "options": options,
-        "fqdn": fqdn,
-    }
-
-
-def is_srv_uri(uri: str) -> bool:
-    if uri.startswith(SCHEME):
-        return False
-    elif uri.startswith(SRV_SCHEME):
-        if not _have_dnspython():
-            python_path = sys.executable or "python"
-            raise ConfigurationError(
-                'The "dnspython" module must be '
-                "installed to use mongodb+srv:// URIs. "
-                "To fix this error install pymongo again:\n "
-                "%s -m pip install pymongo>=4.3" % (python_path)
-            )
-        return True
-    else:
-        raise InvalidURI(f"Invalid URI scheme: URI must begin with '{SCHEME}' or '{SRV_SCHEME}'")
-
-
-def _parse_uri_helper(
-    uri: str,
-    validate: bool = True,
-    warn: bool = False,
-    normalize: bool = True,
     srv_service_name: Optional[str] = None,
     srv_max_hosts: Optional[int] = None,
 ) -> dict[str, Any]:
@@ -582,11 +469,25 @@ def _parse_uri_helper(
     .. versionchanged:: 3.1
         ``warn`` added so invalid options can be ignored.
     """
-    is_srv = is_srv_uri(uri)
-    if is_srv:
+    if uri.startswith(SCHEME):
+        is_srv = False
+        scheme_free = uri[SCHEME_LEN:]
+    elif uri.startswith(SRV_SCHEME):
+        if not _have_dnspython():
+            python_path = sys.executable or "python"
+            raise ConfigurationError(
+                'The "dnspython" module must be '
+                "installed to use mongodb+srv:// URIs. "
+                "To fix this error install pymongo again:\n "
+                "%s -m pip install pymongo>=4.3" % (python_path)
+            )
+        is_srv = True
         scheme_free = uri[SRV_SCHEME_LEN:]
     else:
-        scheme_free = uri[SCHEME_LEN:]
+        raise InvalidURI(f"Invalid URI scheme: URI must begin with '{SCHEME}' or '{SRV_SCHEME}'")
+
+    if not scheme_free:
+        raise InvalidURI("Must provide at least one hostname or IP.")
 
     user = None
     passwd = None
@@ -625,17 +526,58 @@ def _parse_uri_helper(
     hosts = unquote_plus(hosts)
     fqdn = None
     srv_max_hosts = srv_max_hosts or options.get("srvMaxHosts")
+    if is_srv:
+        if options.get("directConnection"):
+            raise ConfigurationError(f"Cannot specify directConnection=true with {SRV_SCHEME} URIs")
+        nodes = split_hosts(hosts, default_port=None)
+        if len(nodes) != 1:
+            raise InvalidURI(f"{SRV_SCHEME} URIs must include one, and only one, hostname")
+        fqdn, port = nodes[0]
+        if port is not None:
+            raise InvalidURI(f"{SRV_SCHEME} URIs must not include a port number")
+
+        # Use the connection timeout. connectTimeoutMS passed as a keyword
+        # argument overrides the same option passed in the connection string.
+        connect_timeout = connect_timeout or options.get("connectTimeoutMS")
+        dns_resolver = _AsyncSrvResolver(fqdn, connect_timeout, srv_service_name, srv_max_hosts)
+        nodes = await dns_resolver.get_hosts()
+        dns_options = await dns_resolver.get_options()
+        if dns_options:
+            parsed_dns_options = split_options(dns_options, validate, warn, normalize)
+            if set(parsed_dns_options) - _ALLOWED_TXT_OPTS:
+                raise ConfigurationError(
+                    "Only authSource, replicaSet, and loadBalanced are supported from DNS"
+                )
+            for opt, val in parsed_dns_options.items():
+                if opt not in options:
+                    options[opt] = val
+        if options.get("loadBalanced") and srv_max_hosts:
+            raise InvalidURI("You cannot specify loadBalanced with srvMaxHosts")
+        if options.get("replicaSet") and srv_max_hosts:
+            raise InvalidURI("You cannot specify replicaSet with srvMaxHosts")
+        if "tls" not in options and "ssl" not in options:
+            options["tls"] = True if validate else "true"
+    elif not is_srv and options.get("srvServiceName") is not None:
+        raise ConfigurationError(
+            "The srvServiceName option is only allowed with 'mongodb+srv://' URIs"
+        )
+    elif not is_srv and srv_max_hosts:
+        raise ConfigurationError(
+            "The srvMaxHosts option is only allowed with 'mongodb+srv://' URIs"
+        )
+    else:
+        nodes = split_hosts(hosts, default_port=default_port)
+
+    _check_options(nodes, options)
 
     return {
+        "nodelist": nodes,
         "username": user,
-        "hosts": hosts,
         "password": passwd,
         "database": dbase,
         "collection": collection,
         "options": options,
         "fqdn": fqdn,
-        "srv_service_name": srv_service_name,
-        "srv_max_hosts": srv_max_hosts,
     }
 
 

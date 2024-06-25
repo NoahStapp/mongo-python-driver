@@ -28,7 +28,7 @@ from test import clear_warning_registry, unittest
 
 from pymongo.synchronous.common import INTERNAL_URI_OPTION_NAME_MAP, validate
 from pymongo.synchronous.compression_support import _have_snappy
-from pymongo.synchronous.uri_parser import is_srv_uri, parse_srv_uri, parse_uri
+from pymongo.synchronous.uri_parser import parse_uri
 
 CONN_STRING_TEST_PATH = os.path.join(
     os.path.dirname(os.path.realpath(__file__)), os.path.join("connection_string", "test")
@@ -105,11 +105,7 @@ def create_test(test, test_workdir):
         with warnings.catch_warnings(record=True) as ctx:
             warnings.simplefilter("ignore", category=ResourceWarning)
             try:
-                is_srv = is_srv_uri(test["uri"])
-                if is_srv:
-                    options = parse_srv_uri(test["uri"], warn=True)
-                else:
-                    options = parse_uri(test["uri"], warn=True)
+                options = parse_uri(test["uri"], warn=True)
             except Exception as exc:
                 print(exc)
                 valid = False
