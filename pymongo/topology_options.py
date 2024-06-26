@@ -17,21 +17,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence, cast
 
+from pymongo import common
+from pymongo.asynchronous.pool import PoolOptions
+from pymongo.compression_support import CompressionSettings
 from pymongo.errors import ConfigurationError
+from pymongo.monitoring import _EventListener, _EventListeners
+from pymongo.server_selectors import any_server_selector
 from pymongo.ssl_support import get_ssl_context
-from pymongo.synchronous import common
-from pymongo.synchronous.compression_support import CompressionSettings
-from pymongo.synchronous.monitoring import _EventListener, _EventListeners
-from pymongo.synchronous.pool import PoolOptions
-from pymongo.synchronous.server_selectors import any_server_selector
 from pymongo.write_concern import validate_boolean
 
 if TYPE_CHECKING:
+    from pymongo.auth_shared import MongoCredential
     from pymongo.pyopenssl_context import SSLContext
-    from pymongo.synchronous.auth import MongoCredential
-    from pymongo.synchronous.topology_description import _ServerSelector
+    from pymongo.topology_description import _ServerSelector
 
-_IS_SYNC = True
+_IS_SYNC = False
 
 
 def _parse_credentials(
@@ -41,7 +41,7 @@ def _parse_credentials(
     mechanism = options.get("authmechanism", "DEFAULT" if username else None)
     source = options.get("authsource")
     if username or mechanism:
-        from pymongo.synchronous.auth import _build_credentials_tuple
+        from pymongo.asynchronous.auth import _build_credentials_tuple
 
         return _build_credentials_tuple(mechanism, source, username, password, options, database)
     return None
