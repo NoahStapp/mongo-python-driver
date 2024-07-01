@@ -1,4 +1,4 @@
-# Copyright 2010-present MongoDB, Inc.
+# Copyright 2024-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared constants and helper method for pymongo, bson, and gridfs test suites."""
+"""Shared constants and helper methods for pymongo, bson, and gridfs test suites."""
 from __future__ import annotations
 
 import base64
@@ -147,16 +147,6 @@ def is_server_resolvable():
         socket.setdefaulttimeout(socket_timeout)
 
 
-def _create_user(authdb, user, pwd=None, roles=None, **kwargs):
-    cmd = SON([("createUser", user)])
-    # X509 doesn't use a password
-    if pwd:
-        cmd["pwd"] = pwd
-    cmd["roles"] = roles or ["root"]
-    cmd.update(**kwargs)
-    return authdb.command(cmd)
-
-
 class client_knobs:
     def __init__(
         self,
@@ -238,10 +228,6 @@ class client_knobs:
             )
             self.disable()
             raise Exception(msg)
-
-
-def _all_users(db):
-    return {u["user"] for u in db.command("usersInfo").get("users", [])}
 
 
 def sanitize_cmd(cmd):
