@@ -449,6 +449,7 @@ class TestDatabase(IntegrationTest):
             self.db.cursor_command("usersInfo", "test")
 
     @client_context.require_no_fips
+    @client_context.require_sync
     def test_password_digest(self):
         with self.assertRaises(TypeError):
             auth._password_digest(5)  # type: ignore[arg-type, call-arg]

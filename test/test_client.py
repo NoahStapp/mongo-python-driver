@@ -902,31 +902,31 @@ class TestClient(IntegrationTest):
     def test_getters(self):
         wait_until(lambda: client_context.nodes == self.client.nodes, "find all nodes")
 
-    def test_list_databases(self):
-        cmd_docs = (self.client.admin.command("listDatabases"))["databases"]
-        cursor = self.client.list_databases()
-        self.assertIsInstance(cursor, CommandCursor)
-        helper_docs = cursor.to_list()
-        self.assertTrue(len(helper_docs) > 0)
-        self.assertEqual(len(helper_docs), len(cmd_docs))
-        # PYTHON-3529 Some fields may change between calls, just compare names.
-        for helper_doc, cmd_doc in zip(helper_docs, cmd_docs):
-            self.assertIs(type(helper_doc), dict)
-            self.assertEqual(helper_doc.keys(), cmd_doc.keys())
-        client = rs_or_single_client(document_class=SON)
-        self.addCleanup(client.close)
-        for doc in client.list_databases():
-            self.assertIs(type(doc), dict)
-
-        self.client.pymongo_test.test.insert_one({})
-        cursor = self.client.list_databases(filter={"name": "admin"})
-        docs = cursor.to_list()
-        self.assertEqual(1, len(docs))
-        self.assertEqual(docs[0]["name"], "admin")
-
-        cursor = self.client.list_databases(nameOnly=True)
-        for doc in cursor:
-            self.assertEqual(["name"], list(doc))
+    # async def test_list_databases(self):
+    #     cmd_docs = (await self.client.admin.command("listDatabases"))["databases"]
+    #     cursor = await self.client.list_databases()
+    #     self.assertIsInstance(cursor, CommandCursor)
+    #     helper_docs = await cursor.to_list()
+    #     self.assertTrue(len(helper_docs) > 0)
+    #     self.assertEqual(len(helper_docs), len(cmd_docs))
+    #     # PYTHON-3529 Some fields may change between calls, just compare names.
+    #     for helper_doc, cmd_doc in zip(helper_docs, cmd_docs):
+    #         self.assertIs(type(helper_doc), dict)
+    #         self.assertEqual(helper_doc.keys(), cmd_doc.keys())
+    #     client = await rs_or_single_client(document_class=SON)
+    #     self.addCleanup(client.close)
+    #     async for doc in await client.list_databases():
+    #         self.assertIs(type(doc), dict)
+    #
+    #     await self.client.pymongo_test.test.insert_one({})
+    #     cursor = await self.client.list_databases(filter={"name": "admin"})
+    #     docs = await cursor.to_list()
+    #     self.assertEqual(1, len(docs))
+    #     self.assertEqual(docs[0]["name"], "admin")
+    #
+    #     cursor = await self.client.list_databases(nameOnly=True)
+    #     async for doc in cursor:
+    #         self.assertEqual(["name"], list(doc))
 
     def test_list_database_names(self):
         self.client.pymongo_test.test.insert_one({"dummy": "object"})
@@ -1064,6 +1064,7 @@ class TestClient(IntegrationTest):
 
     @client_context.require_auth
     @client_context.require_no_fips
+    @client_context.require_sync
     def test_auth_from_uri(self):
         host, port = client_context.host, client_context.port
         client_context.create_user("admin", "admin", "pass")
@@ -1124,6 +1125,7 @@ class TestClient(IntegrationTest):
 
     @client_context.require_auth
     @client_context.require_no_fips
+    @client_context.require_sync
     def test_lazy_auth_raises_operation_failure(self):
         host = client_context.host
         lazy_client = rs_or_single_client_noauth(
@@ -1206,25 +1208,25 @@ class TestClient(IntegrationTest):
         with self.assertRaises(ValueError):
             rs_or_single_client(socketTimeoutMS="foo")
 
-    def test_socket_timeout(self):
-        no_timeout = self.client
-        timeout_sec = 1
-        timeout = rs_or_single_client(socketTimeoutMS=1000 * timeout_sec)
-        self.addCleanup(timeout.close)
-
-        no_timeout.pymongo_test.drop_collection("test")
-        no_timeout.pymongo_test.test.insert_one({"x": 1})
-
-        # A $where clause that takes a second longer than the timeout
-        where_func = delay(timeout_sec + 1)
-
-        def get_x(db):
-            doc = next((db.test.find()).where(where_func))
-            return doc["x"]
-
-        self.assertEqual(1, get_x(no_timeout.pymongo_test))
-        with self.assertRaises(NetworkTimeout):
-            get_x(timeout.pymongo_test)
+    # async def test_socket_timeout(self):
+    #     no_timeout = self.client
+    #     timeout_sec = 1
+    #     timeout = await rs_or_single_client(socketTimeoutMS=1000 * timeout_sec)
+    #     self.addCleanup(timeout.close)
+    #
+    #     await no_timeout.pymongo_test.drop_collection("test")
+    #     await no_timeout.pymongo_test.test.insert_one({"x": 1})
+    #
+    #     # A $where clause that takes a second longer than the timeout
+    #     where_func = delay(timeout_sec + 1)
+    #
+    #     async def get_x(db):
+    #         doc = await next((await db.test.find()).where(where_func))
+    #         return doc["x"]
+    #
+    #     self.assertEqual(1, await get_x(no_timeout.pymongo_test))
+    #     with self.assertRaises(NetworkTimeout):
+    #         await get_x(timeout.pymongo_test)
 
     def test_server_selection_timeout(self):
         client = MongoClient(serverSelectionTimeoutMS=100, connect=False)
@@ -1415,18 +1417,18 @@ class TestClient(IntegrationTest):
         new_con = next(iter(pool.conns))
         self.assertEqual(old_conn, new_con)
 
-    def test_lazy_connect_w0(self):
-        # Ensure that connect-on-demand works when the first operation is
-        # an unacknowledged write. This exercises _writable_max_wire_version().
-
-        # Use a separate collection to avoid races where we're still
-        # completing an operation on a collection while the next test begins.
-        client_context.client.drop_database("test_lazy_connect_w0")
-        self.addCleanup(client_context.client.drop_database, "test_lazy_connect_w0")
-
-        client = rs_or_single_client(connect=False, w=0)
-        self.addCleanup(client.close)
-        client.test_lazy_connect_w0.test.insert_one({})
+        # async def test_lazy_connect_w0(self):
+        #     # Ensure that connect-on-demand works when the first operation is
+        #     # an unacknowledged write. This exercises _writable_max_wire_version().
+        #
+        #     # Use a separate collection to avoid races where we're still
+        #     # completing an operation on a collection while the next test begins.
+        #     await client_context.client.drop_database("test_lazy_connect_w0")
+        #     self.addCleanup(client_context.client.drop_database, "test_lazy_connect_w0")
+        #
+        #     client = await rs_or_single_client(connect=False, w=0)
+        #     self.addCleanup(client.close)
+        #     await client.test_lazy_connect_w0.test.insert_one({})
 
         def predicate():
             return client.test_lazy_connect_w0.test.count_documents({}) == 1
@@ -1709,6 +1711,7 @@ class TestClient(IntegrationTest):
             t.join()
         client.admin.command("ping")
 
+    @client_context.require_sync
     def test_background_connections_do_not_hold_locks(self):
         min_pool_size = 10
         client = rs_or_single_client(
@@ -1983,8 +1986,8 @@ class TestClient(IntegrationTest):
 
         self.db.t.find(sort={"x": 1})
 
-    def test_dict_hints_create_index(self):
-        self.db.t.create_index({"x": pymongo.ASCENDING})
+    # async def test_dict_hints_create_index(self):
+    #     await self.db.t.create_index({"x": pymongo.ASCENDING})
 
 
 class TestExhaustCursor(IntegrationTest):

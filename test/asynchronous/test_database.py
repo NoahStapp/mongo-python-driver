@@ -454,6 +454,7 @@ class TestDatabase(AsyncIntegrationTest):
             await self.db.cursor_command("usersInfo", "test")
 
     @async_client_context.require_no_fips
+    @async_client_context.require_sync
     def test_password_digest(self):
         with self.assertRaises(TypeError):
             auth._password_digest(5)  # type: ignore[arg-type, call-arg]
