@@ -187,7 +187,6 @@ class AsyncClientContext:
 
     async def _init_client(self):
         self.client = await self._connect(host, port)
-        self._fips_enabled = await self._check_fips_enabled()
         if self.client is not None:
             # Return early when connected to dataLake as mongohoused does not
             # support the getCmdLineOpts command and is tested without TLS.
@@ -364,16 +363,16 @@ class AsyncClientContext:
             # Raised if self.server_status is None.
             return None
 
-    async def _check_fips_enabled(self):
+    @property
+    def fips_enabled(self):
+        if self._fips_enabled is not None:
+            return self._fips_enabled
         try:
-            # SelectorEventLoop on Windows does not support async subprocesses
-            if _IS_SYNC or sys.platform == "win32":
-                subprocess.check_call(["fips-mode-setup", "--is-enabled"])  # noqa: ASYNC101, RUF100
-            else:
-                await check_call("fips-mode-setup --is-enabled")
+            subprocess.check_call(["fips-mode-setup", "--is-enabled"])
             self._fips_enabled = True
         except (subprocess.SubprocessError, FileNotFoundError):
             self._fips_enabled = False
+        return self._fips_enabled
 
     def check_auth_type(self, auth_type):
         auth_mechs = self.server_parameters.get("authenticationMechanisms", [])
@@ -543,7 +542,7 @@ class AsyncClientContext:
     def require_no_fips(self, func):
         """Run a test only if the host does not have FIPS enabled."""
         return self._require(
-            lambda: not self._fips_enabled, "Test cannot run on a FIPS-enabled host", func=func
+            lambda: not self.fips_enabled, "Test cannot run on a FIPS-enabled host", func=func
         )
 
     def require_no_auth(self, func):
@@ -1200,10 +1199,3 @@ def lazy_client_trial(reset, target, test, get_client):
             lazy_collection = lazy_client.pymongo_test.test
             run_threads(lazy_collection, target)
             test(lazy_collection)
-
-
-async def check_call(cmd, **kwargs):
-    process = await asyncio.create_subprocess_shell(cmd, **kwargs)
-    return_code = await process.wait()
-    if return_code != 0:
-        raise subprocess.CalledProcessError(return_code, cmd)
