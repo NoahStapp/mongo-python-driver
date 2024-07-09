@@ -366,7 +366,8 @@ class AsyncClientContext:
 
     async def _check_fips_enabled(self):
         try:
-            if _IS_SYNC:
+            # SelectorEventLoop on Windows does not support async subprocesses
+            if _IS_SYNC or sys.platform == "win32":
                 subprocess.check_call(["fips-mode-setup", "--is-enabled"])  # noqa: ASYNC101, RUF100
             else:
                 await check_call("fips-mode-setup --is-enabled")
