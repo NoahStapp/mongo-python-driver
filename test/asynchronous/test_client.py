@@ -1459,18 +1459,18 @@ class TestClient(AsyncIntegrationTest):
         new_con = next(iter(pool.conns))
         self.assertEqual(old_conn, new_con)
 
-        # async def test_lazy_connect_w0(self):
-        #     # Ensure that connect-on-demand works when the first operation is
-        #     # an unacknowledged write. This exercises _writable_max_wire_version().
-        #
-        #     # Use a separate collection to avoid races where we're still
-        #     # completing an operation on a collection while the next test begins.
-        #     await async_client_context.client.drop_database("test_lazy_connect_w0")
-        #     self.addAsyncCleanup(async_client_context.client.drop_database, "test_lazy_connect_w0")
-        #
-        #     client = await async_rs_or_single_client(connect=False, w=0)
-        #     self.addAsyncCleanup(client.close)
-        #     await client.test_lazy_connect_w0.test.insert_one({})
+        async def test_lazy_connect_w0(self):
+            # Ensure that connect-on-demand works when the first operation is
+            # an unacknowledged write. This exercises _writable_max_wire_version().
+
+            # Use a separate collection to avoid races where we're still
+            # completing an operation on a collection while the next test begins.
+            await async_client_context.client.drop_database("test_lazy_connect_w0")
+            self.addAsyncCleanup(async_client_context.client.drop_database, "test_lazy_connect_w0")
+
+            client = await async_rs_or_single_client(connect=False, w=0)
+            self.addAsyncCleanup(client.close)
+            await client.test_lazy_connect_w0.test.insert_one({})
 
         async def predicate():
             return await client.test_lazy_connect_w0.test.count_documents({}) == 1
