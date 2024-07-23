@@ -1767,9 +1767,9 @@ class TestClient(AsyncIntegrationTest):
         pool = await async_get_pool(client)
         original_connect = pool.connect
 
-        def stall_connect(*args, **kwargs):
-            time.sleep(2)
-            return original_connect(*args, **kwargs)
+        async def stall_connect(*args, **kwargs):
+            await asyncio.sleep(2)
+            return await original_connect(*args, **kwargs)
 
         pool.connect = stall_connect
         # Un-patch Pool.connect to break the cyclic reference.
