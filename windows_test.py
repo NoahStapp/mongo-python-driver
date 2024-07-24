@@ -7,20 +7,24 @@ clients = []
 
 async def create_socket():
     c = AsyncMongoClient()
-    await c.aconnect()
+    print(f"{threading.current_thread().name}: {await c.db.command('hello')}")
 
     clients.append(c)
 
 
 async def use_socket():
+    while len(clients) < 1:
+        pass
     c = clients.pop()
-    print(await c.db.command("hello"))
+    print(f"{threading.current_thread().name}: {await c.db.command('hello')}")
 
 
-t1 = threading.Thread()
-t2 = threading.Thread()
-t1.target = asyncio.run(create_socket())
-t2.target = asyncio.run(use_socket())
+def wrapper(func):
+    asyncio.run(func())
 
-t1.run()
-t2.run()
+
+t1 = threading.Thread(target=wrapper, args=(create_socket,))
+t2 = threading.Thread(target=wrapper, args=(use_socket,))
+
+t1.start()
+t2.start()
