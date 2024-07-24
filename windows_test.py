@@ -1,26 +1,20 @@
 import asyncio
-import socket
 import threading
+from pymongo import AsyncMongoClient
 
-socks = []
+clients = []
 
 
 async def create_socket():
-    sock = socket.socket()
-    sock.connect(("www.python.org", 80))
+    c = AsyncMongoClient()
+    await c.aconnect()
 
-    socks.append(sock)
+    clients.append(c)
 
 
 async def use_socket():
-    sock = socks.pop()
-    timeout = sock.gettimeout()
-    sock.settimeout(0.0)
-    loop = asyncio.get_event_loop()
-    try:
-        await asyncio.wait_for(loop.sock_sendall(sock, bytes("hello", "utf8")), timeout=timeout)
-    finally:
-        sock.settimeout(timeout)
+    c = clients.pop()
+    print(await c.db.command("hello"))
 
 
 t1 = threading.Thread()
