@@ -1,13 +1,17 @@
 import asyncio
 import threading
 from pymongo import AsyncMongoClient
+import socket
 
 clients = []
 
 
 async def create_socket():
-    c = AsyncMongoClient()
-    print(f"{threading.current_thread().name}: {await c.db.command('hello')}")
+    c = socket.socket()
+    c.connect(("www.python.org", 80))
+    c.settimeout(0.0)
+    loop = asyncio.get_event_loop()
+    print(f"{threading.current_thread().name}: {await asyncio.wait_for(loop.sock_sendall(c, bytes('hello', 'utf-8')), timeout=5)}")
 
     clients.append(c)
 
@@ -16,7 +20,9 @@ async def use_socket():
     while len(clients) < 1:
         pass
     c = clients.pop()
-    print(f"{threading.current_thread().name}: {await c.db.command('hello')}")
+    c.settimeout(0.0)
+    loop = asyncio.get_event_loop()
+    print(f"{threading.current_thread().name}: {await asyncio.wait_for(loop.sock_sendall(c, bytes('hello', 'utf-8')), timeout=5)}")
 
 
 def wrapper(func):
