@@ -235,7 +235,7 @@ async def async_receive_data(
         for task in pending:
             task.cancel()
         while not all([t.done() for t in pending]):  # noqa: C419
-            loop._run_once()
+            await asyncio.sleep(0)
         if len(done) == 0:
             raise socket.timeout("timed out")
         if read_task in done:
