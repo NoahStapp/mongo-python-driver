@@ -1260,7 +1260,6 @@ class TestClient(AsyncIntegrationTest):
         no_timeout = self.client
         timeout_sec = 1
         timeout = await self.async_rs_or_single_client(socketTimeoutMS=1000 * timeout_sec)
-        self.addAsyncCleanup(timeout.close)
 
         await no_timeout.pymongo_test.drop_collection("test")
         await no_timeout.pymongo_test.test.insert_one({"x": 1})
@@ -1322,7 +1321,6 @@ class TestClient(AsyncIntegrationTest):
         self.assertRaises(ValueError, AsyncMongoClient, tz_aware="foo")
 
         aware = await self.async_rs_or_single_client(tz_aware=True)
-        self.addAsyncCleanup(aware.close)
         naive = self.client
         await aware.pymongo_test.drop_collection("test")
 

@@ -106,7 +106,6 @@ class TestSession(AsyncIntegrationTest):
         self.client = await self.async_rs_or_single_client(
             event_listeners=[self.listener, self.session_checker_listener]
         )
-        self.addAsyncCleanup(self.client.close)
         self.db = self.client.pymongo_test
         self.initial_lsids = {s["id"] for s in session_ids(self.client)}
 

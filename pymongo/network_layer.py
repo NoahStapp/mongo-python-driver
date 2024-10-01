@@ -21,7 +21,6 @@ import socket
 import struct
 import sys
 import time
-import traceback
 from asyncio import AbstractEventLoop, Future
 from typing import (
     TYPE_CHECKING,
@@ -254,8 +253,6 @@ async def _async_receive(conn: socket.socket, length: int, loop: AbstractEventLo
                 raise OSError("connection closed")
             bytes_read += chunk_length
     except Exception as e:
-        print(f"EXCEPTION: {e}")
-        print(f"STACKTRACE: {traceback.format_exception(e)}")
         raise e
     return mv
 

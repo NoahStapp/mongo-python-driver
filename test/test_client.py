@@ -1224,7 +1224,6 @@ class TestClient(IntegrationTest):
         no_timeout = self.client
         timeout_sec = 1
         timeout = self.rs_or_single_client(socketTimeoutMS=1000 * timeout_sec)
-        self.addCleanup(timeout.close)
 
         no_timeout.pymongo_test.drop_collection("test")
         no_timeout.pymongo_test.test.insert_one({"x": 1})
@@ -1282,7 +1281,6 @@ class TestClient(IntegrationTest):
         self.assertRaises(ValueError, MongoClient, tz_aware="foo")
 
         aware = self.rs_or_single_client(tz_aware=True)
-        self.addCleanup(aware.close)
         naive = self.client
         aware.pymongo_test.drop_collection("test")
 
