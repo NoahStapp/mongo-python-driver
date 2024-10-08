@@ -384,6 +384,8 @@ class AsyncSpecRunner(AsyncIntegrationTest):
 
         # Give a nicer message when there are missing or extra events
         cmds = decode_raw([event.command for event in events])
+        if len(events) != len(test["expectations"]):
+            print(f"Expected {test['expectations']} instead of {events}")
         self.assertEqual(len(events), len(test["expectations"]), cmds)
         for i, expectation in enumerate(test["expectations"]):
             event_type = next(iter(expectation))
