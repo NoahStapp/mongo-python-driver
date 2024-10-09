@@ -827,6 +827,7 @@ def _create_connection(address: _Address, options: PoolOptions) -> socket.socket
             sock = socket.socket(af, socktype, proto)
         # Fallback when SOCK_CLOEXEC isn't available.
         _set_non_inheritable_non_atomic(sock.fileno())
+        start = time.monotonic()
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             # CSOT: apply timeout to socket connect.
@@ -840,10 +841,11 @@ def _create_connection(address: _Address, options: PoolOptions) -> socket.socket
             _set_keepalive_times(sock)
             print(f"Socket: {sock}, {sock.timeout}")
             sock.connect(sa)
+            print(f"Elapsed success: {time.monotonic() - start}")
             return sock
         except OSError as e:
+            print(f"Elapsed fail: {time.monotonic() - start}")
             err = e
-            print(f"Socket err: {e}")
             sock.close()
 
     if err is not None:
