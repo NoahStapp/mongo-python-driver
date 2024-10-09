@@ -842,9 +842,7 @@ def _create_connection(address: _Address, options: PoolOptions) -> socket.socket
             sock.settimeout(timeout)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, True)
             _set_keepalive_times(sock)
-            print(f"Socket: {sock}, {sock.timeout}")
             sock.connect(sa)
-            print(f"Elapsed success: {time.monotonic() - start}")
             return sock
         except OSError as e:
             print(f"Elapsed fail: {time.monotonic() - start}")

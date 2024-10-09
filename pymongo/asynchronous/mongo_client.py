@@ -2569,10 +2569,7 @@ class _ClientConnectionRetryable(Generic[T]):
             try:
                 if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
                     print(f"{threading.current_thread().name} -- Retryable read for {self._operation}")
-                res = await self._read() if self._is_read else await self._write()
-                if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
-                    print(f"Result for {self._operation}: {res}")
-                return res
+                return await self._read() if self._is_read else await self._write()
             except ServerSelectionTimeoutError:
                 # The application may think the write was never attempted
                 # if we raise ServerSelectionTimeoutError on the retry
@@ -2581,12 +2578,8 @@ class _ClientConnectionRetryable(Generic[T]):
                 # A ServerSelectionTimeoutError error indicates that there may
                 # be a persistent outage. Attempting to retry in this case will
                 # most likely be a waste of time.
-                if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
-                    print(f"Raising error for {self._operation} at {traceback.print_stack(limit=1)}")
                 raise
             except PyMongoError as exc:
-                if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
-                    print(f"Error for {self._operation}: {exc}, {traceback.print_exception(exc)}")
                 # Execute specialized catch on read
                 if self._is_read:
                     if isinstance(exc, (ConnectionFailure, OperationFailure)):
@@ -2596,21 +2589,15 @@ class _ClientConnectionRetryable(Generic[T]):
                             isinstance(exc, OperationFailure)
                             and exc_code not in helpers_shared._RETRYABLE_ERROR_CODES
                         ):
-                            if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
-                                print(f"Raising error for {self._operation} at {traceback.print_stack(limit=1)}")
                             raise
                         self._retrying = True
                         self._last_error = exc
                     else:
-                        if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
-                            print(f"Raising error for {self._operation} at {traceback.print_stack(limit=1)}")
                         raise
 
                 # Specialized catch on write operation
                 if not self._is_read:
                     if not self._retryable:
-                        if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
-                            print(f"Raising error for {self._operation} at {traceback.print_stack(limit=1)}")
                         raise
                     if isinstance(exc, ClientBulkWriteException) and exc.error:
                         retryable_write_error_exc = isinstance(
@@ -2623,12 +2610,8 @@ class _ClientConnectionRetryable(Generic[T]):
                         await self._session._unpin()
                     if not retryable_write_error_exc or self._is_not_eligible_for_retry():
                         if exc.has_error_label("NoWritesPerformed") and self._last_error:
-                            if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
-                                print(f"Raising error for {self._operation} at {traceback.print_stack(limit=1)}")
                             raise self._last_error from exc
                         else:
-                            if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
-                                print(f"Raising error for {self._operation} at {traceback.print_stack(limit=1)}")
                             raise
                     if self._bulk:
                         self._bulk.retrying = True
@@ -2712,7 +2695,6 @@ class _ClientConnectionRetryable(Generic[T]):
                     self._retryable = False
                 return await self._func(self._session, conn, self._retryable)  # type: ignore
         except PyMongoError as exc:
-            print(f"Got error for _write for {self._func.__name__}")
             if not self._retryable:
                 raise
             # Add the RetryableWriteError label, if applicable.
