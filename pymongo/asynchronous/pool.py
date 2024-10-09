@@ -832,9 +832,12 @@ def _create_connection(address: _Address, options: PoolOptions) -> socket.socket
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             # CSOT: apply timeout to socket connect.
             timeout = _csot.remaining()
+            print(f"CSOT timeout: {timeout}")
             if timeout is None:
                 timeout = options.connect_timeout
+                print(f"Connect timeout: {timeout}")
             elif timeout <= 0:
+                print(f"Already elapsed timeout: {timeout}")
                 raise socket.timeout("timed out")
             sock.settimeout(timeout)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, True)
