@@ -35,7 +35,6 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
-import traceback
 import warnings
 import weakref
 from collections import defaultdict
@@ -2568,7 +2567,9 @@ class _ClientConnectionRetryable(Generic[T]):
             self._check_last_error(check_csot=True)
             try:
                 if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
-                    print(f"{threading.current_thread().name} -- Retryable read for {self._operation}")
+                    print(
+                        f"{threading.current_thread().name} -- Retryable read for {self._operation}"
+                    )
                 return await self._read() if self._is_read else await self._write()
             except ServerSelectionTimeoutError:
                 # The application may think the write was never attempted

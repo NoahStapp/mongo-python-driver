@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
 import warnings
 import weakref
 from collections import defaultdict
@@ -2551,6 +2552,10 @@ class _ClientConnectionRetryable(Generic[T]):
         while True:
             self._check_last_error(check_csot=True)
             try:
+                if self._operation in (_Op.LIST_COLLECTIONS, _Op.INSERT):
+                    print(
+                        f"{threading.current_thread().name} -- Retryable read for {self._operation}"
+                    )
                 return self._read() if self._is_read else self._write()
             except ServerSelectionTimeoutError:
                 # The application may think the write was never attempted
@@ -2656,10 +2661,12 @@ class _ClientConnectionRetryable(Generic[T]):
 
         :return: Output for func()'s call
         """
+        print(f"Calling _write for {self._func.__name__}")
         try:
             max_wire_version = 0
             is_mongos = False
             self._server = self._get_server()
+            print(f"Got server for _write for {self._func.__name__}")
             with self._client._checkout(self._server, self._session) as conn:
                 max_wire_version = conn.max_wire_version
                 sessions_supported = (
@@ -2686,12 +2693,15 @@ class _ClientConnectionRetryable(Generic[T]):
 
         :return: Output for func()'s call
         """
+        print(f"Calling _read for {self._func.__name__}")
         self._server = self._get_server()
         assert self._read_pref is not None, "Read Preference required on read calls"
+        print(f"Got server for _read for {self._func.__name__}")
         with self._client._conn_from_server(self._read_pref, self._server, self._session) as (
             conn,
             read_pref,
         ):
+            print(f"Got conn for _read for {self._func.__name__}")
             if self._retrying and not self._retryable:
                 self._check_last_error()
             return self._func(self._session, self._server, conn, read_pref)  # type: ignore

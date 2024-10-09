@@ -18,7 +18,6 @@ from __future__ import annotations
 import contextlib
 import enum
 import socket
-import traceback
 import uuid
 import weakref
 from copy import deepcopy

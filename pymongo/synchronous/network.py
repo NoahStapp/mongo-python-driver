@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import threading
 import time
 from typing import (
     TYPE_CHECKING,
@@ -117,6 +118,8 @@ def command(
     name = next(iter(spec))
     ns = dbname + ".$cmd"
     speculative_hello = False
+    if name == "insertOne":
+        print(f"Running insertOne with {spec}")
 
     # Publish the original command document, perhaps with lsid and $clusterTime.
     orig = spec
@@ -132,6 +135,10 @@ def command(
         spec["collation"] = collation
 
     publish = listeners is not None and listeners.enabled_for_commands
+    if name == "listCollections":
+        print(
+            f"{threading.current_thread().name} -- Publishing is {publish} listeners: {listeners} {listeners.enabled_for_commands if listeners is not None else 'NONE'}!"
+        )
     start = datetime.datetime.now()
     if publish:
         speculative_hello = _is_speculative_authenticate(name, spec)

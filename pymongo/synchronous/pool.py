@@ -825,13 +825,17 @@ def _create_connection(address: _Address, options: PoolOptions) -> socket.socket
             sock = socket.socket(af, socktype, proto)
         # Fallback when SOCK_CLOEXEC isn't available.
         _set_non_inheritable_non_atomic(sock.fileno())
+        start = time.monotonic()
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             # CSOT: apply timeout to socket connect.
             timeout = _csot.remaining()
+            print(f"CSOT timeout: {timeout}")
             if timeout is None:
                 timeout = options.connect_timeout
+                print(f"Connect timeout: {timeout}")
             elif timeout <= 0:
+                print(f"Already elapsed timeout: {timeout}")
                 raise socket.timeout("timed out")
             sock.settimeout(timeout)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, True)
@@ -839,6 +843,7 @@ def _create_connection(address: _Address, options: PoolOptions) -> socket.socket
             sock.connect(sa)
             return sock
         except OSError as e:
+            print(f"Elapsed fail: {time.monotonic() - start}")
             err = e
             sock.close()
 

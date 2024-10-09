@@ -276,6 +276,7 @@ class SpecRunner(IntegrationTest):
     def _set_fail_point(self, client, command_args):
         cmd = SON([("configureFailPoint", "failCommand")])
         cmd.update(command_args)
+        print(f"Setting fail_point: {cmd}")
         client.admin.command(cmd)
 
     def set_fail_point(self, command_args):
@@ -537,6 +538,7 @@ class SpecRunner(IntegrationTest):
                     self.check_result(expected_result, result)
 
     def run_operations(self, sessions, collection, ops, in_with_transaction=False):
+        print(f"Running operations: {ops}")
         for op in ops:
             self._run_op(sessions, collection, op, in_with_transaction)
 
@@ -548,6 +550,7 @@ class SpecRunner(IntegrationTest):
 
         # Give a nicer message when there are missing or extra events
         cmds = decode_raw([event.command for event in events])
+        print(f"Got {events} instead of {test['expectations']}")
         self.assertEqual(len(events), len(test["expectations"]), cmds)
         for i, expectation in enumerate(test["expectations"]):
             event_type = next(iter(expectation))
@@ -652,6 +655,7 @@ class SpecRunner(IntegrationTest):
             db.create_collection(coll_name, write_concern=wc)
 
     def run_scenario(self, scenario_def, test):
+        print("RUNNING NOW")
         self.maybe_skip_scenario(test)
 
         # Kill all sessions before and after each test to prevent an open
@@ -667,6 +671,7 @@ class SpecRunner(IntegrationTest):
             c[database_name][collection_name].distinct("x")
 
         # Configure the fail point before creating the client.
+        print(f"failPoint: {'failPoint' in test}")
         if "failPoint" in test:
             fp = test["failPoint"]
             self.set_fail_point(fp)
@@ -692,6 +697,7 @@ class SpecRunner(IntegrationTest):
         client = self.rs_client(
             h=host, event_listeners=[listener, pool_listener, server_listener], **client_options
         )
+        print(f"Client created with listeners {client.options.event_listeners}")
         self.scenario_client = client
         self.listener = listener
         self.pool_listener = pool_listener

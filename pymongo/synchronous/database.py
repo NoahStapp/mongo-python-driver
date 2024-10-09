@@ -1078,6 +1078,7 @@ class Database(common.BaseObject, Generic[_DocumentType]):
             Collection[MutableMapping[str, Any]],
             self.get_collection("$cmd", read_preference=read_preference),
         )
+        print("Calling _list_collections")
         cmd = {"listCollections": 1, "cursor": {}}
         cmd.update(kwargs)
         with self._client._tmp_session(session, close=False) as tmp_session:
@@ -1121,13 +1122,14 @@ class Database(common.BaseObject, Generic[_DocumentType]):
 
         .. versionadded:: 3.6
         """
+        print("Calling _list_collections_helper")
         if filter is not None:
             kwargs["filter"] = filter
         read_pref = (session and session._txn_read_preference()) or ReadPreference.PRIMARY
         if comment is not None:
             kwargs["comment"] = comment
 
-        def _cmd(
+        def _cmd_list_collections(
             session: Optional[ClientSession],
             _server: Server,
             conn: Connection,
@@ -1135,8 +1137,9 @@ class Database(common.BaseObject, Generic[_DocumentType]):
         ) -> CommandCursor[MutableMapping[str, Any]]:
             return self._list_collections(conn, session, read_preference=read_preference, **kwargs)
 
+        print("Calling _list_collections_helper _cmd")
         return self._client._retryable_read(
-            _cmd, read_pref, session, operation=_Op.LIST_COLLECTIONS
+            _cmd_list_collections, read_pref, session, operation=_Op.LIST_COLLECTIONS
         )
 
     def list_collections(
@@ -1165,6 +1168,7 @@ class Database(common.BaseObject, Generic[_DocumentType]):
 
         .. versionadded:: 3.6
         """
+        print("Calling list_collections")
         return self._list_collections_helper(session, filter, comment, **kwargs)
 
     def _list_collection_names(
