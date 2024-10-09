@@ -110,7 +110,7 @@
             "listCollections"
           ],
           "blockConnection": true,
-          "blockTimeMS": 300
+          "blockTimeMS": 600
         }
       },
       "clientOptions": {
@@ -119,7 +119,7 @@
             "aws": {}
           }
         },
-        "timeoutMS": 200
+        "timeoutMS": 500
       },
       "operations": [
         {
