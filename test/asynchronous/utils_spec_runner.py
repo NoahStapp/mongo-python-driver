@@ -276,6 +276,7 @@ class AsyncSpecRunner(AsyncIntegrationTest):
     async def _set_fail_point(self, client, command_args):
         cmd = SON([("configureFailPoint", "failCommand")])
         cmd.update(command_args)
+        print(f"Setting fail_point: {cmd}")
         await client.admin.command(cmd)
 
     async def set_fail_point(self, command_args):
