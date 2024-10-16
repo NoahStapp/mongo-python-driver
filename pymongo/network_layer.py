@@ -267,7 +267,7 @@ async def async_receive_data(
             tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
         )
         for task in pending:
-            task.cancel()
+            task.cancel(msg="Still pending after timeout for recieve_data")
         await asyncio.wait(pending)
         if len(done) == 0:
             raise socket.timeout("timed out")
