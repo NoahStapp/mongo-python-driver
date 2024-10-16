@@ -367,6 +367,7 @@ def _release_locks() -> None:
 
 
 async def _async_cond_wait(condition: Condition, timeout: Optional[float]) -> bool:
+    print(f"Timeout for cond_wait: {timeout}")
     try:
         return await wait_for(condition.wait(), timeout)
     except TimeoutError:
