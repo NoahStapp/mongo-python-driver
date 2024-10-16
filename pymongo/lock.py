@@ -20,7 +20,7 @@ import collections
 import os
 import threading
 import weakref
-from asyncio import events, exceptions, wait_for
+from asyncio import events, exceptions, wait_for, TimeoutError
 from typing import Any, Coroutine, Optional, TypeVar
 
 _HAS_REGISTER_AT_FORK = hasattr(os, "register_at_fork")
@@ -367,7 +367,6 @@ def _release_locks() -> None:
 
 
 async def _async_cond_wait(condition: Condition, timeout: Optional[float]) -> bool:
-    print(f"Timeout for cond_wait: {timeout}")
     try:
         return await wait_for(condition.wait(), timeout)
     except TimeoutError:
