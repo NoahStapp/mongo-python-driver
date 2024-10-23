@@ -94,11 +94,9 @@ class BaseListener:
         """Return the matching events."""
         return [event for event in self.events[:] if matcher(event)]
 
-    async def wait_for_event(self, event, count):
+    def wait_for_event(self, event, count):
         """Wait for a number of events to be published, or fail."""
-        await async_wait_until(
-            lambda: self.event_count(event) >= count, f"find {count} {event} event(s)"
-        )
+        wait_until(lambda: self.event_count(event) >= count, f"find {count} {event} event(s)")
 
     async def async_wait_for_event(self, event, count):
         """Wait for a number of events to be published, or fail."""
