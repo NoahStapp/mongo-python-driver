@@ -161,10 +161,14 @@ class TestRetryableReads(AsyncIntegrationTest):
 
         mongos_clients = []
 
+        print(f"HAVE {len(async_client_context.mongos_seeds().split(','))} mongos seeds")
+
         for mongos in async_client_context.mongos_seeds().split(","):
             client = await self.async_rs_or_single_client(mongos)
             await async_set_fail_point(client, fail_command)
             mongos_clients.append(client)
+
+        print(f"HAVE {len(mongos_clients)} mongos clients")
 
         listener = OvertCommandListener()
         client = await self.async_rs_or_single_client(
@@ -178,6 +182,7 @@ class TestRetryableReads(AsyncIntegrationTest):
             with self.assertRaises(AutoReconnect):
                 await client.t.t.find_one({})
 
+        print(f"DISABLING {len(mongos_clients)} mongos client failpoints")
         # Disable failpoints on each mongos
         for client in mongos_clients:
             fail_command["mode"] = "off"
@@ -185,6 +190,7 @@ class TestRetryableReads(AsyncIntegrationTest):
 
         self.assertEqual(len(listener.failed_events), 2)
         self.assertEqual(len(listener.succeeded_events), 0)
+        print(f"TEST DONE")
 
 
 if __name__ == "__main__":
