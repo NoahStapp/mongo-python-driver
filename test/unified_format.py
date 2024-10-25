@@ -506,6 +506,10 @@ class UnifiedSpecTestMixinV1(IntegrationTest):
             ):
                 raise unittest.SkipTest("MMAPv1 does not support retryWrites=True")
 
+        if self.mongos_clients:
+            for client in self.mongos_clients:
+                client.close()
+
         # Handle mongos_clients for transactions tests.
         self.mongos_clients = []
         if (

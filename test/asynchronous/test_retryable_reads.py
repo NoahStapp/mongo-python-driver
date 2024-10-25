@@ -190,7 +190,7 @@ class TestRetryableReads(AsyncIntegrationTest):
 
         self.assertEqual(len(listener.failed_events), 2)
         self.assertEqual(len(listener.succeeded_events), 0)
-        print(f"TEST DONE")
+        print("TEST DONE")
 
 
 if __name__ == "__main__":

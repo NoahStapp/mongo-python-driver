@@ -161,10 +161,14 @@ class TestRetryableReads(IntegrationTest):
 
         mongos_clients = []
 
+        print(f"HAVE {len(client_context.mongos_seeds().split(','))} mongos seeds")
+
         for mongos in client_context.mongos_seeds().split(","):
             client = self.rs_or_single_client(mongos)
             set_fail_point(client, fail_command)
             mongos_clients.append(client)
+
+        print(f"HAVE {len(mongos_clients)} mongos clients")
 
         listener = OvertCommandListener()
         client = self.rs_or_single_client(
@@ -178,6 +182,7 @@ class TestRetryableReads(IntegrationTest):
             with self.assertRaises(AutoReconnect):
                 client.t.t.find_one({})
 
+        print(f"DISABLING {len(mongos_clients)} mongos client failpoints")
         # Disable failpoints on each mongos
         for client in mongos_clients:
             fail_command["mode"] = "off"
@@ -185,6 +190,7 @@ class TestRetryableReads(IntegrationTest):
 
         self.assertEqual(len(listener.failed_events), 2)
         self.assertEqual(len(listener.succeeded_events), 0)
+        print("TEST DONE")
 
 
 if __name__ == "__main__":
