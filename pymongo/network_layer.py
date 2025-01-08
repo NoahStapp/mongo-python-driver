@@ -19,44 +19,35 @@ import asyncio
 import errno
 import socket
 import struct
-import sys
 import time
-from asyncio import AbstractEventLoop, Future
 from typing import (
     TYPE_CHECKING,
     Optional,
     Union,
 )
 
-from pymongo import ssl_support
+from pymongo import _csot
 from pymongo._asyncio_task import create_task
-from pymongo.errors import _OperationCancelled
+from pymongo.common import MAX_MESSAGE_SIZE
+from pymongo.compression_support import decompress
+from pymongo.errors import ProtocolError, _OperationCancelled
+from pymongo.message import _UNPACK_REPLY, _OpMsg, _OpReply
 from pymongo.socket_checker import _errno_from_exception
 
 try:
-    from ssl import SSLError, SSLSocket
+    from ssl import SSLSocket
 
     _HAVE_SSL = True
 except ImportError:
     _HAVE_SSL = False
 
 try:
-    from pymongo.pyopenssl_context import (
-        BLOCKING_IO_LOOKUP_ERROR,
-        BLOCKING_IO_READ_ERROR,
-        BLOCKING_IO_WRITE_ERROR,
-        _sslConn,
-    )
+    from pymongo.pyopenssl_context import _sslConn
 
     _HAVE_PYOPENSSL = True
 except ImportError:
     _HAVE_PYOPENSSL = False
     _sslConn = SSLSocket  # type: ignore
-    from pymongo.ssl_support import (  # type: ignore[assignment]
-        BLOCKING_IO_LOOKUP_ERROR,
-        BLOCKING_IO_READ_ERROR,
-        BLOCKING_IO_WRITE_ERROR,
-    )
 
 if TYPE_CHECKING:
     from pymongo.asynchronous.pool import AsyncConnection
@@ -65,171 +56,269 @@ if TYPE_CHECKING:
 _UNPACK_HEADER = struct.Struct("<iiii").unpack
 _UNPACK_COMPRESSION_HEADER = struct.Struct("<iiB").unpack
 _POLL_TIMEOUT = 0.5
-# Errors raised by sockets (and TLS sockets) when in non-blocking mode.
-BLOCKING_IO_ERRORS = (BlockingIOError, BLOCKING_IO_LOOKUP_ERROR, *ssl_support.BLOCKING_IO_ERRORS)
 
 
-async def async_sendall(sock: Union[socket.socket, _sslConn], buf: bytes) -> None:
-    timeout = sock.gettimeout()
-    sock.settimeout(0.0)
-    loop = asyncio.get_event_loop()
-    try:
-        if _HAVE_SSL and isinstance(sock, (SSLSocket, _sslConn)):
-            await asyncio.wait_for(_async_sendall_ssl(sock, buf, loop), timeout=timeout)
+class NetworkingInterfaceBase:
+    def __init__(self, conn: Union[socket.socket, _sslConn] | tuple[asyncio.BaseTransport, PyMongoProtocol]):
+        self.conn = conn
+
+    def gettimeout(self):
+        raise NotImplementedError
+
+    def settimeout(self, timeout: float | None):
+        raise NotImplementedError
+
+    def close(self):
+        raise NotImplementedError
+
+    def is_closing(self) -> bool:
+        raise NotImplementedError
+
+    def writer(self):
+        raise NotImplementedError
+
+    def reader(self):
+        raise NotImplementedError
+
+
+class AsyncNetworkingInterface(NetworkingInterfaceBase):
+    def __init__(self, conn: tuple[asyncio.BaseTransport, PyMongoProtocol]):
+        super().__init__(conn)
+
+    @property
+    def gettimeout(self):
+        return self.conn[1].gettimeout
+
+    def settimeout(self, timeout: float | None):
+        self.conn[1].settimeout(timeout)
+
+    def close(self):
+        self.conn[0].close()
+
+    def is_closing(self):
+        self.conn[0].is_closing()
+
+    @property
+    def writer(self) -> PyMongoProtocol:
+        return self.conn[1]
+
+    @property
+    def reader(self) -> PyMongoProtocol:
+        return self.conn[1]
+
+
+class NetworkingInterface(NetworkingInterfaceBase):
+    def __init__(self, conn: Union[socket.socket, _sslConn]):
+        super().__init__(conn)
+
+    def gettimeout(self):
+        return self.conn.gettimeout()
+
+    def settimeout(self, timeout: float | None):
+        self.conn.settimeout(timeout)
+
+    def close(self):
+        self.conn.close()
+
+    def is_closing(self):
+        self.conn.is_closing()
+
+    @property
+    def writer(self):
+        return self.conn
+
+    @property
+    def reader(self):
+        return self.conn
+
+
+class PyMongoProtocol(asyncio.BufferedProtocol):
+    def __init__(self, timeout: Optional[float] = None, buffer_size: Optional[int] = 2**14):
+        self._buffer_size = buffer_size
+        self.transport = None
+        self._buffer = memoryview(bytearray(self._buffer_size))
+        self._overflow = None
+        self._length = 0
+        self._overflow_length = 0
+        self._body_length = 0
+        self._op_code = None
+        self._connection_lost = False
+        self._paused = False
+        self._drain_waiter = None
+        self._loop = asyncio.get_running_loop()
+        self._read_waiter = None
+        self._timeout = timeout
+        self._is_compressed = False
+        self._compressor_id = None
+        self._need_compression_header = False
+
+    def settimeout(self, timeout: float | None):
+        self._timeout = timeout
+
+    @property
+    def gettimeout(self) -> float | None:
+        """The configured timeout for the socket that underlies our protocol pair."""
+        return self._timeout
+
+    def connection_made(self, transport):
+        """Called exactly once when a connection is made.
+        The transport argument is the transport representing the write side of the connection.
+        """
+        self.transport = transport
+
+    async def write(self, message: bytes):
+        """Write a message to this connection's transport."""
+        self.transport.write(message)
+        await self._drain_helper()
+
+    async def read(self, request_id: Optional[int], max_message_size: int):
+        """Read a single MongoDB Wire Protocol message from this connection."""
+        self._max_message_size = max_message_size
+        self._request_id = request_id
+        self._length, self._overflow_length, self._body_length, self._op_code, self._overflow = (
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+        self._read_waiter = self._loop.create_future()
+        await self._read_waiter
+        if self._read_waiter.done() and self._read_waiter.result():
+            header_size = 16
+            if self._body_length > self._buffer_size:
+                if self._is_compressed:
+                    header_size = 25
+                    return decompress(
+                        memoryview(
+                            bytearray(self._buffer[header_size : self._length])
+                            + bytearray(self._overflow[: self._overflow_length])
+                        ),
+                        self._compressor_id,
+                    ), self._op_code
+                else:
+                    return memoryview(
+                        bytearray(self._buffer[header_size : self._length])
+                        + bytearray(self._overflow[: self._overflow_length])
+                    ), self._op_code
+            else:
+                if self._is_compressed:
+                    header_size = 25
+                    return decompress(
+                        memoryview(self._buffer[header_size : self._body_length]),
+                        self._compressor_id,
+                    ), self._op_code
+                else:
+                    return memoryview(self._buffer[header_size : self._body_length]), self._op_code
+        return None
+
+    def get_buffer(self, sizehint: int):
+        """Called to allocate a new receive buffer."""
+        if self._overflow is not None:
+            return self._overflow[self._overflow_length :]
+        return self._buffer[self._length :]
+
+    def buffer_updated(self, nbytes: int):
+        """Called when the buffer was updated with the received data"""
+        if nbytes == 0:
+            self.connection_lost(OSError("connection closed"))
+            return
         else:
-            await asyncio.wait_for(loop.sock_sendall(sock, buf), timeout=timeout)  # type: ignore[arg-type]
+            if self._overflow is not None:
+                self._overflow_length += nbytes
+            else:
+                if self._length == 0:
+                    try:
+                        self._body_length, self._op_code = self.process_header()
+                    except ProtocolError as exc:
+                        self.connection_lost(exc)
+                        return
+                    if self._body_length > self._buffer_size:
+                        self._overflow = memoryview(
+                            bytearray(self._body_length - (self._buffer_size - nbytes))
+                        )
+                self._length += nbytes
+            if (
+                self._length + self._overflow_length >= self._body_length
+                and self._read_waiter
+                and not self._read_waiter.done()
+            ):
+                self._read_waiter.set_result(True)
+
+    def process_header(self):
+        """Unpack a MongoDB Wire Protocol header."""
+        length, _, response_to, op_code = _UNPACK_HEADER(self._buffer[:16])
+        # No request_id for exhaust cursor "getMore".
+        if self._request_id is not None:
+            if self._request_id != response_to:
+                raise ProtocolError(
+                    f"Got response id {response_to!r} but expected {self._request_id!r}"
+                )
+        if length <= 16:
+            raise ProtocolError(
+                f"Message length ({length!r}) not longer than standard message header size (16)"
+            )
+        if length > self._max_message_size:
+            raise ProtocolError(
+                f"Message length ({length!r}) is larger than server max "
+                f"message size ({self._max_message_size!r})"
+            )
+        if op_code == 2012:
+            self._is_compressed = True
+            if self._length >= 25:
+                op_code, _, self._compressor_id = _UNPACK_COMPRESSION_HEADER(self._buffer[16:25])
+            else:
+                self._need_compression_header = True
+
+        return length, op_code
+
+    def pause_writing(self):
+        assert not self._paused
+        self._paused = True
+
+    def resume_writing(self):
+        assert self._paused
+        self._paused = False
+
+        if self._drain_waiter and not self._drain_waiter.done():
+            self._drain_waiter.set_result(None)
+
+    def connection_lost(self, exc):
+        self._connection_lost = True
+        if self._read_waiter and not self._read_waiter.done():
+            if exc is None:
+                self._read_waiter.set_result(None)
+            else:
+                self._read_waiter.set_exception(exc)
+
+        # Wake up the writer(s) if currently paused.
+        if not self._paused:
+            return
+
+        if self._drain_waiter and not self._drain_waiter.done():
+            if exc is None:
+                self._drain_waiter.set_result(None)
+            else:
+                self._drain_waiter.set_exception(exc)
+
+    async def _drain_helper(self):
+        if self._connection_lost:
+            raise ConnectionResetError("Connection lost")
+        if not self._paused:
+            return
+        self._drain_waiter = self._loop.create_future()
+        await self._drain_waiter
+
+    def data(self):
+        return self._buffer
+
+
+async def async_sendall(conn: PyMongoProtocol, buf: bytes) -> None:
+    try:
+        await asyncio.wait_for(conn.write(buf), timeout=conn.gettimeout)
     except asyncio.TimeoutError as exc:
         # Convert the asyncio.wait_for timeout error to socket.timeout which pool.py understands.
         raise socket.timeout("timed out") from exc
-    finally:
-        sock.settimeout(timeout)
-
-
-if sys.platform != "win32":
-
-    async def _async_sendall_ssl(
-        sock: Union[socket.socket, _sslConn], buf: bytes, loop: AbstractEventLoop
-    ) -> None:
-        view = memoryview(buf)
-        sent = 0
-
-        def _is_ready(fut: Future) -> None:
-            if fut.done():
-                return
-            fut.set_result(None)
-
-        while sent < len(buf):
-            try:
-                sent += sock.send(view[sent:])
-            except BLOCKING_IO_ERRORS as exc:
-                fd = sock.fileno()
-                # Check for closed socket.
-                if fd == -1:
-                    raise SSLError("Underlying socket has been closed") from None
-                if isinstance(exc, BLOCKING_IO_READ_ERROR):
-                    fut = loop.create_future()
-                    loop.add_reader(fd, _is_ready, fut)
-                    try:
-                        await fut
-                    finally:
-                        loop.remove_reader(fd)
-                if isinstance(exc, BLOCKING_IO_WRITE_ERROR):
-                    fut = loop.create_future()
-                    loop.add_writer(fd, _is_ready, fut)
-                    try:
-                        await fut
-                    finally:
-                        loop.remove_writer(fd)
-                if _HAVE_PYOPENSSL and isinstance(exc, BLOCKING_IO_LOOKUP_ERROR):
-                    fut = loop.create_future()
-                    loop.add_reader(fd, _is_ready, fut)
-                    try:
-                        loop.add_writer(fd, _is_ready, fut)
-                        await fut
-                    finally:
-                        loop.remove_reader(fd)
-                        loop.remove_writer(fd)
-
-    async def _async_receive_ssl(
-        conn: _sslConn, length: int, loop: AbstractEventLoop, once: Optional[bool] = False
-    ) -> memoryview:
-        mv = memoryview(bytearray(length))
-        total_read = 0
-
-        def _is_ready(fut: Future) -> None:
-            if fut.done():
-                return
-            fut.set_result(None)
-
-        while total_read < length:
-            try:
-                read = conn.recv_into(mv[total_read:])
-                if read == 0:
-                    raise OSError("connection closed")
-                # KMS responses update their expected size after the first batch, stop reading after one loop
-                if once:
-                    return mv[:read]
-                total_read += read
-            except BLOCKING_IO_ERRORS as exc:
-                fd = conn.fileno()
-                # Check for closed socket.
-                if fd == -1:
-                    raise SSLError("Underlying socket has been closed") from None
-                if isinstance(exc, BLOCKING_IO_READ_ERROR):
-                    fut = loop.create_future()
-                    loop.add_reader(fd, _is_ready, fut)
-                    try:
-                        await fut
-                    finally:
-                        loop.remove_reader(fd)
-                if isinstance(exc, BLOCKING_IO_WRITE_ERROR):
-                    fut = loop.create_future()
-                    loop.add_writer(fd, _is_ready, fut)
-                    try:
-                        await fut
-                    finally:
-                        loop.remove_writer(fd)
-                if _HAVE_PYOPENSSL and isinstance(exc, BLOCKING_IO_LOOKUP_ERROR):
-                    fut = loop.create_future()
-                    loop.add_reader(fd, _is_ready, fut)
-                    try:
-                        loop.add_writer(fd, _is_ready, fut)
-                        await fut
-                    finally:
-                        loop.remove_reader(fd)
-                        loop.remove_writer(fd)
-        return mv
-
-else:
-    # The default Windows asyncio event loop does not support loop.add_reader/add_writer:
-    # https://docs.python.org/3/library/asyncio-platforms.html#asyncio-platform-support
-    # Note: In PYTHON-4493 we plan to replace this code with asyncio streams.
-    async def _async_sendall_ssl(
-        sock: Union[socket.socket, _sslConn], buf: bytes, dummy: AbstractEventLoop
-    ) -> None:
-        view = memoryview(buf)
-        total_length = len(buf)
-        total_sent = 0
-        # Backoff starts at 1ms, doubles on timeout up to 512ms, and halves on success
-        # down to 1ms.
-        backoff = 0.001
-        while total_sent < total_length:
-            try:
-                sent = sock.send(view[total_sent:])
-            except BLOCKING_IO_ERRORS:
-                await asyncio.sleep(backoff)
-                sent = 0
-            if sent > 0:
-                backoff = max(backoff / 2, 0.001)
-            else:
-                backoff = min(backoff * 2, 0.512)
-            total_sent += sent
-
-    async def _async_receive_ssl(
-        conn: _sslConn, length: int, dummy: AbstractEventLoop, once: Optional[bool] = False
-    ) -> memoryview:
-        mv = memoryview(bytearray(length))
-        total_read = 0
-        # Backoff starts at 1ms, doubles on timeout up to 512ms, and halves on success
-        # down to 1ms.
-        backoff = 0.001
-        while total_read < length:
-            try:
-                read = conn.recv_into(mv[total_read:])
-                if read == 0:
-                    raise OSError("connection closed")
-                # KMS responses update their expected size after the first batch, stop reading after one loop
-                if once:
-                    return mv[:read]
-            except BLOCKING_IO_ERRORS:
-                await asyncio.sleep(backoff)
-                read = 0
-            if read > 0:
-                backoff = max(backoff / 2, 0.001)
-            else:
-                backoff = min(backoff * 2, 0.512)
-            total_read += read
-        return mv
 
 
 def sendall(sock: Union[socket.socket, _sslConn], buf: bytes) -> None:
@@ -245,10 +334,12 @@ async def _poll_cancellation(conn: AsyncConnection) -> None:
 
 
 async def async_receive_data(
-    conn: AsyncConnection, length: int, deadline: Optional[float]
+    conn: AsyncConnection,
+    deadline: Optional[float],
+    request_id: Optional[int],
+    max_message_size: int,
 ) -> memoryview:
-    sock = conn.conn
-    sock_timeout = sock.gettimeout()
+    conn_timeout = conn.conn.gettimeout
     timeout: Optional[Union[float, int]]
     if deadline:
         # When the timeout has expired perform one final check to
@@ -256,64 +347,21 @@ async def async_receive_data(
         # timeouts on AWS Lambda and other FaaS environments.
         timeout = max(deadline - time.monotonic(), 0)
     else:
-        timeout = sock_timeout
+        timeout = conn_timeout
 
-    sock.settimeout(0.0)
-    loop = asyncio.get_event_loop()
     cancellation_task = create_task(_poll_cancellation(conn))
-    try:
-        if _HAVE_SSL and isinstance(sock, (SSLSocket, _sslConn)):
-            read_task = create_task(_async_receive_ssl(sock, length, loop))  # type: ignore[arg-type]
-        else:
-            read_task = create_task(_async_receive(sock, length, loop))  # type: ignore[arg-type]
-        tasks = [read_task, cancellation_task]
-        done, pending = await asyncio.wait(
-            tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.wait(pending)
-        if len(done) == 0:
-            raise socket.timeout("timed out")
-        if read_task in done:
-            return read_task.result()
-        raise _OperationCancelled("operation cancelled")
-    finally:
-        sock.settimeout(sock_timeout)
-
-
-async def async_receive_data_socket(
-    sock: Union[socket.socket, _sslConn], length: int
-) -> memoryview:
-    sock_timeout = sock.gettimeout()
-    timeout = sock_timeout
-
-    sock.settimeout(0.0)
-    loop = asyncio.get_event_loop()
-    try:
-        if _HAVE_SSL and isinstance(sock, (SSLSocket, _sslConn)):
-            return await asyncio.wait_for(
-                _async_receive_ssl(sock, length, loop, once=True),  # type: ignore[arg-type]
-                timeout=timeout,
-            )
-        else:
-            return await asyncio.wait_for(_async_receive(sock, length, loop), timeout=timeout)  # type: ignore[arg-type]
-    except asyncio.TimeoutError as err:
-        raise socket.timeout("timed out") from err
-    finally:
-        sock.settimeout(sock_timeout)
-
-
-async def _async_receive(conn: socket.socket, length: int, loop: AbstractEventLoop) -> memoryview:
-    mv = memoryview(bytearray(length))
-    bytes_read = 0
-    while bytes_read < length:
-        chunk_length = await loop.sock_recv_into(conn, mv[bytes_read:])
-        if chunk_length == 0:
-            raise OSError("connection closed")
-        bytes_read += chunk_length
-    return mv
+    read_task = create_task(conn.conn.reader.read(request_id, max_message_size))
+    tasks = [read_task, cancellation_task]
+    done, pending = await asyncio.wait(tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.wait(pending)
+    if len(done) == 0:
+        raise socket.timeout("timed out")
+    if read_task in done:
+        return read_task.result()
+    raise _OperationCancelled("operation cancelled")
 
 
 def receive_data(conn: Connection, length: int, deadline: Optional[float]) -> memoryview:
@@ -337,11 +385,11 @@ def receive_data(conn: Connection, length: int, deadline: Optional[float]) -> me
             conn.set_conn_timeout(short_timeout)
             try:
                 chunk_length = conn.conn.recv_into(mv[bytes_read:])
-            except BLOCKING_IO_ERRORS:
-                if conn.cancel_context.cancelled:
-                    raise _OperationCancelled("operation cancelled") from None
-                # We reached the true deadline.
-                raise socket.timeout("timed out") from None
+            # except BLOCKING_IO_ERRORS:
+            #     if conn.cancel_context.cancelled:
+            #         raise _OperationCancelled("operation cancelled") from None
+            #     # We reached the true deadline.
+            #     raise socket.timeout("timed out") from None
             except socket.timeout:
                 if conn.cancel_context.cancelled:
                     raise _OperationCancelled("operation cancelled") from None
@@ -360,3 +408,69 @@ def receive_data(conn: Connection, length: int, deadline: Optional[float]) -> me
         conn.set_conn_timeout(orig_timeout)
 
     return mv
+
+
+async def async_receive_message(
+    conn: AsyncConnection,
+    request_id: Optional[int],
+    max_message_size: int = MAX_MESSAGE_SIZE,
+) -> Union[_OpReply, _OpMsg]:
+    """Receive a raw BSON message or raise socket.error."""
+    if _csot.get_timeout():
+        deadline = _csot.get_deadline()
+    else:
+        timeout = conn.conn.reader.gettimeout
+        if timeout:
+            deadline = time.monotonic() + timeout
+        else:
+            deadline = None
+    data, op_code = await async_receive_data(conn, deadline, request_id, max_message_size)
+    try:
+        unpack_reply = _UNPACK_REPLY[op_code]
+    except KeyError:
+        raise ProtocolError(
+            f"Got opcode {op_code!r} but expected {_UNPACK_REPLY.keys()!r}"
+        ) from None
+    return unpack_reply(data)
+
+
+def receive_message(
+    conn: Connection, request_id: Optional[int], max_message_size: int = MAX_MESSAGE_SIZE
+) -> Union[_OpReply, _OpMsg]:
+    """Receive a raw BSON message or raise socket.error."""
+    if _csot.get_timeout():
+        deadline = _csot.get_deadline()
+    else:
+        timeout = conn.conn.gettimeout()
+        if timeout:
+            deadline = time.monotonic() + timeout
+        else:
+            deadline = None
+    # Ignore the response's request id.
+    length, _, response_to, op_code = _UNPACK_HEADER(receive_data(conn, 16, deadline))
+    # No request_id for exhaust cursor "getMore".
+    if request_id is not None:
+        if request_id != response_to:
+            raise ProtocolError(f"Got response id {response_to!r} but expected {request_id!r}")
+    if length <= 16:
+        raise ProtocolError(
+            f"Message length ({length!r}) not longer than standard message header size (16)"
+        )
+    if length > max_message_size:
+        raise ProtocolError(
+            f"Message length ({length!r}) is larger than server max "
+            f"message size ({max_message_size!r})"
+        )
+    if op_code == 2012:
+        op_code, _, compressor_id = _UNPACK_COMPRESSION_HEADER(receive_data(conn, 9, deadline))
+        data = decompress(receive_data(conn, length - 25, deadline), compressor_id)
+    else:
+        data = receive_data(conn, length - 16, deadline)
+
+    try:
+        unpack_reply = _UNPACK_REPLY[op_code]
+    except KeyError:
+        raise ProtocolError(
+            f"Got opcode {op_code!r} but expected {_UNPACK_REPLY.keys()!r}"
+        ) from None
+    return unpack_reply(data)
