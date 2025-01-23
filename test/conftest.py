@@ -14,10 +14,9 @@ from test import (
 )
 from test.pymongo_mocks import MockClient
 from test.utils import FunctionCallRecorder
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
-from typing_extensions import Any
 
 import pymongo
 from pymongo import MongoClient

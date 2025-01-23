@@ -53,6 +53,10 @@ test *args:
     {{hatch_bin}} run test:test {{args}}
 
 [group('test')]
+test-async *args:
+    {{hatch_bin}} run test:test-async {{args}}
+
+[group('test')]
 test-mockupdb:
     {{hatch_bin}} run test:test-mockupdb
 

@@ -11,11 +11,10 @@ from test.asynchronous import (
 )
 from test.asynchronous.pymongo_mocks import AsyncMockClient
 from test.utils import FunctionCallRecorder
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 import pytest_asyncio
-from typing_extensions import Any
 
 import pymongo
 from pymongo import AsyncMongoClient
