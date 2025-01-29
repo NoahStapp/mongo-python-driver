@@ -119,6 +119,7 @@ replacements = {
     "_async_create_lock": "_create_lock",
     "_async_create_condition": "_create_condition",
     "_async_cond_wait": "_cond_wait",
+    "AsyncDummyMonitor": "DummyMonitor",
 }
 
 docstring_replacements: dict[tuple[str, str], str] = {
@@ -203,6 +204,7 @@ converted_tests = [
     "test_crud_unified.py",
     "test_cursor.py",
     "test_database.py",
+    "test_discovery_and_monitoring.py",
     "test_encryption.py",
     "test_grid_file.py",
     "test_logger.py",

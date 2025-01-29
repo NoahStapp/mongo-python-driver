@@ -21,31 +21,33 @@ import socketserver
 import sys
 import threading
 from pathlib import Path
-from test.pymongo_mocks import DummyMonitor
+from test.asynchronous.pymongo_mocks import AsyncDummyMonitor
 
 sys.path[0:0] = [""]
 
-from test import (
-    IntegrationTest,
-    PyMongoTestCase,
-    UnitTest,
-    client_context,
+from test.asynchronous import (
+    AsyncIntegrationTest,
+    AsyncPyMongoTestCase,
+    AsyncUnitTest,
+    async_client_context,
     unittest,
 )
-from test.unified_format import generate_test_classes
+from test.asynchronous.unified_format import generate_test_classes
 from test.utils import (
     CMAPListener,
     HeartbeatEventListener,
     HeartbeatEventsListListener,
     assertion_context,
-    get_pool,
+    async_get_pool,
+    async_wait_until,
     server_name_to_type,
-    wait_until,
 )
 from unittest.mock import patch
 
 from bson import Timestamp, json_util
 from pymongo import common, monitoring
+from pymongo.asynchronous.settings import TopologySettings
+from pymongo.asynchronous.topology import Topology, _ErrorContext
 from pymongo.errors import (
     AutoReconnect,
     ConfigurationError,
@@ -57,12 +59,10 @@ from pymongo.hello import Hello, HelloCompat
 from pymongo.helpers_shared import _check_command_response, _check_write_command_response
 from pymongo.monitoring import ServerHeartbeatFailedEvent, ServerHeartbeatStartedEvent
 from pymongo.server_description import SERVER_TYPE, ServerDescription
-from pymongo.synchronous.settings import TopologySettings
-from pymongo.synchronous.topology import Topology, _ErrorContext
 from pymongo.topology_description import TOPOLOGY_TYPE
 from pymongo.uri_parser import parse_uri
 
-_IS_SYNC = True
+_IS_SYNC = False
 
 
 # Location of JSON test specifications.
@@ -72,7 +72,7 @@ else:
     SDAM_PATH = os.path.join(Path(__file__).resolve().parent.parent, "discovery_and_monitoring")
 
 
-def create_mock_topology(uri, monitor_class=DummyMonitor):
+async def create_mock_topology(uri, monitor_class=AsyncDummyMonitor):
     parsed_uri = parse_uri(uri)
     replica_set_name = None
     direct_connection = None
@@ -93,16 +93,16 @@ def create_mock_topology(uri, monitor_class=DummyMonitor):
     )
 
     c = Topology(topology_settings)
-    c.open()
+    await c.open()
     return c
 
 
-def got_hello(topology, server_address, hello_response):
+async def got_hello(topology, server_address, hello_response):
     server_description = ServerDescription(server_address, Hello(hello_response), 0)
-    topology.on_change(server_description)
+    await topology.on_change(server_description)
 
 
-def got_app_error(topology, app_error):
+async def got_app_error(topology, app_error):
     server_address = common.partition_node(app_error["address"])
     server = topology.get_server_by_address(server_address)
     error_type = app_error["type"]
@@ -130,7 +130,7 @@ def got_app_error(topology, app_error):
         else:
             raise AssertionError(f"Unknown when field {when}")
 
-        topology.handle_error(
+        await topology.handle_error(
             server_address,
             _ErrorContext(e, max_wire_version, generation, completed_handshake, None),
         )
@@ -141,7 +141,7 @@ def get_type(topology, hostname):
     return description.server_type
 
 
-class TestAllScenarios(UnitTest):
+class TestAllScenarios(AsyncUnitTest):
     pass
 
 
@@ -210,26 +210,26 @@ def check_outcome(self, topology, outcome):
     self.assertEqual(outcome.get("maxElectionId"), topology.description.max_election_id)
 
 
-def create_test(scenario_def):
-    def run_scenario(self):
-        c = create_mock_topology(scenario_def["uri"])
+async def create_test(scenario_def):
+    async def run_scenario(self):
+        c = await create_mock_topology(scenario_def["uri"])
 
         for i, phase in enumerate(scenario_def["phases"]):
             # Including the phase description makes failures easier to debug.
             description = phase.get("description", str(i))
             with assertion_context(f"phase: {description}"):
                 for response in phase.get("responses", []):
-                    got_hello(c, common.partition_node(response[0]), response[1])
+                    await got_hello(c, common.partition_node(response[0]), response[1])
 
                 for app_error in phase.get("applicationErrors", []):
-                    got_app_error(c, app_error)
+                    await got_app_error(c, app_error)
 
                 check_outcome(self, c, phase["outcome"])
 
     return run_scenario
 
 
-def create_tests():
+async def create_tests():
     for dirpath, _, filenames in os.walk(SDAM_PATH):
         dirname = os.path.split(dirpath)[-1]
         # SDAM unified tests are handled separately.
@@ -243,7 +243,7 @@ def create_tests():
                 scenario_def = json_util.loads(scenario_stream.read())
 
             # Construct test from scenario.
-            new_test = create_test(scenario_def)
+            new_test = await create_test(scenario_def)
             test_name = f"test_{dirname}_{os.path.splitext(filename)[0]}"
 
             new_test.__name__ = test_name
@@ -256,14 +256,14 @@ else:
     asyncio.run(create_tests())
 
 
-class TestClusterTimeComparison(UnitTest):
-    def test_cluster_time_comparison(self):
-        t = create_mock_topology("mongodb://host")
+class TestClusterTimeComparison(AsyncUnitTest):
+    async def test_cluster_time_comparison(self):
+        t = await create_mock_topology("mongodb://host")
 
-        def send_cluster_time(time, inc, should_update):
+        async def send_cluster_time(time, inc, should_update):
             old = t.max_cluster_time()
             new = {"clusterTime": Timestamp(time, inc)}
-            got_hello(
+            await got_hello(
                 t,
                 ("host", 27017),
                 {
@@ -280,14 +280,14 @@ class TestClusterTimeComparison(UnitTest):
             else:
                 self.assertEqual(actual, old)
 
-        send_cluster_time(0, 1, True)
-        send_cluster_time(2, 2, True)
-        send_cluster_time(2, 1, False)
-        send_cluster_time(1, 3, False)
-        send_cluster_time(2, 3, True)
+        await send_cluster_time(0, 1, True)
+        await send_cluster_time(2, 2, True)
+        await send_cluster_time(2, 1, False)
+        await send_cluster_time(1, 3, False)
+        await send_cluster_time(2, 3, True)
 
 
-class TestIgnoreStaleErrors(IntegrationTest):
+class TestIgnoreStaleErrors(AsyncIntegrationTest):
     if _IS_SYNC:
 
         def test_ignore_stale_connection_errors(self):
@@ -297,9 +297,9 @@ class TestIgnoreStaleErrors(IntegrationTest):
 
             # Wait for initial discovery.
             client.admin.command("ping")
-            pool = get_pool(client)
+            pool = async_get_pool(client)
             starting_generation = pool.gen.get_overall()
-            wait_until(lambda: len(pool.conns) == N_THREADS, "created conns")
+            async_wait_until(lambda: len(pool.conns) == N_THREADS, "created conns")
 
             def mock_command(*args, **kwargs):
                 # Synchronize all threads to ensure they use the same generation.
@@ -331,28 +331,28 @@ class TestIgnoreStaleErrors(IntegrationTest):
     # Asyncio.Barrier was added in Python 3.11
     elif sys.version_info >= (3, 11):
 
-        def test_ignore_stale_connection_errors(self):
+        async def test_ignore_stale_connection_errors(self):
             N_TASKS = 5
             barrier = asyncio.Barrier(N_TASKS)
-            client = self.rs_or_single_client(minPoolSize=N_TASKS)
+            client = await self.async_rs_or_single_client(minPoolSize=N_TASKS)
 
             # Wait for initial discovery.
-            client.admin.command("ping")
-            pool = get_pool(client)
+            await client.admin.command("ping")
+            pool = await async_get_pool(client)
             starting_generation = pool.gen.get_overall()
-            wait_until(lambda: len(pool.conns) == N_TASKS, "created conns")
+            await async_wait_until(lambda: len(pool.conns) == N_TASKS, "created conns")
 
-            def mock_command(*args, **kwargs):
+            async def mock_command(*args, **kwargs):
                 # Synchronize all threads to ensure they use the same generation.
-                asyncio.wait_for(barrier.wait(), timeout=30)
+                await asyncio.wait_for(barrier.wait(), timeout=30)
                 raise AutoReconnect("mock Connection.command error")
 
             for conn in pool.conns:
                 conn.command = mock_command
 
-            def insert_command(i):
+            async def insert_command(i):
                 try:
-                    client.test.command("insert", "test", documents=[{"i": i}])
+                    await client.test.command("insert", "test", documents=[{"i": i}])
                 except AutoReconnect:
                     pass
 
@@ -360,30 +360,30 @@ class TestIgnoreStaleErrors(IntegrationTest):
             for i in range(N_TASKS):
                 tasks.append(asyncio.create_task(insert_command(i)))
 
-            asyncio.gather(*tasks)
+            await asyncio.gather(*tasks)
 
             # Expect a single pool reset for the network error
             self.assertEqual(starting_generation + 1, pool.gen.get_overall())
 
             # Server should be selectable.
-            client.admin.command("ping")
+            await client.admin.command("ping")
 
 
 class CMAPHeartbeatListener(HeartbeatEventListener, CMAPListener):
     pass
 
 
-class TestPoolManagement(IntegrationTest):
-    @client_context.require_failCommand_appName
-    def test_pool_unpause(self):
+class TestPoolManagement(AsyncIntegrationTest):
+    @async_client_context.require_failCommand_appName
+    async def test_pool_unpause(self):
         # This test implements the prose test "Connection Pool Management"
         listener = CMAPHeartbeatListener()
-        _ = self.single_client(
+        _ = await self.async_single_client(
             appName="SDAMPoolManagementTest", heartbeatFrequencyMS=500, event_listeners=[listener]
         )
         # Assert that ConnectionPoolReadyEvent occurs after the first
         # ServerHeartbeatSucceededEvent.
-        listener.wait_for_event(monitoring.PoolReadyEvent, 1)
+        await listener.async_wait_for_event(monitoring.PoolReadyEvent, 1)
         pool_ready = listener.events_by_type(monitoring.PoolReadyEvent)[0]
         hb_succeeded = listener.events_by_type(monitoring.ServerHeartbeatSucceededEvent)[0]
         self.assertGreater(listener.events.index(pool_ready), listener.events.index(hb_succeeded))
@@ -397,29 +397,29 @@ class TestPoolManagement(IntegrationTest):
                 "appName": "SDAMPoolManagementTest",
             },
         }
-        with self.fail_point(fail_hello):
-            listener.wait_for_event(monitoring.ServerHeartbeatFailedEvent, 1)
-            listener.wait_for_event(monitoring.PoolClearedEvent, 1)
-            listener.wait_for_event(monitoring.ServerHeartbeatSucceededEvent, 1)
-            listener.wait_for_event(monitoring.PoolReadyEvent, 1)
+        async with self.fail_point(fail_hello):
+            await listener.async_wait_for_event(monitoring.ServerHeartbeatFailedEvent, 1)
+            await listener.async_wait_for_event(monitoring.PoolClearedEvent, 1)
+            await listener.async_wait_for_event(monitoring.ServerHeartbeatSucceededEvent, 1)
+            await listener.async_wait_for_event(monitoring.PoolReadyEvent, 1)
 
 
-class TestServerMonitoringMode(IntegrationTest):
-    @client_context.require_no_serverless
-    @client_context.require_no_load_balancer
-    def setUp(self):
-        super().setUp()
+class TestServerMonitoringMode(AsyncIntegrationTest):
+    @async_client_context.require_no_serverless
+    @async_client_context.require_no_load_balancer
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
 
-    def test_rtt_connection_is_enabled_stream(self):
-        client = self.rs_or_single_client(serverMonitoringMode="stream")
-        client.admin.command("ping")
+    async def test_rtt_connection_is_enabled_stream(self):
+        client = await self.async_rs_or_single_client(serverMonitoringMode="stream")
+        await client.admin.command("ping")
 
         def predicate():
             for _, server in client._topology._servers.items():
                 monitor = server._monitor
                 if not monitor._stream:
                     return False
-                if client_context.version >= (4, 4):
+                if async_client_context.version >= (4, 4):
                     if _IS_SYNC:
                         if monitor._rtt_monitor._executor._thread is None:
                             return False
@@ -435,13 +435,13 @@ class TestServerMonitoringMode(IntegrationTest):
                             return False
             return True
 
-        wait_until(predicate, "find all RTT monitors")
+        await async_wait_until(predicate, "find all RTT monitors")
 
-    def test_rtt_connection_is_disabled_poll(self):
-        client = self.rs_or_single_client(serverMonitoringMode="poll")
-        self.assert_rtt_connection_is_disabled(client)
+    async def test_rtt_connection_is_disabled_poll(self):
+        client = await self.async_rs_or_single_client(serverMonitoringMode="poll")
+        await self.assert_rtt_connection_is_disabled(client)
 
-    def test_rtt_connection_is_disabled_auto(self):
+    async def test_rtt_connection_is_disabled_auto(self):
         envs = [
             {"AWS_EXECUTION_ENV": "AWS_Lambda_python3.9"},
             {"FUNCTIONS_WORKER_RUNTIME": "python"},
@@ -451,11 +451,11 @@ class TestServerMonitoringMode(IntegrationTest):
         ]
         for env in envs:
             with patch.dict("os.environ", env):
-                client = self.rs_or_single_client(serverMonitoringMode="auto")
-                self.assert_rtt_connection_is_disabled(client)
+                client = await self.async_rs_or_single_client(serverMonitoringMode="auto")
+                await self.assert_rtt_connection_is_disabled(client)
 
-    def assert_rtt_connection_is_disabled(self, client):
-        client.admin.command("ping")
+    async def assert_rtt_connection_is_disabled(self, client):
+        await client.admin.command("ping")
         for _, server in client._topology._servers.items():
             monitor = server._monitor
             self.assertFalse(monitor._stream)
@@ -481,7 +481,7 @@ if _IS_SYNC:
             self.handle_request()
             self.server_close()
 
-    class TestHeartbeatStartOrdering(PyMongoTestCase):
+    class TestHeartbeatStartOrdering(AsyncPyMongoTestCase):
         def test_heartbeat_start_ordering(self):
             events = []
             listener = HeartbeatEventsListListener(events)
@@ -509,27 +509,27 @@ if _IS_SYNC:
             )
 else:
 
-    class TestHeartbeatStartOrdering(PyMongoTestCase):
-        def test_heartbeat_start_ordering(self):
+    class TestHeartbeatStartOrdering(AsyncPyMongoTestCase):
+        async def test_heartbeat_start_ordering(self):
             events = []
 
-            def handle_client(reader, writer):
+            async def handle_client(reader, writer):
                 events.append("client connected")
-                if (reader.read(1024)).strip():
+                if (await reader.read(1024)).strip():
                     events.append("client hello received")
                 writer.close()
-                writer.wait_closed()
+                await writer.wait_closed()
 
             listener = HeartbeatEventsListListener(events)
-            with asyncio.start_server(handle_client, "localhost", 9999):
+            async with await asyncio.start_server(handle_client, "localhost", 9999):
                 _c = self.simple_client(
                     "mongodb://localhost:9999",
                     serverSelectionTimeoutMS=500,
                     event_listeners=(listener,),
                 )
-                _c._connect()
-                listener.wait_for_event(ServerHeartbeatStartedEvent, 1)
-                listener.wait_for_event(ServerHeartbeatFailedEvent, 1)
+                await _c.aconnect()
+                await listener.async_wait_for_event(ServerHeartbeatStartedEvent, 1)
+                await listener.async_wait_for_event(ServerHeartbeatFailedEvent, 1)
 
             self.assertEqual(
                 events,

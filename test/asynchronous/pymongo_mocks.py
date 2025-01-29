@@ -58,7 +58,7 @@ class MockPool(Pool):
             yield conn
 
 
-class DummyMonitor:
+class AsyncDummyMonitor:
     def __init__(self, server_description, topology, pool, topology_settings):
         self._server_description = server_description
         self.opened = False
@@ -66,7 +66,7 @@ class DummyMonitor:
     def cancel_check(self):
         pass
 
-    def join(self):
+    async def join(self):
         pass
 
     def open(self):
@@ -75,7 +75,7 @@ class DummyMonitor:
     def request_check(self):
         pass
 
-    def close(self):
+    async def close(self):
         self.opened = False
 
 
