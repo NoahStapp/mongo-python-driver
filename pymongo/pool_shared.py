@@ -509,6 +509,8 @@ def _configured_socket_interface(address: _Address, options: PoolOptions) -> Net
     sock = _create_connection(address, options)
     ssl_context = options._ssl_context
 
+    print(f"Getting protocol interface with socket: {sock}, SSL_CONTEXT: {ssl_context}")
+
     if ssl_context is None:
         sock.settimeout(options.socket_timeout)
         return NetworkingInterface(sock)
