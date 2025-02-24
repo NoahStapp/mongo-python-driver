@@ -195,6 +195,7 @@ async def command(
             reply = None
             response_doc: _DocumentOut = {"ok": 1}
         else:
+            print(f"Call async_receive_message")
             reply = await async_receive_message(conn, request_id)
             conn.more_to_come = reply.more_to_come
             unpacked_docs = reply.unpack_response(
@@ -212,6 +213,7 @@ async def command(
                     parse_write_concern_error=parse_write_concern_error,
                 )
     except Exception as exc:
+        print(f"Exception in command: {exc!r}")
         duration = datetime.datetime.now() - start
         if isinstance(exc, (NotPrimaryError, OperationFailure)):
             failure: _DocumentOut = exc.details  # type: ignore[assignment]

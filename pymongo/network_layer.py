@@ -507,6 +507,7 @@ class PyMongoProtocol(BufferedProtocol):
         """Called exactly once when a connection is made.
         The transport argument is the transport representing the write side of the connection.
         """
+        print(f"Connection made with: {transport}")
         self.transport = transport  # type: ignore[assignment]
 
     async def write(self, message: bytes) -> None:
@@ -574,11 +575,13 @@ class PyMongoProtocol(BufferedProtocol):
 
     def get_buffer(self, sizehint: int) -> memoryview:
         """Called to allocate a new receive buffer."""
+        print(f"get_buffer with {sizehint} hint and length {self._length}")
         if self._overflow is not None:
             return self._overflow[self._overflow_length :]
         return self._buffer[self._length :]
 
     def buffer_updated(self, nbytes: int) -> None:
+        print(f"Buffer updated with {nbytes} bytes")
         """Called when the buffer was updated with the received data"""
         if nbytes == 0:
             self.connection_lost(OSError("connection closed"))
@@ -656,6 +659,7 @@ class PyMongoProtocol(BufferedProtocol):
             self._drain_waiter.set_result(None)
 
     def connection_lost(self, exc: Exception | None) -> None:
+        print(f"Connection lost with {exc}")
         self._connection_lost = True
         pending = list(self._pending_messages)
         for msg in pending:
