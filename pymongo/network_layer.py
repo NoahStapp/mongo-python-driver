@@ -507,6 +507,7 @@ class PyMongoProtocol(BufferedProtocol):
         """Called exactly once when a connection is made.
         The transport argument is the transport representing the write side of the connection.
         """
+        print(f"Connection made with: {transport}")
         self.transport = transport  # type: ignore[assignment]
 
     async def write(self, message: bytes) -> None:
@@ -570,11 +571,11 @@ class PyMongoProtocol(BufferedProtocol):
                     ), self._op_code
                 else:
                     return memoryview(self._buffer[start + header_size : end]), self._op_code
-        print(f"State at end of read: {self._op_code, self._length, self._overflow_length, self._pending_messages, self._done_messages, self._body_length}")
         raise OSError("connection closed")
 
     def get_buffer(self, sizehint: int) -> memoryview:
         """Called to allocate a new receive buffer."""
+        print(f"get_buffer with {sizehint} hint and length {self._length}")
         if self._overflow is not None:
             return self._overflow[self._overflow_length :]
         return self._buffer[self._length :]
