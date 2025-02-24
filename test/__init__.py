@@ -32,6 +32,7 @@ import unittest
 import warnings
 from asyncio import iscoroutinefunction
 
+from pymongo.lock import _create_lock
 from pymongo.uri_parser import parse_uri
 
 try:
@@ -120,7 +121,7 @@ class ClientContext:
         self.default_client_options: Dict = {}
         self.sessions_enabled = False
         self.client = None  # type: ignore
-        self.conn_lock = threading.Lock()
+        self.conn_lock = _create_lock()
         self.is_data_lake = False
         self.load_balancer = TEST_LOADBALANCER
         self.serverless = TEST_SERVERLESS
