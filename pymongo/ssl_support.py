@@ -24,6 +24,7 @@ HAVE_SSL = True
 
 try:
     import pymongo.pyopenssl_context as _ssl
+    print("USING PYMONGO SSL")
 except (ImportError, AttributeError) as exc:
     if isinstance(exc, AttributeError):
         warnings.warn(
