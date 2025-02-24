@@ -334,6 +334,8 @@ async def _configured_protocol_interface(
     ssl_context = options._ssl_context
     timeout = options.socket_timeout
 
+    print(f"Getting protocol interface with {sock}, {ssl_context}")
+
     if ssl_context is None:
         return AsyncNetworkingInterface(
             await asyncio.get_running_loop().create_connection(
