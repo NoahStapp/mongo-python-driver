@@ -189,12 +189,14 @@ async def command(
         )
 
     try:
+        print(f"Call async_sendall")
         await async_sendall(conn.conn.get_conn, msg)
         if use_op_msg and unacknowledged:
             # Unacknowledged, fake a successful command response.
             reply = None
             response_doc: _DocumentOut = {"ok": 1}
         else:
+            print(f"Call async_receive_message")
             reply = await async_receive_message(conn, request_id)
             conn.more_to_come = reply.more_to_come
             unpacked_docs = reply.unpack_response(
@@ -212,6 +214,7 @@ async def command(
                     parse_write_concern_error=parse_write_concern_error,
                 )
     except Exception as exc:
+        print(f"Exception in command: {exc!r}")
         duration = datetime.datetime.now() - start
         if isinstance(exc, (NotPrimaryError, OperationFailure)):
             failure: _DocumentOut = exc.details  # type: ignore[assignment]
