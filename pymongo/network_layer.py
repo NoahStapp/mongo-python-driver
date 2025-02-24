@@ -580,6 +580,7 @@ class PyMongoProtocol(BufferedProtocol):
         return self._buffer[self._length :]
 
     def buffer_updated(self, nbytes: int) -> None:
+        print(f"Buffer updated with {nbytes} bytes")
         """Called when the buffer was updated with the received data"""
         if nbytes == 0:
             self.connection_lost(OSError("connection closed"))
@@ -657,6 +658,7 @@ class PyMongoProtocol(BufferedProtocol):
             self._drain_waiter.set_result(None)
 
     def connection_lost(self, exc: Exception | None) -> None:
+        print(f"Connection lost with {exc}")
         self._connection_lost = True
         pending = list(self._pending_messages)
         for msg in pending:
