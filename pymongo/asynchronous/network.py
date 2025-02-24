@@ -189,7 +189,6 @@ async def command(
         )
 
     try:
-        print(f"Call async_sendall")
         await async_sendall(conn.conn.get_conn, msg)
         if use_op_msg and unacknowledged:
             # Unacknowledged, fake a successful command response.

@@ -570,6 +570,7 @@ class PyMongoProtocol(BufferedProtocol):
                     ), self._op_code
                 else:
                     return memoryview(self._buffer[start + header_size : end]), self._op_code
+        print(f"State at end of read: {self._op_code, self._length, self._overflow_length, self._pending_messages, self._done_messages, self._body_length}")
         raise OSError("connection closed")
 
     def get_buffer(self, sizehint: int) -> memoryview:
