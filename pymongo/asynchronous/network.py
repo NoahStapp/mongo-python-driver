@@ -212,7 +212,7 @@ async def command(
                     parse_write_concern_error=parse_write_concern_error,
                 )
     except Exception as exc:
-        print(f"Exception in command: {exc!r}")
+        print(f"Exception in command: {exc}")
         duration = datetime.datetime.now() - start
         if isinstance(exc, (NotPrimaryError, OperationFailure)):
             failure: _DocumentOut = exc.details  # type: ignore[assignment]

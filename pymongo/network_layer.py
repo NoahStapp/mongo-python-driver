@@ -714,9 +714,7 @@ class PyMongoProtocol(BufferedProtocol):
         return self._buffer
 
     async def wait_closed(self) -> None:
-        print(f"Waiting for {self} to close")
         await asyncio.wait([self._closed])
-        print(f"{self} has closed")
 
 
 async def async_sendall(conn: PyMongoProtocol, buf: bytes) -> None:
