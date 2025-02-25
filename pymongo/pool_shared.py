@@ -334,8 +334,6 @@ async def _configured_protocol_interface(
     sock = await _async_create_connection(address, options)
     ssl_context = options._ssl_context
     timeout = options.socket_timeout
-    if ssl_context:
-        print(f"Getting protocol interface with SSL for {''.join(traceback.format_stack())}")
 
     if ssl_context is None:
         return AsyncNetworkingInterface(

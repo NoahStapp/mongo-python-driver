@@ -575,50 +575,56 @@ class PyMongoProtocol(BufferedProtocol):
 
     def get_buffer(self, sizehint: int) -> memoryview:
         """Called to allocate a new receive buffer."""
-        print(f"get_buffer with {sizehint} hint and length {self._length}")
-        if self._overflow is not None:
-            return self._overflow[self._overflow_length :]
-        return self._buffer[self._length :]
+        try:
+            if self._overflow is not None:
+                return self._overflow[self._overflow_length :]
+            return self._buffer[self._length :]
+        except Exception as e:
+            print(f"Exception in get_buffer: {e}")
+            raise
 
     def buffer_updated(self, nbytes: int) -> None:
-        print(f"Buffer updated with {nbytes} bytes")
         """Called when the buffer was updated with the received data"""
-        if nbytes == 0:
-            self.connection_lost(OSError("connection closed"))
-            return
-        else:
-            if self._overflow is not None:
-                self._overflow_length += nbytes
+        try:
+            if nbytes == 0:
+                self.connection_lost(OSError("connection closed"))
+                return
             else:
-                if self._expecting_header:
-                    try:
-                        self._body_length, self._op_code = self.process_header()
-                    except ProtocolError as exc:
-                        self.connection_lost(exc)
-                        return
-                    self._expecting_header = False
-                    if self._body_length > self._buffer_size:
-                        self._overflow = memoryview(
-                            bytearray(self._body_length - (self._length + nbytes) + 1024)
-                        )
-                self._length += nbytes
-            if (
-                self._length + self._overflow_length >= self._body_length
-                and self._pending_messages
-                and not self._pending_messages[0].done()
-            ):
-                done = self._pending_messages.popleft()
-                done.set_result((self._start, self._body_length))
-                self._done_messages.append(done)
-                if self._length > self._body_length:
-                    self._read_waiter = asyncio.get_running_loop().create_future()
-                    self._pending_messages.append(self._read_waiter)
-                    self._start = self._body_length
-                    extra = self._length - self._body_length
-                    self._length -= extra
-                    self._expecting_header = True
-                    self.buffer_updated(extra)
-                self.transport.pause_reading()
+                if self._overflow is not None:
+                    self._overflow_length += nbytes
+                else:
+                    if self._expecting_header:
+                        try:
+                            self._body_length, self._op_code = self.process_header()
+                        except ProtocolError as exc:
+                            self.connection_lost(exc)
+                            return
+                        self._expecting_header = False
+                        if self._body_length > self._buffer_size:
+                            self._overflow = memoryview(
+                                bytearray(self._body_length - (self._length + nbytes) + 1024)
+                            )
+                    self._length += nbytes
+                if (
+                    self._length + self._overflow_length >= self._body_length
+                    and self._pending_messages
+                    and not self._pending_messages[0].done()
+                ):
+                    done = self._pending_messages.popleft()
+                    done.set_result((self._start, self._body_length))
+                    self._done_messages.append(done)
+                    if self._length > self._body_length:
+                        self._read_waiter = asyncio.get_running_loop().create_future()
+                        self._pending_messages.append(self._read_waiter)
+                        self._start = self._body_length
+                        extra = self._length - self._body_length
+                        self._length -= extra
+                        self._expecting_header = True
+                        self.buffer_updated(extra)
+                    self.transport.pause_reading()
+        except Exception as e:
+            print(f"Exception in buffer_updated: {e}")
+            raise
 
     def process_header(self) -> tuple[int, int]:
         """Unpack a MongoDB Wire Protocol header."""
@@ -648,43 +654,54 @@ class PyMongoProtocol(BufferedProtocol):
         return length, op_code
 
     def pause_writing(self) -> None:
-        assert not self._paused
-        self._paused = True
+        try:
+            assert not self._paused
+            self._paused = True
+        except Exception as e:
+            print(f"Exception in pause_writing: {e}")
+            raise
 
     def resume_writing(self) -> None:
-        assert self._paused
-        self._paused = False
+        try:
+            assert self._paused
+            self._paused = False
 
-        if self._drain_waiter and not self._drain_waiter.done():
-            self._drain_waiter.set_result(None)
+            if self._drain_waiter and not self._drain_waiter.done():
+                self._drain_waiter.set_result(None)
+        except Exception as e:
+            print(f"Exception in resume_writing: {e}")
+            raise
 
     def connection_lost(self, exc: Exception | None) -> None:
-        print(f"Connection lost with {exc}")
-        self._connection_lost = True
-        pending = list(self._pending_messages)
-        for msg in pending:
-            if not msg.done():
+        try:
+            self._connection_lost = True
+            pending = list(self._pending_messages)
+            for msg in pending:
+                if not msg.done():
+                    if exc is None:
+                        msg.set_result(None)
+                    else:
+                        msg.set_exception(exc)
+                self._done_messages.append(msg)
+
+            if not self._closed.done():
                 if exc is None:
-                    msg.set_result(None)
+                    self._closed.set_result(None)
                 else:
-                    msg.set_exception(exc)
-            self._done_messages.append(msg)
+                    self._closed.set_exception(exc)
 
-        if not self._closed.done():
-            if exc is None:
-                self._closed.set_result(None)
-            else:
-                self._closed.set_exception(exc)
+            # Wake up the writer(s) if currently paused.
+            if not self._paused:
+                return
 
-        # Wake up the writer(s) if currently paused.
-        if not self._paused:
-            return
-
-        if self._drain_waiter and not self._drain_waiter.done():
-            if exc is None:
-                self._drain_waiter.set_result(None)
-            else:
-                self._drain_waiter.set_exception(exc)
+            if self._drain_waiter and not self._drain_waiter.done():
+                if exc is None:
+                    self._drain_waiter.set_result(None)
+                else:
+                    self._drain_waiter.set_exception(exc)
+        except Exception as e:
+            print(f"Exception in connection_lost: {e}")
+            raise
 
     async def _drain_helper(self) -> None:
         if self._connection_lost:
@@ -698,7 +715,9 @@ class PyMongoProtocol(BufferedProtocol):
         return self._buffer
 
     async def wait_closed(self) -> None:
+        print(f"Waiting for {self} to close")
         await asyncio.wait([self._closed])
+        print(f"{self} has closed")
 
 
 async def async_sendall(conn: PyMongoProtocol, buf: bytes) -> None:
