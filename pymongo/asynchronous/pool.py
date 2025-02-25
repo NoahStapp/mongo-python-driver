@@ -642,7 +642,9 @@ class AsyncConnection:
         # SSLError from PyOpenSSL inherits directly from Exception.
         print(f"Ready to raise: {error!r} and reason {reason}")
         if isinstance(error, (IOError, OSError, SSLError)):
+            print("Getting timeout details")
             details = _get_timeout_details(self.opts)
+            print(f"Timeout details: {details!r}")
             _raise_connection_failure(self.address, error, timeout_details=details)
         else:
             raise

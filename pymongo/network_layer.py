@@ -517,7 +517,7 @@ class PyMongoProtocol(BufferedProtocol):
             self.transport.write(message)
             await self._drain_helper()
             self.transport.resume_reading()
-        except Exception as e:
+        except BaseException as e:
             print(f"Exception in write: {e!r}")
             raise
 
@@ -576,7 +576,7 @@ class PyMongoProtocol(BufferedProtocol):
                     else:
                         return memoryview(self._buffer[start + header_size : end]), self._op_code
             raise OSError("connection closed")
-        except Exception as e:
+        except BaseException as e:
             print(f"Exception in write: {e!r}")
             raise
 
@@ -586,7 +586,7 @@ class PyMongoProtocol(BufferedProtocol):
             if self._overflow is not None:
                 return self._overflow[self._overflow_length :]
             return self._buffer[self._length :]
-        except Exception as e:
+        except BaseException as e:
             print(f"Exception in get_buffer: {e!r}")
             raise
 
@@ -629,7 +629,7 @@ class PyMongoProtocol(BufferedProtocol):
                         self._expecting_header = True
                         self.buffer_updated(extra)
                     self.transport.pause_reading()
-        except Exception as e:
+        except BaseException as e:
             print(f"Exception in buffer_updated: {e!r}")
             raise
 
@@ -664,7 +664,7 @@ class PyMongoProtocol(BufferedProtocol):
         try:
             assert not self._paused
             self._paused = True
-        except Exception as e:
+        except BaseException as e:
             print(f"Exception in pause_writing: {e!r}")
             raise
 
@@ -675,7 +675,7 @@ class PyMongoProtocol(BufferedProtocol):
 
             if self._drain_waiter and not self._drain_waiter.done():
                 self._drain_waiter.set_result(None)
-        except Exception as e:
+        except BaseException as e:
             print(f"Exception in resume_writing: {e!r}")
             raise
 
@@ -706,7 +706,7 @@ class PyMongoProtocol(BufferedProtocol):
                     self._drain_waiter.set_result(None)
                 else:
                     self._drain_waiter.set_exception(exc)
-        except Exception as e:
+        except BaseException as e:
             print(f"Exception in connection_lost: {e!r}")
             raise
 
