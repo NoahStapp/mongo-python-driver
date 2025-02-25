@@ -681,6 +681,7 @@ class PyMongoProtocol(BufferedProtocol):
             raise
 
     def connection_lost(self, exc: Exception | None) -> None:
+        print(f"Calling connection_lost with {exc!r}")
         try:
             self._connection_lost = True
             pending = list(self._pending_messages)
