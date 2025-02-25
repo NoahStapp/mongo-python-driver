@@ -755,36 +755,39 @@ async def async_receive_message(
         # see if the socket is readable. This helps avoid spurious
         # timeouts on AWS Lambda and other FaaS environments.
         timeout = max(deadline - time.monotonic(), 0)
-    if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
-        print(f"in {asyncio.current_task().get_name()}, calling async_receive_message from {''.join(traceback.format_stack(limit=30))}")
-    cancellation_task = create_task(_poll_cancellation(conn))
-    read_task = create_task(conn.conn.get_conn.read(request_id, max_message_size, debug))
-    tasks = [read_task, cancellation_task]
     try:
-        done, pending = await asyncio.wait(
-            tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.wait(pending)
-        if len(done) == 0:
-            raise socket.timeout("timed out reading")
-        if read_task in done:
-            data, op_code = read_task.result()
-            try:
-                unpack_reply = _UNPACK_REPLY[op_code]
-            except KeyError:
-                raise ProtocolError(
-                    f"Got opcode {op_code!r} but expected {_UNPACK_REPLY.keys()!r}"
-                ) from None
-            return unpack_reply(data)
-        raise _OperationCancelled("operation cancelled")
-    except asyncio.CancelledError:
-        for task in tasks:
-            task.cancel()
-        await asyncio.wait(tasks)
-        raise
+        if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
+            print(f"in {asyncio.current_task().get_name()}, calling async_receive_message from {''.join(traceback.format_stack(limit=30))}")
+        cancellation_task = create_task(_poll_cancellation(conn))
+        read_task = create_task(conn.conn.get_conn.read(request_id, max_message_size, debug))
+        tasks = [read_task, cancellation_task]
+        try:
+            done, pending = await asyncio.wait(
+                tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.wait(pending)
+            if len(done) == 0:
+                raise socket.timeout("timed out reading")
+            if read_task in done:
+                data, op_code = read_task.result()
+                try:
+                    unpack_reply = _UNPACK_REPLY[op_code]
+                except KeyError:
+                    raise ProtocolError(
+                        f"Got opcode {op_code!r} but expected {_UNPACK_REPLY.keys()!r}"
+                    ) from None
+                return unpack_reply(data)
+            raise _OperationCancelled("operation cancelled")
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.wait(tasks)
+            raise
+    except BaseException as e:
+        print(f"Exception in async_receive_message: {e!r}, running tasks: {asyncio.all_tasks()}")
 
 
 def receive_message(
