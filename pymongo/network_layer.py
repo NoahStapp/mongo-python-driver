@@ -564,6 +564,7 @@ class PyMongoProtocol(BufferedProtocol):
                         self._done_messages.remove(read_waiter)
             if message:
                 start, end = message[0], message[1]
+                print("Start, end:", start, end)
                 header_size = 16
                 if self._body_length > self._buffer_size and self._overflow is not None:
                     if self._is_compressed and self._compressor_id is not None:
