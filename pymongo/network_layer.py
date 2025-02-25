@@ -554,12 +554,7 @@ class PyMongoProtocol(BufferedProtocol):
                 read_waiter = asyncio.get_running_loop().create_future()
                 self._pending_messages.append(read_waiter)
                 try:
-                    while not read_waiter.done():
-                        if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
-                            print(f"Waiting for {read_waiter}")
-                        message = await asyncio.wait([read_waiter], timeout=1.0)
-                        await asyncio.sleep(0.01)
-                    message = read_waiter.result()
+                    message = await read_waiter
                 finally:
                     if read_waiter in self._done_messages:
                         self._done_messages.remove(read_waiter)
