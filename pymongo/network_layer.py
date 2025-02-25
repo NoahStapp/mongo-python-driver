@@ -559,12 +559,12 @@ class PyMongoProtocol(BufferedProtocol):
                             print(f"Waiting for {read_waiter}")
                         message = await asyncio.wait([read_waiter], timeout=1.0)
                         await asyncio.sleep(0.01)
+                    message = read_waiter.result()
                 finally:
                     if read_waiter in self._done_messages:
                         self._done_messages.remove(read_waiter)
             if message:
                 start, end = message[0], message[1]
-                print("Start, end:", start, end)
                 header_size = 16
                 if self._body_length > self._buffer_size and self._overflow is not None:
                     if self._is_compressed and self._compressor_id is not None:
