@@ -510,6 +510,10 @@ class PyMongoProtocol(BufferedProtocol):
         """
         self.transport = transport  # type: ignore[assignment]
 
+    def eof_received(self):
+        print(f"EOF received on {self}")
+        super().eof_received()
+
     async def write(self, message: bytes) -> None:
         """Write a message to this connection's transport."""
         try:
@@ -527,7 +531,7 @@ class PyMongoProtocol(BufferedProtocol):
     ) -> tuple[bytes, int]:
         """Read a single MongoDB Wire Protocol message from this connection."""
         if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
-            print("Calling read")
+            print(f"Calling read on {self}")
         try:
             self.transport.resume_reading()
             if self._done_messages:
@@ -544,11 +548,7 @@ class PyMongoProtocol(BufferedProtocol):
                 self._overflow = None
                 if self.transport.is_closing():
                     raise OSError("Connection is closed")
-                if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
-                    print("Creating read_waiter")
                 read_waiter = asyncio.get_running_loop().create_future()
-                if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
-                    print(f"Created: {read_waiter}")
                 self._pending_messages.append(read_waiter)
                 try:
                     message = await read_waiter
@@ -691,6 +691,7 @@ class PyMongoProtocol(BufferedProtocol):
             raise
 
     def connection_lost(self, exc: Exception | None) -> None:
+        print(f"Connection lost: {exc!r}")
         try:
             self._connection_lost = True
             pending = list(self._pending_messages)
