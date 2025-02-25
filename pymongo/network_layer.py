@@ -507,7 +507,6 @@ class PyMongoProtocol(BufferedProtocol):
         """Called exactly once when a connection is made.
         The transport argument is the transport representing the write side of the connection.
         """
-        print(f"Connection made with: {transport}")
         self.transport = transport  # type: ignore[assignment]
 
     async def write(self, message: bytes) -> None:
