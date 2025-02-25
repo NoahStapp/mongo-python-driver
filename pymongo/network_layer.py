@@ -591,7 +591,7 @@ class PyMongoProtocol(BufferedProtocol):
                         return memoryview(self._buffer[start + header_size : end]), self._op_code
             raise OSError("connection closed")
         except BaseException as e:
-            print(f"Exception in read: {e!r}")
+            print(f"Exception in read: {e!r}, {traceback.format_exception(e)}")
             raise
 
     def get_buffer(self, sizehint: int) -> memoryview:
