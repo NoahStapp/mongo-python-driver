@@ -544,9 +544,11 @@ class PyMongoProtocol(BufferedProtocol):
                 self._overflow = None
                 if self.transport.is_closing():
                     raise OSError("Connection is closed")
-                print("Creating read_waiter")
+                if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
+                    print("Creating read_waiter")
                 read_waiter = asyncio.get_running_loop().create_future()
-                print(f"Created: {read_waiter}")
+                if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
+                    print(f"Created: {read_waiter}")
                 self._pending_messages.append(read_waiter)
                 try:
                     message = await read_waiter
