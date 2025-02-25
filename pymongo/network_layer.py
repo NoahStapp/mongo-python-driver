@@ -508,8 +508,8 @@ class PyMongoProtocol(BufferedProtocol):
         """Called exactly once when a connection is made.
         The transport argument is the transport representing the write side of the connection.
         """
-        if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
-            print(f"Transport: {transport}")
+        if asyncio.current_task() is None or (asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name()):
+            print(f"Transport for {self}: {transport}")
         self.transport = transport  # type: ignore[assignment]
 
     def eof_received(self):
