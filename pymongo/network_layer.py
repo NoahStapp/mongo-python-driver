@@ -518,7 +518,7 @@ class PyMongoProtocol(BufferedProtocol):
                 raise OSError("Connection is closed")
             self.transport.write(message)
             await self._drain_helper()
-            # self.transport.resume_reading()
+            self.transport.resume_reading()
         except BaseException as e:
             print(f"Exception in write: {e!r}")
             raise
@@ -528,7 +528,7 @@ class PyMongoProtocol(BufferedProtocol):
     ) -> tuple[bytes, int]:
         """Read a single MongoDB Wire Protocol message from this connection."""
         try:
-            # self.transport.resume_reading()
+            self.transport.resume_reading()
             # if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
             #     print(f"Calling read on {self.transport}")
             if self._done_messages:
@@ -640,7 +640,7 @@ class PyMongoProtocol(BufferedProtocol):
                         self._length -= extra
                         self._expecting_header = True
                         self.buffer_updated(extra)
-                    # self.transport.pause_reading()
+                    self.transport.pause_reading()
         except BaseException as e:
             print(f"Exception in buffer_updated: {e!r}")
             raise
