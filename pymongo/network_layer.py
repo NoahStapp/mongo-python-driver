@@ -546,6 +546,7 @@ class PyMongoProtocol(BufferedProtocol):
                 try:
                     message = await read_waiter
                 finally:
+                    print(f"Done waiting to read, status: {read_waiter!r} with {message!r}")
                     if read_waiter in self._done_messages:
                         self._done_messages.remove(read_waiter)
             if message:
