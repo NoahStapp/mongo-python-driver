@@ -1240,10 +1240,10 @@ def setup():
     if not _IS_SYNC:
         # Set up the event loop.
         get_loop()
-    client_context.init()
-    warnings.resetwarnings()
-    warnings.simplefilter("always")
-    global_knobs.enable()
+        client_context.init()
+        warnings.resetwarnings()
+        warnings.simplefilter("always")
+        global_knobs.enable()
 
 
 def teardown():

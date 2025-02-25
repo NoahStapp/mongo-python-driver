@@ -637,16 +637,13 @@ class AsyncConnection:
             reason = None
         else:
             reason = ConnectionClosedReason.ERROR
-        print(f"Raising connection failure with error: {error!r} and reason {reason}")
         await self.close_conn(reason)
         # SSLError from PyOpenSSL inherits directly from Exception.
-        print(f"Ready to raise: {error!r} and reason {reason}")
         if isinstance(error, (IOError, OSError, SSLError)):
-            print("Getting timeout details")
             details = _get_timeout_details(self.opts)
-            print(f"Timeout details: {details!r}")
             _raise_connection_failure(self.address, error, timeout_details=details)
         else:
+            print(f"Raising {error!r} raw")
             raise
 
     def __eq__(self, other: Any) -> bool:
