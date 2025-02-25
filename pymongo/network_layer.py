@@ -547,7 +547,6 @@ class PyMongoProtocol(BufferedProtocol):
                 try:
                     message = await read_waiter
                 finally:
-                    print(f"Done waiting to read, status: {read_waiter!r}")
                     if read_waiter in self._done_messages:
                         self._done_messages.remove(read_waiter)
             if message:
@@ -682,7 +681,6 @@ class PyMongoProtocol(BufferedProtocol):
             raise
 
     def connection_lost(self, exc: Exception | None) -> None:
-        print(f"Calling connection_lost with {exc!r}")
         try:
             self._connection_lost = True
             pending = list(self._pending_messages)
