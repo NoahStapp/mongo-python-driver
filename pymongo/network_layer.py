@@ -582,13 +582,13 @@ class PyMongoProtocol(BufferedProtocol):
                         return memoryview(self._buffer[start + header_size : end]), self._op_code
             raise OSError("connection closed")
         except BaseException as e:
-            print(f"Exception in read: {e!r}, {traceback.format_exception(e)}")
+            print(f"Exception in read in {self._owning_task}: {e!r}, {traceback.format_exception(e)}")
             raise
 
     def get_buffer(self, sizehint: int) -> memoryview:
         """Called to allocate a new receive buffer."""
         try:
-            if self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+            if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
                 print(f"Calling get_buffer on {self._owning_task}")
             if self._overflow is not None:
                 return self._overflow[self._overflow_length :]
@@ -600,7 +600,7 @@ class PyMongoProtocol(BufferedProtocol):
     def buffer_updated(self, nbytes: int) -> None:
         """Called when the buffer was updated with the received data"""
         try:
-            if self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+            if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
                 print(f"Calling buffer_updated with {nbytes} bytes on {self._owning_task}")
             if nbytes == 0:
                 self.connection_lost(OSError("connection closed"))
@@ -631,7 +631,7 @@ class PyMongoProtocol(BufferedProtocol):
                     done.set_result((self._start, self._body_length))
                     self._done_messages.append(done)
                     if self._length > self._body_length:
-                        if self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+                        if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
                             print(f"{self._owning_task} has {self._length} bytes but message is only {self._body_length} bytes, re-update with {self._length - self._body_length} bytes")
                         self._read_waiter = asyncio.get_running_loop().create_future()
                         self._pending_messages.append(self._read_waiter)
@@ -642,7 +642,7 @@ class PyMongoProtocol(BufferedProtocol):
                         self.buffer_updated(extra)
                     self.transport.pause_reading()
         except BaseException as e:
-            print(f"Exception in buffer_updated: {e!r}")
+            print(f"Exception in buffer_updated: {e!r} {''.join(traceback.format_exception(e))}")
             raise
 
     def process_header(self) -> tuple[int, int]:
@@ -692,7 +692,7 @@ class PyMongoProtocol(BufferedProtocol):
             raise
 
     def connection_lost(self, exc: Exception | None) -> None:
-        if self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+        if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
             print(f"Connection lost on {self._owning_task}: {exc!r}")
         try:
             self._connection_lost = True
