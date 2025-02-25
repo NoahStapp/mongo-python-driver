@@ -22,6 +22,7 @@ import socket
 import struct
 import sys
 import time
+import traceback
 from asyncio import AbstractEventLoop, BaseTransport, BufferedProtocol, Future, Transport
 from typing import (
     TYPE_CHECKING,
@@ -756,7 +757,7 @@ async def async_receive_message(
         # see if the socket is readable. This helps avoid spurious
         # timeouts on AWS Lambda and other FaaS environments.
         timeout = max(deadline - time.monotonic(), 0)
-
+    print(f"Calling recieve_message from {''.join(traceback.format_stack())}")
     cancellation_task = create_task(_poll_cancellation(conn))
     read_task = create_task(conn.conn.get_conn.read(request_id, max_message_size, debug))
     tasks = [read_task, cancellation_task]
