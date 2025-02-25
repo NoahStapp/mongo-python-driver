@@ -585,6 +585,8 @@ class PyMongoProtocol(BufferedProtocol):
 
     def get_buffer(self, sizehint: int) -> memoryview:
         """Called to allocate a new receive buffer."""
+        if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
+            print("Calling get_buffer")
         try:
             if self._overflow is not None:
                 return self._overflow[self._overflow_length :]
@@ -595,6 +597,8 @@ class PyMongoProtocol(BufferedProtocol):
 
     def buffer_updated(self, nbytes: int) -> None:
         """Called when the buffer was updated with the received data"""
+        if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
+            print(f"Calling buffer_updated with {nbytes} bytes")
         try:
             if nbytes == 0:
                 self.connection_lost(OSError("connection closed"))
