@@ -582,8 +582,8 @@ class AsyncConnection:
         # shutdown.
         try:
             await self.conn.close()
-        except Exception as e:  # noqa: S110
-            print(f"Error closing connection: {e!r}")
+        except Exception:  # noqa: S110
+            pass
 
     def conn_closed(self) -> bool:
         """Return True if we know socket has been closed, False otherwise."""
@@ -643,7 +643,6 @@ class AsyncConnection:
             details = _get_timeout_details(self.opts)
             _raise_connection_failure(self.address, error, timeout_details=details)
         else:
-            print(f"Raising {error!r} raw")
             raise
 
     def __eq__(self, other: Any) -> bool:

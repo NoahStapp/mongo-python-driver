@@ -213,6 +213,7 @@ class AsyncClientContext:
 
         if HAVE_SSL and not self.client:
             # Is MongoDB configured for SSL?
+            print("configuring for SSL")
             self.client = await self._connect(host, port, **TLS_OPTIONS)
             if self.client:
                 self.tls = True
