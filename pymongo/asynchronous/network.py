@@ -212,31 +212,31 @@ async def command(
                     parse_write_concern_error=parse_write_concern_error,
                 )
     except Exception as exc:
-        print(f"Exception in command: {exc}")
+        print(f"Exception in command: {exc!r}")
         duration = datetime.datetime.now() - start
         if isinstance(exc, (NotPrimaryError, OperationFailure)):
             failure: _DocumentOut = exc.details  # type: ignore[assignment]
         else:
             failure = message._convert_exception(exc)
-        if client is not None:
-            if _COMMAND_LOGGER.isEnabledFor(logging.DEBUG):
-                _debug_log(
-                    _COMMAND_LOGGER,
-                    clientId=client._topology_settings._topology_id,
-                    message=_CommandStatusMessage.FAILED,
-                    durationMS=duration,
-                    failure=failure,
-                    commandName=next(iter(spec)),
-                    databaseName=dbname,
-                    requestId=request_id,
-                    operationId=request_id,
-                    driverConnectionId=conn.id,
-                    serverConnectionId=conn.server_connection_id,
-                    serverHost=conn.address[0],
-                    serverPort=conn.address[1],
-                    serviceId=conn.service_id,
-                    isServerSideError=isinstance(exc, OperationFailure),
-                )
+        # if client is not None:
+        if _COMMAND_LOGGER.isEnabledFor(logging.DEBUG):
+            _debug_log(
+                _COMMAND_LOGGER,
+                # clientId=client._topology_settings._topology_id,
+                message=_CommandStatusMessage.FAILED,
+                durationMS=duration,
+                failure=failure,
+                commandName=next(iter(spec)),
+                databaseName=dbname,
+                requestId=request_id,
+                operationId=request_id,
+                driverConnectionId=conn.id,
+                serverConnectionId=conn.server_connection_id,
+                serverHost=conn.address[0],
+                serverPort=conn.address[1],
+                serviceId=conn.service_id,
+                isServerSideError=isinstance(exc, OperationFailure),
+            )
         if publish:
             assert listeners is not None
             assert address is not None
