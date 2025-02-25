@@ -784,10 +784,12 @@ async def async_receive_message(
         except asyncio.CancelledError:
             for task in tasks:
                 task.cancel()
+            print(f"Waiting for {tasks} to cancel")
             await asyncio.wait(tasks)
+            print(f"{tasks} all cancelled")
             raise
     except BaseException as e:
-        print(f"Exception in async_receive_message: {e!r}, running tasks: {asyncio.all_tasks()}")
+        print(f"Exception in async_receive_message: {e!r}")
         raise e
 
 
