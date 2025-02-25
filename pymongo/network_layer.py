@@ -599,7 +599,7 @@ class PyMongoProtocol(BufferedProtocol):
         """Called when the buffer was updated with the received data"""
         try:
             # if asyncio.current_task() is None or (asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name()):
-            print(f"Calling buffer_updated with {nbytes} bytes on {self}")
+            print(f"Calling buffer_updated with {nbytes} bytes on {asyncio.current_task()}")
             if nbytes == 0:
                 self.connection_lost(OSError("connection closed"))
                 return
@@ -630,7 +630,7 @@ class PyMongoProtocol(BufferedProtocol):
                     self._done_messages.append(done)
                     if self._length > self._body_length:
                         # if asyncio.current_task() is None or (asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name()):
-                        print(f"{self} has {self._length} bytes but message is only {self._body_length} bytes, re-update with {self._length - self._body_length} bytes")
+                        print(f"{self} has {self._length} bytes but message is only {self._body_length} bytes, re-update with {self._length - self._body_length} bytes on {asyncio.current_task()}")
                         self._read_waiter = asyncio.get_running_loop().create_future()
                         self._pending_messages.append(self._read_waiter)
                         self._start = self._body_length
