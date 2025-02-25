@@ -788,6 +788,7 @@ async def async_receive_message(
             raise
     except BaseException as e:
         print(f"Exception in async_receive_message: {e!r}, running tasks: {asyncio.all_tasks()}")
+        raise e
 
 
 def receive_message(
