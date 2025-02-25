@@ -759,7 +759,7 @@ async def async_receive_message(
         if pending:
             await asyncio.wait(pending)
         if len(done) == 0:
-            raise socket.timeout("timed out")
+            raise socket.timeout("timed outf")
         if read_task in done:
             data, op_code = read_task.result()
             try:

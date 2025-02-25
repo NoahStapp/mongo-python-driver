@@ -582,8 +582,8 @@ class AsyncConnection:
         # shutdown.
         try:
             await self.conn.close()
-        except Exception:  # noqa: S110
-            pass
+        except Exception as e:  # noqa: S110
+            print(f"Error closing connection: {e!r}")
 
     def conn_closed(self) -> bool:
         """Return True if we know socket has been closed, False otherwise."""
@@ -637,8 +637,10 @@ class AsyncConnection:
             reason = None
         else:
             reason = ConnectionClosedReason.ERROR
+        print(f"Raising connection failure with error: {error} and reason {reason}")
         await self.close_conn(reason)
         # SSLError from PyOpenSSL inherits directly from Exception.
+        print(f"Ready to raise: {error} and reason {reason}")
         if isinstance(error, (IOError, OSError, SSLError)):
             details = _get_timeout_details(self.opts)
             _raise_connection_failure(self.address, error, timeout_details=details)
