@@ -609,6 +609,7 @@ class PyMongoProtocol(BufferedProtocol):
                             bytearray(self._body_length - (self._length + nbytes) + 1024)
                         )
                 self._length += nbytes
+            print(f"Status: length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, pending_messages: {self._pending_messages}")
             if (
                 self._length + self._overflow_length >= self._body_length
                 and self._pending_messages
