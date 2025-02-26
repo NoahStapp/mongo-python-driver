@@ -539,14 +539,11 @@ class PyMongoProtocol(BufferedProtocol):
             self._overflow = None
             if self.transport.is_closing():
                 raise OSError("Connection is closed")
+            read_waiter = asyncio.get_running_loop().create_future()
+            self._pending_messages.append(read_waiter)
             try:
-                read_waiter = asyncio.get_running_loop().create_future()
-                self._pending_messages.append(read_waiter)
-            except BaseException as e:
-                print(f"Error creating read_waiter: {e!r}")
-            try:
-                if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
-                    print(f"Waiting for read_waiter on {self._owning_task}, pending: {self._pending_messages}, done: {self._done_messages}")
+                # if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+                #     print(f"Waiting for read_waiter on {self._owning_task}, pending: {self._pending_messages}, done: {self._done_messages}")
                 message = await read_waiter
             finally:
                 if read_waiter in self._done_messages:
@@ -588,8 +585,8 @@ class PyMongoProtocol(BufferedProtocol):
 
     def buffer_updated(self, nbytes: int) -> None:
         """Called when the buffer was updated with the received data"""
-        if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
-            print(f"Calling buffer_updated with {nbytes} bytes on {self._owning_task}, length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, expecting_header: {self._expecting_header}")
+        # if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+        #     print(f"Calling buffer_updated with {nbytes} bytes on {self._owning_task}, length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, expecting_header: {self._expecting_header}")
         if nbytes == 0:
             self.connection_lost(OSError("connection closed"))
             return
@@ -614,8 +611,8 @@ class PyMongoProtocol(BufferedProtocol):
                             bytearray(self._body_length - (self._length + nbytes) + 1024)
                         )
                 self._length += nbytes
-            if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
-                print(f"Status: length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, pending_messages: {self._pending_messages}")
+            # if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+            #     print(f"Status: length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, pending_messages: {self._pending_messages}")
             if (
                 self._length + self._overflow_length >= self._body_length
             ):
@@ -626,8 +623,8 @@ class PyMongoProtocol(BufferedProtocol):
                 done.set_result((self._start, self._body_length))
                 self._done_messages.append(done)
                 if self._length > self._body_length:
-                    if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
-                        print(f"{self._owning_task} has {self._length} bytes but message is only {self._body_length} bytes, re-update with {self._length - self._body_length} bytes")
+                    # if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+                    #     print(f"{self._owning_task} has {self._length} bytes but message is only {self._body_length} bytes, re-update with {self._length - self._body_length} bytes")
                     self._read_waiter = asyncio.get_running_loop().create_future()
                     self._pending_messages.append(self._read_waiter)
                     self._start = self._body_length
@@ -636,10 +633,10 @@ class PyMongoProtocol(BufferedProtocol):
                     self._expecting_header = True
                     self.buffer_updated(extra)
                 self.transport.pause_reading()
-            if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
-                print(
-                    f"Finished buffer_updated with {nbytes} bytes on {self._owning_task},"
-                    f" length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, expecting_header: {self._expecting_header}, pending: {self._pending_messages}, done: {self._done_messages}")
+            # if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+            #     print(
+            #         f"Finished buffer_updated with {nbytes} bytes on {self._owning_task},"
+            #         f" length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, expecting_header: {self._expecting_header}, pending: {self._pending_messages}, done: {self._done_messages}")
 
     def process_header(self) -> tuple[int, int]:
         """Unpack a MongoDB Wire Protocol header."""
