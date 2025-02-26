@@ -1140,6 +1140,7 @@ class AsyncCursor(Generic[_DocumentType]):
         docs = response.docs
         if response.from_command:
             if cmd_name != "explain":
+                print(f"Docs: {docs[0]}")
                 cursor = docs[0]["cursor"]
                 self._id = cursor["id"]
                 if cmd_name == "find":

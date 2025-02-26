@@ -1994,6 +1994,7 @@ class AsyncCollection(common.BaseObject, Generic[_DocumentType]):
             collation=collation,
             session=session,
         )
+        print(f"Response: {res}")
         return int(res["n"])
 
     async def _aggregate_one_result(
@@ -3165,8 +3166,7 @@ class AsyncCollection(common.BaseObject, Generic[_DocumentType]):
             conn: AsyncConnection,
             read_preference: Optional[_ServerMode],
         ) -> list:
-            return (
-                await self._command(
+            res = await self._command(
                     conn,
                     cmd,
                     read_preference=read_preference,
@@ -3175,7 +3175,8 @@ class AsyncCollection(common.BaseObject, Generic[_DocumentType]):
                     session=session,
                     user_fields={"values": 1},
                 )
-            )["values"]
+            print(f"Response: {res}")
+            return res["values"]
 
         return await self._retryable_non_cursor_read(_cmd, session, operation=_Op.DISTINCT)
 

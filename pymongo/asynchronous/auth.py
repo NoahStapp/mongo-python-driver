@@ -138,6 +138,7 @@ async def _authenticate_scram(
     res = await conn.command(source, cmd)
 
     parsed = _parse_scram_response(res["payload"])
+    print(f"Parsed: {parsed}")
     if not hmac.compare_digest(parsed[b"v"], server_sig):
         raise OperationFailure("Server returned an invalid signature.")
 

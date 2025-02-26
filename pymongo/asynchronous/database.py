@@ -1087,7 +1087,9 @@ class AsyncDatabase(common.BaseObject, Generic[_DocumentType]):
         async with self._client._tmp_session(session, close=False) as tmp_session:
             cursor = (
                 await self._command(conn, cmd, read_preference=read_preference, session=tmp_session)
-            )["cursor"]
+            )
+            print(f"Cursor: {cursor}")
+            cursor = cursor["cursor"]
             cmd_cursor = AsyncCommandCursor(
                 coll,
                 cursor,

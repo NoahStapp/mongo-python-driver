@@ -2156,6 +2156,7 @@ class AsyncMongoClient(common.BaseObject, Generic[_DocumentType]):
         res = await admin._retryable_read_command(
             cmd, session=session, operation=_Op.LIST_DATABASES
         )
+        print(f"Databases: {res}")
         # listDatabases doesn't return a cursor (yet). Fake one.
         cursor = {
             "id": 0,
