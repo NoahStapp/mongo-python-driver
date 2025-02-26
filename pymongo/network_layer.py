@@ -630,7 +630,8 @@ class PyMongoProtocol(BufferedProtocol):
                 self.transport.pause_reading()
             if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
                 print(
-                    f"Finished buffer_updated with {nbytes} bytes on {self._owning_task}, length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, expecting_header: {self._expecting_header}")
+                    f"Finished buffer_updated with {nbytes} bytes on {self._owning_task},"
+                    f" length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, expecting_header: {self._expecting_header}, pending: {self._pending_messages}, done: {self._done_messages}")
 
     def process_header(self) -> tuple[int, int]:
         """Unpack a MongoDB Wire Protocol header."""
