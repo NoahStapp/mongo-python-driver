@@ -96,11 +96,9 @@ zstd = ["requirements/zstd.txt"]
 minversion = "7"
 addopts = ["-ra", "--strict-config", "--strict-markers", "--junitxml=xunit-results/TEST-results.xml", "-m default or default_async", "-s"]
 testpaths = ["test"]
-log_cli_level = "DEBUG"
-faulthandler_timeout = 1500
+faulthandler_timeout = 60
 asyncio_default_fixture_loop_scope = "session"
 xfail_strict = true
-log_cli = 1
 filterwarnings = [
     "error",
     # Internal warnings raised during tests.

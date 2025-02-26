@@ -513,137 +513,121 @@ class PyMongoProtocol(BufferedProtocol):
 
     async def write(self, message: bytes) -> None:
         """Write a message to this connection's transport."""
-        try:
-            if self.transport.is_closing():
-                raise OSError("Connection is closed")
-            self.transport.write(message)
-            await self._drain_helper()
-            self.transport.resume_reading()
-        except BaseException as e:
-            print(f"Exception in write: {e!r}")
-            raise
+        if self.transport.is_closing():
+            raise OSError("Connection is closed")
+        self.transport.write(message)
+        await self._drain_helper()
+        self.transport.resume_reading()
 
     async def read(
         self, request_id: Optional[int], max_message_size: int, debug: bool = False
     ) -> tuple[bytes, int]:
         """Read a single MongoDB Wire Protocol message from this connection."""
-        try:
-            self.transport.resume_reading()
-            # if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
-            #     print(f"Calling read on {self.transport}")
-            if self._done_messages:
-                message = await self._done_messages.popleft()
-            else:
-                self._owning_task = asyncio.current_task()
-                self._expecting_header = True
-                self._debug = debug
-                self._max_message_size = max_message_size
-                self._request_id = request_id
-                self._length = 0
-                self._overflow_length = 0
-                self._body_length = 0
-                self._op_code = None  # type: ignore[assignment]
-                self._overflow = None
-                if self.transport.is_closing():
-                    raise OSError("Connection is closed")
-                read_waiter = asyncio.get_running_loop().create_future()
-                self._pending_messages.append(read_waiter)
-                try:
-                    message = await read_waiter
-                finally:
-                    if read_waiter in self._done_messages:
-                        self._done_messages.remove(read_waiter)
-            if message:
-                start, end = message[0], message[1]
-                header_size = 16
-                if self._body_length > self._buffer_size and self._overflow is not None:
-                    if self._is_compressed and self._compressor_id is not None:
-                        header_size = 25
-                        return decompress(
-                            memoryview(
-                                bytearray(self._buffer[header_size : self._length])
-                                + bytearray(self._overflow[: self._overflow_length])
-                            ),
-                            self._compressor_id,
-                        ), self._op_code
-                    else:
-                        return memoryview(
+        self.transport.resume_reading()
+        if self._done_messages:
+            message = await self._done_messages.popleft()
+        else:
+            self._owning_task = asyncio.current_task()
+            self._expecting_header = True
+            self._debug = debug
+            self._max_message_size = max_message_size
+            self._request_id = request_id
+            self._length = 0
+            self._overflow_length = 0
+            self._body_length = 0
+            self._op_code = None  # type: ignore[assignment]
+            self._overflow = None
+            if self.transport.is_closing():
+                raise OSError("Connection is closed")
+            read_waiter = asyncio.get_running_loop().create_future()
+            self._pending_messages.append(read_waiter)
+            try:
+                message = await read_waiter
+            finally:
+                if read_waiter in self._done_messages:
+                    self._done_messages.remove(read_waiter)
+        if message:
+            start, end = message[0], message[1]
+            header_size = 16
+            if self._body_length > self._buffer_size and self._overflow is not None:
+                if self._is_compressed and self._compressor_id is not None:
+                    header_size = 25
+                    return decompress(
+                        memoryview(
                             bytearray(self._buffer[header_size : self._length])
                             + bytearray(self._overflow[: self._overflow_length])
-                        ), self._op_code
+                        ),
+                        self._compressor_id,
+                    ), self._op_code
                 else:
-                    if self._is_compressed and self._compressor_id is not None:
-                        header_size = 25
-                        return decompress(
-                            memoryview(self._buffer[start + header_size : end]),
-                            self._compressor_id,
-                        ), self._op_code
-                    else:
-                        return memoryview(self._buffer[start + header_size : end]), self._op_code
-            raise OSError("connection closed")
-        except BaseException as e:
-            print(f"Exception in read in {self._owning_task}: {e!r}, {traceback.format_exception(e)}")
-            raise
+                    return memoryview(
+                        bytearray(self._buffer[header_size : self._length])
+                        + bytearray(self._overflow[: self._overflow_length])
+                    ), self._op_code
+            else:
+                if self._is_compressed and self._compressor_id is not None:
+                    header_size = 25
+                    return decompress(
+                        memoryview(self._buffer[start + header_size : end]),
+                        self._compressor_id,
+                    ), self._op_code
+                else:
+                    return memoryview(self._buffer[start + header_size : end]), self._op_code
+        raise OSError("connection closed")
 
     def get_buffer(self, sizehint: int) -> memoryview:
         """Called to allocate a new receive buffer."""
-        try:
-            if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
-                print(f"Calling get_buffer on {self._owning_task}")
-            if self._overflow is not None:
-                return self._overflow[self._overflow_length :]
-            return self._buffer[self._length :]
-        except BaseException as e:
-            print(f"Exception in get_buffer: {e!r}")
-            raise
+        if self._overflow is not None:
+            return self._overflow[self._overflow_length :]
+        return self._buffer[self._length :]
 
     def buffer_updated(self, nbytes: int) -> None:
         """Called when the buffer was updated with the received data"""
-        try:
-            if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
-                print(f"Calling buffer_updated with {nbytes} bytes on {self._owning_task}")
-            if nbytes == 0:
-                self.connection_lost(OSError("connection closed"))
-                return
+        if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+            print(f"Calling buffer_updated with {nbytes} bytes on {self._owning_task}, length: {self._length}, overflow_length: {self._overflow_length}, body_length: {self._body_length}, expecting_header: {self._expecting_header}")
+        if nbytes == 0:
+            self.connection_lost(OSError("connection closed"))
+            return
+        else:
+            if self._overflow is not None:
+                self._overflow_length += nbytes
             else:
-                if self._overflow is not None:
-                    self._overflow_length += nbytes
-                else:
-                    if self._expecting_header:
-                        try:
-                            self._body_length, self._op_code = self.process_header()
-                        except ProtocolError as exc:
-                            self.connection_lost(exc)
-                            return
-                        self._expecting_header = False
-                        if self._body_length > self._buffer_size:
-                            self._overflow_length = 0
-                            self._overflow = memoryview(
-                                bytearray(self._body_length - (self._length + nbytes) + 1024)
-                            )
-                    self._length += nbytes
-                if (
-                    self._length + self._overflow_length >= self._body_length
-                    and self._pending_messages
-                    and not self._pending_messages[0].done()
-                ):
-                    done = self._pending_messages.popleft()
-                    done.set_result((self._start, self._body_length))
-                    self._done_messages.append(done)
-                    if self._length > self._body_length:
-                        if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
-                            print(f"{self._owning_task} has {self._length} bytes but message is only {self._body_length} bytes, re-update with {self._length - self._body_length} bytes")
-                        self._read_waiter = asyncio.get_running_loop().create_future()
-                        self._pending_messages.append(self._read_waiter)
-                        self._start = self._body_length
-                        extra = self._length - self._body_length
-                        self._length -= extra
-                        self._expecting_header = True
-                        self.buffer_updated(extra)
-                    self.transport.pause_reading()
-        except BaseException as e:
-            print(f"Exception in buffer_updated: {e!r} {''.join(traceback.format_exception(e))}")
-            raise
+                if self._expecting_header:
+                    try:
+                        self._body_length, self._op_code = self.process_header()
+                    except ProtocolError as exc:
+                        self.connection_lost(exc)
+                        return
+                    except Exception as exc:
+                        print(f"Processing header exception: {exc!r}")
+                        self.connection_lost(exc)
+                        return
+                    self._expecting_header = False
+                    if self._body_length > self._buffer_size:
+                        self._overflow_length = 0
+                        self._overflow = memoryview(
+                            bytearray(self._body_length - (self._length + nbytes) + 1024)
+                        )
+                self._length += nbytes
+            if (
+                self._length + self._overflow_length >= self._body_length
+                and self._pending_messages
+                and not self._pending_messages[0].done()
+            ):
+                done = self._pending_messages.popleft()
+                done.set_result((self._start, self._body_length))
+                self._done_messages.append(done)
+                if self._length > self._body_length:
+                    if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+                        print(f"{self._owning_task} has {self._length} bytes but message is only {self._body_length} bytes, re-update with {self._length - self._body_length} bytes")
+                    self._read_waiter = asyncio.get_running_loop().create_future()
+                    self._pending_messages.append(self._read_waiter)
+                    self._start = self._body_length
+                    extra = self._length - self._body_length
+                    self._length -= extra
+                    self._expecting_header = True
+                    self.buffer_updated(extra)
+                self.transport.pause_reading()
 
     def process_header(self) -> tuple[int, int]:
         """Unpack a MongoDB Wire Protocol header."""
@@ -673,56 +657,42 @@ class PyMongoProtocol(BufferedProtocol):
         return length, op_code
 
     def pause_writing(self) -> None:
-        try:
-            assert not self._paused
-            self._paused = True
-        except BaseException as e:
-            print(f"Exception in pause_writing: {e!r}")
-            raise
+        assert not self._paused
+        self._paused = True
 
     def resume_writing(self) -> None:
-        try:
-            assert self._paused
-            self._paused = False
+        assert self._paused
+        self._paused = False
 
-            if self._drain_waiter and not self._drain_waiter.done():
-                self._drain_waiter.set_result(None)
-        except BaseException as e:
-            print(f"Exception in resume_writing: {e!r}")
-            raise
+        if self._drain_waiter and not self._drain_waiter.done():
+            self._drain_waiter.set_result(None)
 
     def connection_lost(self, exc: Exception | None) -> None:
-        if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
-            print(f"Connection lost on {self._owning_task}: {exc!r}")
-        try:
-            self._connection_lost = True
-            pending = list(self._pending_messages)
-            for msg in pending:
-                if not msg.done():
-                    if exc is None:
-                        msg.set_result(None)
-                    else:
-                        msg.set_exception(exc)
-                self._done_messages.append(msg)
-
-            if not self._closed.done():
+        self._connection_lost = True
+        pending = list(self._pending_messages)
+        for msg in pending:
+            if not msg.done():
                 if exc is None:
-                    self._closed.set_result(None)
+                    msg.set_result(None)
                 else:
-                    self._closed.set_exception(exc)
+                    msg.set_exception(exc)
+            self._done_messages.append(msg)
 
-            # Wake up the writer(s) if currently paused.
-            if not self._paused:
-                return
+        if not self._closed.done():
+            if exc is None:
+                self._closed.set_result(None)
+            else:
+                self._closed.set_exception(exc)
 
-            if self._drain_waiter and not self._drain_waiter.done():
-                if exc is None:
-                    self._drain_waiter.set_result(None)
-                else:
-                    self._drain_waiter.set_exception(exc)
-        except BaseException as e:
-            print(f"Exception in connection_lost: {e!r}")
-            raise
+        # Wake up the writer(s) if currently paused.
+        if not self._paused:
+            return
+
+        if self._drain_waiter and not self._drain_waiter.done():
+            if exc is None:
+                self._drain_waiter.set_result(None)
+            else:
+                self._drain_waiter.set_exception(exc)
 
     async def _drain_helper(self) -> None:
         if self._connection_lost:
@@ -741,13 +711,10 @@ class PyMongoProtocol(BufferedProtocol):
 
 async def async_sendall(conn: PyMongoProtocol, buf: bytes) -> None:
     try:
-        try:
-            await asyncio.wait_for(conn.write(buf), timeout=conn.gettimeout)
-        except asyncio.TimeoutError as exc:
-            # Convert the asyncio.wait_for timeout error to socket.timeout which pool.py understands.
-            raise socket.timeout("timed out writing") from exc
-    except BaseException as exc:
-        print(f"Exception in async_sendall: {exc}")
+        await asyncio.wait_for(conn.write(buf), timeout=conn.gettimeout)
+    except asyncio.TimeoutError as exc:
+        # Convert the asyncio.wait_for timeout error to socket.timeout which pool.py understands.
+        raise socket.timeout("timed out writing") from exc
 
 
 async def async_receive_message(
@@ -771,40 +738,36 @@ async def async_receive_message(
         # see if the socket is readable. This helps avoid spurious
         # timeouts on AWS Lambda and other FaaS environments.
         timeout = max(deadline - time.monotonic(), 0)
+    # if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
+    #     print(f"in {asyncio.current_task().get_name()}, calling async_receive_message from {''.join(traceback.format_stack(limit=30))}")
+    cancellation_task = create_task(_poll_cancellation(conn))
+    read_task = create_task(conn.conn.get_conn.read(request_id, max_message_size, debug), name=(asyncio.current_task().get_name() + "-read-task" if asyncio.current_task() else None))
+    tasks = [read_task, cancellation_task]
     try:
-        # if asyncio.current_task() and "monitor" not in asyncio.current_task().get_name() and "rtt" not in asyncio.current_task().get_name():
-        #     print(f"in {asyncio.current_task().get_name()}, calling async_receive_message from {''.join(traceback.format_stack(limit=30))}")
-        cancellation_task = create_task(_poll_cancellation(conn))
-        read_task = create_task(conn.conn.get_conn.read(request_id, max_message_size, debug), name=(asyncio.current_task().get_name() + "-read-task" if asyncio.current_task() else None))
-        tasks = [read_task, cancellation_task]
-        try:
-            done, pending = await asyncio.wait(
-                tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.wait(pending)
-            if len(done) == 0:
-                raise socket.timeout("timed out reading")
-            if read_task in done:
-                data, op_code = read_task.result()
-                try:
-                    unpack_reply = _UNPACK_REPLY[op_code]
-                except KeyError:
-                    raise ProtocolError(
-                        f"Got opcode {op_code!r} but expected {_UNPACK_REPLY.keys()!r}"
-                    ) from None
-                return unpack_reply(data)
-            raise _OperationCancelled("operation cancelled")
-        except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            await asyncio.wait(tasks)
-            raise
-    except BaseException as e:
-        # print(f"Exception in async_receive_message: {e!r}")
-        raise e
+        done, pending = await asyncio.wait(
+            tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending)
+        if len(done) == 0:
+            raise socket.timeout("timed out reading")
+        if read_task in done:
+            data, op_code = read_task.result()
+            try:
+                unpack_reply = _UNPACK_REPLY[op_code]
+            except KeyError:
+                raise ProtocolError(
+                    f"Got opcode {op_code!r} but expected {_UNPACK_REPLY.keys()!r}"
+                ) from None
+            return unpack_reply(data)
+        raise _OperationCancelled("operation cancelled")
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.wait(tasks)
+        raise
 
 
 def receive_message(
