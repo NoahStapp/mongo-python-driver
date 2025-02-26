@@ -490,7 +490,6 @@ class PyMongoProtocol(BufferedProtocol):
         self._max_message_size = MAX_MESSAGE_SIZE
         self._request_id: Optional[int] = None
         self._closed = asyncio.get_running_loop().create_future()
-        self._debug = False
         self._expecting_header = True
         self._pending_messages: collections.deque[Future] = collections.deque()
         self._done_messages: collections.deque[Future] = collections.deque()
@@ -518,7 +517,7 @@ class PyMongoProtocol(BufferedProtocol):
         self.transport.resume_reading()
 
     async def read(
-        self, request_id: Optional[int], max_message_size: int, debug: bool = False
+        self, request_id: Optional[int], max_message_size: int
     ) -> tuple[bytes, int]:
         """Read a single MongoDB Wire Protocol message from this connection."""
         if self.transport:
@@ -527,7 +526,6 @@ class PyMongoProtocol(BufferedProtocol):
             message = await self._done_messages.popleft()
         else:
             self._expecting_header = True
-            self._debug = debug
             self._max_message_size = max_message_size
             self._request_id = request_id
             self._length = 0
@@ -546,23 +544,23 @@ class PyMongoProtocol(BufferedProtocol):
                 if read_waiter in self._done_messages:
                     self._done_messages.remove(read_waiter)
         if message:
-            start, end, op_code = message[0], message[1], message[2]
+            start, end, op_code, body_length = message[0], message[1], message[2], message[3]
             if self._is_compressed:
                 header_size = 25
             else:
                 header_size = 16
-            if self._body_length > self._buffer_size and self._overflow is not None:
+            if body_length > self._buffer_size and self._overflow is not None:
                 if self._is_compressed and self._compressor_id is not None:
                     return decompress(
                         memoryview(
-                            bytearray(self._buffer[header_size : self._length])
+                            bytearray(self._buffer[start + header_size : self._length])
                             + bytearray(self._overflow[: self._overflow_length])
                         ),
                         self._compressor_id,
                     ), op_code
                 else:
                     return memoryview(
-                        bytearray(self._buffer[header_size : self._length])
+                        bytearray(self._buffer[start + header_size : self._length])
                         + bytearray(self._overflow[: self._overflow_length])
                     ), op_code
             else:
@@ -588,7 +586,7 @@ class PyMongoProtocol(BufferedProtocol):
             return
         else:
             if self._overflow is not None:
-                self._overflow_length += nbytes
+                self._overflow_length = min(self._overflow_length + nbytes, self._body_length)
             else:
                 if self._expecting_header:
                     try:
@@ -597,18 +595,15 @@ class PyMongoProtocol(BufferedProtocol):
                         self.connection_lost(exc)
                         return
                     self._expecting_header = False
-                    # TODO: account for multiple messages processed within a single read() call
-                    if self._body_length > self._buffer_size:
-                        self._overflow = memoryview(
-                            bytearray(self._body_length - (self._length + nbytes) + 1024)
-                        )
+                    if self._body_length > self._buffer_size - (self._length + nbytes):
+                        self._overflow = memoryview(bytearray(self._body_length))
                 self._length += nbytes
             if self._length + self._overflow_length - self._start >= self._body_length:
                 if self._pending_messages:
                     done = self._pending_messages.popleft()
                 else:
                     done = asyncio.get_running_loop().create_future()
-                done.set_result((self._start, self._body_length + self._start, self._op_code))
+                done.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length))
                 self._start += self._body_length
                 self._done_messages.append(done)
                 # If we have more data after processing the last message, start processing a new message
@@ -620,6 +615,8 @@ class PyMongoProtocol(BufferedProtocol):
                     self._expecting_header = True
                     self._body_length = 0
                     self._op_code = None  # type: ignore[assignment]
+                    self._overflow = None
+                    self._overflow_length = 0
                     self.buffer_updated(extra)
                 self.transport.pause_reading()
 
@@ -719,7 +716,7 @@ async def async_receive_message(
     conn: AsyncConnection,
     request_id: Optional[int],
     max_message_size: int = MAX_MESSAGE_SIZE,
-    debug: bool = False,
+    command_name: Optional[str] = None,
 ) -> Union[_OpReply, _OpMsg]:
     """Receive a raw BSON message or raise socket.error."""
     timeout: Optional[Union[float, int]]
@@ -738,7 +735,7 @@ async def async_receive_message(
         timeout = max(deadline - time.monotonic(), 0)
 
     cancellation_task = create_task(_poll_cancellation(conn))
-    read_task = create_task(conn.conn.get_conn.read(request_id, max_message_size, debug))
+    read_task = create_task(conn.conn.get_conn.read(request_id, max_message_size))
     tasks = [read_task, cancellation_task]
     try:
         done, pending = await asyncio.wait(
@@ -749,7 +746,7 @@ async def async_receive_message(
         if pending:
             await asyncio.wait(pending)
         if len(done) == 0:
-            raise socket.timeout("timed out")
+            raise socket.timeout(f"timed out with timeout {timeout} waiting on response from operation {command_name}")
         if read_task in done:
             data, op_code = read_task.result()
             try:

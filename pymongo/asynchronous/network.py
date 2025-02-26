@@ -195,7 +195,7 @@ async def command(
             reply = None
             response_doc: _DocumentOut = {"ok": 1}
         else:
-            reply = await async_receive_message(conn, request_id)
+            reply = await async_receive_message(conn, request_id, command_name=next(iter(spec)))
             conn.more_to_come = reply.more_to_come
             unpacked_docs = reply.unpack_response(
                 codec_options=codec_options, user_fields=user_fields
