@@ -539,8 +539,11 @@ class PyMongoProtocol(BufferedProtocol):
             self._overflow = None
             if self.transport.is_closing():
                 raise OSError("Connection is closed")
-            read_waiter = asyncio.get_running_loop().create_future()
-            self._pending_messages.append(read_waiter)
+            try:
+                read_waiter = asyncio.get_running_loop().create_future()
+                self._pending_messages.append(read_waiter)
+            except BaseException as e:
+                print(f"Error creating read_waiter: {e!r}")
             try:
                 message = await read_waiter
             finally:
