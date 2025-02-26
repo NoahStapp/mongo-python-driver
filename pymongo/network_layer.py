@@ -545,6 +545,8 @@ class PyMongoProtocol(BufferedProtocol):
             except BaseException as e:
                 print(f"Error creating read_waiter: {e!r}")
             try:
+                if self._owning_task is None or self._owning_task and "monitor" not in self._owning_task.get_name() and "rtt" not in self._owning_task.get_name():
+                    print(f"Waiting for read_waiter on {self._owning_task}, pending: {self._pending_messages}, done: {self._done_messages}")
                 message = await read_waiter
             finally:
                 if read_waiter in self._done_messages:
