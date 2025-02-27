@@ -612,8 +612,8 @@ class PyMongoProtocol(BufferedProtocol):
                 if done.done():
                     print(f"Future is already done: {done}")
                 done.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length, self._overflow, self._overflow_length))
-                print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start}")
-                if self._length - (self._start + self._body_length) > 0:
+                print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start} and overflow: {self._overflow} and overflow length: {self._overflow_length}")
+                if self._length - (self._start + self._body_length) >= 16:
                     print(f"Will recur since {self._length} - ({self._start} + {self._body_length}) > 0")
                 self._done_messages.append(done)
                 self._start += self._body_length
