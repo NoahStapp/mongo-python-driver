@@ -22,6 +22,7 @@ import socket
 import struct
 import sys
 import time
+import traceback
 from asyncio import AbstractEventLoop, BaseTransport, BufferedProtocol, Future, Transport
 from typing import (
     TYPE_CHECKING,
@@ -638,7 +639,7 @@ class PyMongoProtocol(BufferedProtocol):
                     f"Got response id {response_to!r} but expected {self._request_id!r}"
                 )
         if length <= 16:
-            print(f"Message length ({length!r}) not longer than standard message header size (16)")
+            print(f"Message length ({length!r}) not longer than standard message header size (16): {''.join(traceback.format_stack())}")
             raise ProtocolError(
                 f"Message length ({length!r}) not longer than standard message header size (16)"
             )
