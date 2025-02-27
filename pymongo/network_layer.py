@@ -632,10 +632,12 @@ class PyMongoProtocol(BufferedProtocol):
         # No request_id for exhaust cursor "getMore".
         if self._request_id is not None:
             if self._request_id != response_to:
+                print(f"Got response id {response_to!r} but expected {self._request_id!r}")
                 raise ProtocolError(
                     f"Got response id {response_to!r} but expected {self._request_id!r}"
                 )
         if length <= 16:
+            print(f"Message length ({length!r}) not longer than standard message header size (16)")
             raise ProtocolError(
                 f"Message length ({length!r}) not longer than standard message header size (16)"
             )
