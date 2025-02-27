@@ -612,11 +612,11 @@ class PyMongoProtocol(BufferedProtocol):
                 if done.done():
                     print(f"Future is already done: {done}")
                 done.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length, self._overflow, self._overflow_length))
-                print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start}")
+                # print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start}")
                 self._done_messages.append(done)
                 # If we have more data after processing the last message, start processing a new message
                 if self._length - (self._start + self._body_length) > 0:
-                    print(f"Preparing for recur since length is {self._length} and start is {self._start}")
+                    # print(f"Preparing for recur since length is {self._length} and start is {self._start}")
                     self._start += self._body_length
                     self._read_waiter = asyncio.get_running_loop().create_future()
                     self._pending_messages.append(self._read_waiter)
@@ -627,7 +627,7 @@ class PyMongoProtocol(BufferedProtocol):
                     self._op_code = None  # type: ignore[assignment]
                     self._overflow = None
                     self._overflow_length = 0
-                    print(f"Recursive buffer_updated with start: {self._start}, extra: {extra}, length: {self._length}")
+                    # print(f"Recursive buffer_updated with start: {self._start}, extra: {extra}, length: {self._length}")
                     self.buffer_updated(extra)
                 self.transport.pause_reading()
 
