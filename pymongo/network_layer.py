@@ -544,6 +544,7 @@ class PyMongoProtocol(BufferedProtocol):
                 if read_waiter in self._done_messages:
                     self._done_messages.remove(read_waiter)
         try:
+            print(f"Message: {message}")
             result = message.result()
         except Exception as e:
             print(f"Error fron result: {e}")
