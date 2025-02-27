@@ -787,6 +787,7 @@ def receive_message(
     # No request_id for exhaust cursor "getMore".
     if request_id is not None:
         if request_id != response_to:
+            print(f"Got response id {response_to!r} but expected {request_id!r}")
             raise ProtocolError(f"Got response id {response_to!r} but expected {request_id!r}")
     if length <= 16:
         raise ProtocolError(
