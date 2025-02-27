@@ -613,13 +613,13 @@ class PyMongoProtocol(BufferedProtocol):
                     print(f"Future is already done: {done}")
                 done.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length, self._overflow, self._overflow_length))
                 if self._overflow is not None:
-                    print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start} and overflow: {self._overflow} and overflow length: {self._overflow_length}")
+                    print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start} and overflow length: {self._overflow_length}")
                 if self._length - (self._start + self._body_length) >= 16:
                     print(f"Will recur since {self._length} - ({self._start} + {self._body_length}) > 0")
                 self._done_messages.append(done)
                 self._start += self._body_length
-                # If we have more data after processing the last message, start processing a new message
-                if self._length - (self._start + self._body_length) >= 16:
+                # If we have more data after processing the last message, start processing a new message if there is at least a header remaining
+                if self._length - self._start >= 16:
                     print(f"Preparing for recur since length is {self._length} and start is {self._start}")
                     self._read_waiter = asyncio.get_running_loop().create_future()
                     self._pending_messages.append(self._read_waiter)
