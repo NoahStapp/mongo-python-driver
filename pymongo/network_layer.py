@@ -612,7 +612,7 @@ class PyMongoProtocol(BufferedProtocol):
                 done.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length, self._overflow, self._overflow_length))
                 print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start}")
                 if self._length - (self._start + self._body_length):
-                    print(f"new start will be {self._start + self._body_length}")
+                    print(f"new start for recur will be {self._start + self._body_length}")
                 self._start += self._body_length
                 self._done_messages.append(done)
                 # If we have more data after processing the last message, start processing a new message
