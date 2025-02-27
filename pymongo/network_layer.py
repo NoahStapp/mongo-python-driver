@@ -632,6 +632,7 @@ class PyMongoProtocol(BufferedProtocol):
         )
         # No request_id for exhaust cursor "getMore".
         if self._request_id is not None:
+            print(f"Response_to: {response_to!r}, request_id: {self._request_id!r}")
             if self._request_id != response_to:
                 print(f"Got response id {response_to!r} but expected {self._request_id!r}")
                 raise ProtocolError(
