@@ -515,7 +515,7 @@ class PyMongoProtocol(BufferedProtocol):
             raise OSError("Connection is closed")
         self.transport.write(message)
         await self._drain_helper()
-        self.transport.resume_reading()
+        # self.transport.resume_reading()
 
     async def read(
         self, request_id: Optional[int], max_message_size: int
@@ -523,7 +523,7 @@ class PyMongoProtocol(BufferedProtocol):
         """Read a single MongoDB Wire Protocol message from this connection."""
         try:
             if self.transport:
-                self.transport.resume_reading()
+                # self.transport.resume_reading()
             if self._done_messages:
                 message = await self._done_messages.popleft()
             else:
@@ -634,7 +634,7 @@ class PyMongoProtocol(BufferedProtocol):
                     self._overflow_length = 0
                     print(f"Recursive buffer_updated with start: {self._start}, extra: {extra}, length: {self._length}")
                     self.buffer_updated(extra)
-                self.transport.pause_reading()
+                # self.transport.pause_reading()
 
     def process_header(self) -> tuple[int, int]:
         """Unpack a MongoDB Wire Protocol header."""
