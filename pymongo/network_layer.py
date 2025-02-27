@@ -596,6 +596,7 @@ class PyMongoProtocol(BufferedProtocol):
                 if self._expecting_header:
                     try:
                         self._body_length, self._op_code = self.process_header()
+                        self._request_id = None
                     except ProtocolError as exc:
                         self.connection_lost(exc)
                         return
