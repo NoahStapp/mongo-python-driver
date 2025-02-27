@@ -546,24 +546,24 @@ class PyMongoProtocol(BufferedProtocol):
                     if read_waiter in self._done_messages:
                         self._done_messages.remove(read_waiter)
             if message:
-                start, end, op_code, body_length = message[0], message[1], message[2], message[3]
+                start, end, op_code, body_length, overflow, overflow_length = message[0], message[1], message[2], message[3], message[4], message[5]
                 if self._is_compressed:
                     header_size = 25
                 else:
                     header_size = 16
-                if body_length > self._buffer_size and self._overflow is not None:
+                if overflow is not None:
                     if self._is_compressed and self._compressor_id is not None:
                         return decompress(
                             memoryview(
                                 bytearray(self._buffer[start + header_size : self._length])
-                                + bytearray(self._overflow[: self._overflow_length])
+                                + bytearray(overflow[: overflow_length])
                             ),
                             self._compressor_id,
                         ), op_code
                     else:
                         return memoryview(
                             bytearray(self._buffer[start + header_size : self._length])
-                            + bytearray(self._overflow[: self._overflow_length])
+                            + bytearray(overflow[: overflow_length])
                         ), op_code
                 else:
                     if self._is_compressed and self._compressor_id is not None:
@@ -608,7 +608,7 @@ class PyMongoProtocol(BufferedProtocol):
                     done = self._pending_messages.popleft()
                 else:
                     done = asyncio.get_running_loop().create_future()
-                done.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length))
+                done.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length, self._overflow, self._overflow_length))
                 self._start += self._body_length
                 self._done_messages.append(done)
                 # If we have more data after processing the last message, start processing a new message
