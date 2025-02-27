@@ -617,7 +617,7 @@ class PyMongoProtocol(BufferedProtocol):
                 if self._length - (self._start + self._body_length) >= 16:
                     print(f"Will recur since {self._length} - ({self._start} + {self._body_length}) > 16")
                 elif self._length - (self._start + self._body_length) > 0:
-                    print(f"Have {self._length - (self._start + self._body_length)} bytes leftover")
+                    print(f"Have {self._length - (self._start + self._body_length)} bytes leftover from a message of size {(self._body_length + self._start) - self._start }")
                 self._done_messages.append(result)
                 self._start += self._body_length
                 # If we have more data after processing the last message, start processing a new message if there is at least a header remaining
