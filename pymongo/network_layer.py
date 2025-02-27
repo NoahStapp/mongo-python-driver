@@ -609,6 +609,8 @@ class PyMongoProtocol(BufferedProtocol):
                     done = self._pending_messages.popleft()
                 else:
                     done = asyncio.get_running_loop().create_future()
+                if done.done():
+                    print(f"Future is already done: {done}")
                 done.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length, self._overflow, self._overflow_length))
                 print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start}")
                 self._done_messages.append(done)
