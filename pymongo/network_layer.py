@@ -606,19 +606,19 @@ class PyMongoProtocol(BufferedProtocol):
                 self._length += nbytes
             if self._length + self._overflow_length - self._start >= self._body_length:
                 if self._pending_messages:
-                    done = self._pending_messages.popleft()
+                    result = self._pending_messages.popleft()
                 else:
-                    done = asyncio.get_running_loop().create_future()
-                if done.done():
-                    print(f"Future is already done: {done}")
-                done.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length, self._overflow, self._overflow_length))
+                    result = asyncio.get_running_loop().create_future()
+                if result.done():
+                    return
+                result.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length, self._overflow, self._overflow_length))
                 if self._overflow is not None:
                     print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start} and overflow length: {self._overflow_length}")
                 if self._length - (self._start + self._body_length) >= 16:
                     print(f"Will recur since {self._length} - ({self._start} + {self._body_length}) > 16")
                 elif self._length - (self._start + self._body_length) > 0:
                     print(f"Have {self._length - (self._start + self._body_length)} bytes leftover")
-                self._done_messages.append(done)
+                self._done_messages.append(result)
                 self._start += self._body_length
                 # If we have more data after processing the last message, start processing a new message if there is at least a header remaining
                 if self._length - self._start >= 16:
