@@ -623,6 +623,7 @@ class PyMongoProtocol(BufferedProtocol):
                     self._op_code = None  # type: ignore[assignment]
                     self._overflow = None
                     self._overflow_length = 0
+                    print(f"Recursive buffer_updated with start: {self._start}, extra: {extra}, length: {self._length}")
                     self.buffer_updated(extra)
                 self.transport.pause_reading()
 
