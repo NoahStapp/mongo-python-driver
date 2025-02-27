@@ -476,9 +476,9 @@ class PyMongoProtocol(BufferedProtocol):
         self._buffer = memoryview(bytearray(self._buffer_size))
         self._overflow: Optional[memoryview] = None
         self._start = 0
-        self._length = 0
-        self._overflow_length = 0
-        self._body_length = 0
+        self._index = 0
+        self._overflow_index = 0
+        self._body_size = 0
         self._op_code: int = None  # type: ignore[assignment]
         self._connection_lost = False
         self._paused = False
@@ -530,14 +530,14 @@ class PyMongoProtocol(BufferedProtocol):
                 self._expecting_header = True
                 self._max_message_size = max_message_size
                 self._request_id = request_id
-                self._length = 0
-                self._overflow_length = 0
-                self._body_length = 0
+                self._index = 0
+                self._overflow_index = 0
+                self._body_size = 0
                 self._start = 0
                 self._op_code = None  # type: ignore[assignment]
                 self._overflow = None
                 if self.transport and self.transport.is_closing():
-                    raise OSError("Connection is closed")
+                    raise OSError("Connection is closed because transport is closing")
                 read_waiter = asyncio.get_running_loop().create_future()
                 self._pending_messages.append(read_waiter)
                 try:
@@ -555,14 +555,14 @@ class PyMongoProtocol(BufferedProtocol):
                     if self._is_compressed and self._compressor_id is not None:
                         return decompress(
                             memoryview(
-                                bytearray(self._buffer[start + header_size : self._length])
+                                bytearray(self._buffer[start + header_size : self._index])
                                 + bytearray(overflow[: overflow_length])
                             ),
                             self._compressor_id,
                         ), op_code
                     else:
                         return memoryview(
-                            bytearray(self._buffer[start + header_size : self._length])
+                            bytearray(self._buffer[start + header_size : self._index])
                             + bytearray(overflow[: overflow_length])
                         ), op_code
                 else:
@@ -576,13 +576,21 @@ class PyMongoProtocol(BufferedProtocol):
         except Exception as e:
             print(f"Exception in read: {e!r}")
             raise e
-        raise OSError("connection closed")
+        raise OSError("connection closed no message")
 
     def get_buffer(self, sizehint: int) -> memoryview:
-        """Called to allocate a new receive buffer."""
+        """Called to allocate a new receive buffer.
+        The asyncio loop calls this method expecting to receive a non-empty buffer to fill with data.
+        If any data does not fit into the returned buffer, this method will be called again until
+        either no data remains or an empty buffer is returned.
+        """
         if self._overflow is not None:
-            return self._overflow[self._overflow_length :]
-        return self._buffer[self._length :]
+            if len(self._overflow[self._overflow_index:]) <= 0:
+                print("Overflow is empty")
+            return self._overflow[self._overflow_index :]
+        if len(self._buffer[self._index :]) <= 0:
+            print("Buffer is empty")
+        return self._buffer[self._index :]
 
     def buffer_updated(self, nbytes: int) -> None:
         """Called when the buffer was updated with the received data"""
@@ -591,48 +599,50 @@ class PyMongoProtocol(BufferedProtocol):
             return
         else:
             if self._overflow is not None:
-                self._overflow_length = min(self._overflow_length + nbytes, self._body_length)
+                self._overflow_index = min(self._overflow_index + nbytes, self._body_size)
             else:
                 if self._expecting_header:
                     try:
-                        self._body_length, self._op_code = self.process_header()
+                        self._body_size, self._op_code = self.process_header()
                         self._request_id = None
                     except ProtocolError as exc:
                         self.connection_lost(exc)
                         return
                     self._expecting_header = False
-                    if self._body_length > self._buffer_size - (self._length + nbytes):
-                        self._overflow = memoryview(bytearray(self._body_length))
-                self._length += nbytes
-            if self._length + self._overflow_length - self._start >= self._body_length:
+                    if self._body_size > self._buffer_size - (self._index + nbytes):
+                        self._overflow = memoryview(bytearray(self._body_size))
+                self._index += nbytes
+            # We've processed enough data to fill the current message
+            if self._index + self._overflow_index - self._start >= self._body_size:
+                # Get a waiting read
                 if self._pending_messages:
                     result = self._pending_messages.popleft()
                 else:
                     result = asyncio.get_running_loop().create_future()
                 if result.done():
                     return
-                result.set_result((self._start, self._body_length + self._start, self._op_code, self._body_length, self._overflow, self._overflow_length))
+                result.set_result((self._start, self._body_size + self._start, self._op_code, self._body_size, self._overflow, self._overflow_index))
                 if self._overflow is not None:
-                    print(f"Finished message with length {self._body_length} out of {self._length} and start {self._start} and overflow length: {self._overflow_length}")
-                if self._length - (self._start + self._body_length) >= 16:
-                    print(f"Will recur since {self._length} - ({self._start} + {self._body_length}) > 16")
-                elif self._length - (self._start + self._body_length) > 0:
-                    print(f"Have {self._length - (self._start + self._body_length)} bytes leftover from a message of size {(self._body_length + self._start) - self._start }")
+                    print(f"Finished message with length {self._body_size} out of {self._index} and start {self._start} and overflow length: {self._overflow_index}")
+                if self._index - (self._start + self._body_size) >= 16:
+                    print(f"Will recur since {self._index} - ({self._start} + {self._body_size}) > 16")
+                elif self._index - (self._start + self._body_size) > 0:
+                    print(f"Have {self._index - (self._start + self._body_size)} bytes leftover from a message of size {(self._body_size + self._start) - self._start }")
                 self._done_messages.append(result)
-                self._start += self._body_length
+                self._start += self._body_size
                 # If we have more data after processing the last message, start processing a new message if there is at least a header remaining
-                if self._length - self._start >= 16:
-                    print(f"Preparing for recur since length is {self._length} and start is {self._start}")
+                if self._index - self._start >= 16:
+                    print(f"Preparing for recur since length is {self._index} and start is {self._start}")
                     self._read_waiter = asyncio.get_running_loop().create_future()
                     self._pending_messages.append(self._read_waiter)
-                    extra = self._length - self._start
-                    self._length -= extra
+                    extra = self._index - self._start
+                    self._index -= extra
                     self._expecting_header = True
-                    self._body_length = 0
+                    self._body_size = 0
                     self._op_code = None  # type: ignore[assignment]
                     self._overflow = None
-                    self._overflow_length = 0
-                    print(f"Recursive buffer_updated with start: {self._start}, extra: {extra}, length: {self._length}")
+                    self._overflow_index = 0
+                    print(f"Recursive buffer_updated with start: {self._start}, extra: {extra}, length: {self._index}")
                     self.buffer_updated(extra)
                 self.transport.pause_reading()
 
@@ -660,7 +670,7 @@ class PyMongoProtocol(BufferedProtocol):
             )
         if op_code == 2012:
             self._is_compressed = True
-            if self._length >= 25:
+            if self._index >= 25:
                 op_code, _, self._compressor_id = _UNPACK_COMPRESSION_HEADER(
                     self._buffer[self._start + 16 : self._start + 25]
                 )
@@ -681,6 +691,7 @@ class PyMongoProtocol(BufferedProtocol):
             self._drain_waiter.set_result(None)
 
     def connection_lost(self, exc: Exception | None) -> None:
+        # print(f"Connection lost: {exc!r}")
         self._connection_lost = True
         pending = list(self._pending_messages)
         for msg in pending:
