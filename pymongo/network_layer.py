@@ -528,6 +528,7 @@ class PyMongoProtocol(BufferedProtocol):
             else:
                 self._expecting_header = True
                 self._max_message_size = max_message_size
+                print(f"read with request_id {request_id!r}")
                 self._request_id = request_id
                 self._length = 0
                 self._overflow_length = 0
@@ -741,6 +742,7 @@ async def async_receive_message(
         timeout = max(deadline - time.monotonic(), 0)
 
     cancellation_task = create_task(_poll_cancellation(conn))
+    print(f"async_receive_message with request_id {request_id!r} for {command_name!r}")
     read_task = create_task(conn.conn.get_conn.read(request_id, max_message_size))
     tasks = [read_task, cancellation_task]
     try:
@@ -787,7 +789,6 @@ def receive_message(
     # No request_id for exhaust cursor "getMore".
     if request_id is not None:
         if request_id != response_to:
-            print(f"Got response id {response_to!r} but expected {request_id!r}")
             raise ProtocolError(f"Got response id {response_to!r} but expected {request_id!r}")
     if length <= 16:
         raise ProtocolError(
