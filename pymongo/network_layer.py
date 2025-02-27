@@ -615,6 +615,7 @@ class PyMongoProtocol(BufferedProtocol):
                 self._done_messages.append(done)
                 # If we have more data after processing the last message, start processing a new message
                 if self._length - self._start > 0:
+                    print(f"Preparing for recur since length is {self._length} and start is {self._start}")
                     self._read_waiter = asyncio.get_running_loop().create_future()
                     self._pending_messages.append(self._read_waiter)
                     extra = self._length - self._start
