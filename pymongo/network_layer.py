@@ -522,7 +522,7 @@ class PyMongoProtocol(BufferedProtocol):
     ) -> tuple[bytes, int]:
         """Read a single MongoDB Wire Protocol message from this connection."""
         try:
-            if self.transport:
+            # if self.transport:
                 # self.transport.resume_reading()
             if self._done_messages:
                 message = await self._done_messages.popleft()
