@@ -520,57 +520,61 @@ class PyMongoProtocol(BufferedProtocol):
         self, request_id: Optional[int], max_message_size: int
     ) -> tuple[bytes, int]:
         """Read a single MongoDB Wire Protocol message from this connection."""
-        if self.transport:
-            self.transport.resume_reading()
-        if self._done_messages:
-            message = await self._done_messages.popleft()
-        else:
-            self._expecting_header = True
-            self._max_message_size = max_message_size
-            self._request_id = request_id
-            self._length = 0
-            self._overflow_length = 0
-            self._body_length = 0
-            self._start = 0
-            self._op_code = None  # type: ignore[assignment]
-            self._overflow = None
-            if self.transport and self.transport.is_closing():
-                raise OSError("Connection is closed")
-            read_waiter = asyncio.get_running_loop().create_future()
-            self._pending_messages.append(read_waiter)
-            try:
-                message = await read_waiter
-            finally:
-                if read_waiter in self._done_messages:
-                    self._done_messages.remove(read_waiter)
-        if message:
-            start, end, op_code, body_length = message[0], message[1], message[2], message[3]
-            if self._is_compressed:
-                header_size = 25
+        try:
+            if self.transport:
+                self.transport.resume_reading()
+            if self._done_messages:
+                message = await self._done_messages.popleft()
             else:
-                header_size = 16
-            if body_length > self._buffer_size and self._overflow is not None:
-                if self._is_compressed and self._compressor_id is not None:
-                    return decompress(
-                        memoryview(
+                self._expecting_header = True
+                self._max_message_size = max_message_size
+                self._request_id = request_id
+                self._length = 0
+                self._overflow_length = 0
+                self._body_length = 0
+                self._start = 0
+                self._op_code = None  # type: ignore[assignment]
+                self._overflow = None
+                if self.transport and self.transport.is_closing():
+                    raise OSError("Connection is closed")
+                read_waiter = asyncio.get_running_loop().create_future()
+                self._pending_messages.append(read_waiter)
+                try:
+                    message = await read_waiter
+                finally:
+                    if read_waiter in self._done_messages:
+                        self._done_messages.remove(read_waiter)
+            if message:
+                start, end, op_code, body_length = message[0], message[1], message[2], message[3]
+                if self._is_compressed:
+                    header_size = 25
+                else:
+                    header_size = 16
+                if body_length > self._buffer_size and self._overflow is not None:
+                    if self._is_compressed and self._compressor_id is not None:
+                        return decompress(
+                            memoryview(
+                                bytearray(self._buffer[start + header_size : self._length])
+                                + bytearray(self._overflow[: self._overflow_length])
+                            ),
+                            self._compressor_id,
+                        ), op_code
+                    else:
+                        return memoryview(
                             bytearray(self._buffer[start + header_size : self._length])
                             + bytearray(self._overflow[: self._overflow_length])
-                        ),
-                        self._compressor_id,
-                    ), op_code
+                        ), op_code
                 else:
-                    return memoryview(
-                        bytearray(self._buffer[start + header_size : self._length])
-                        + bytearray(self._overflow[: self._overflow_length])
-                    ), op_code
-            else:
-                if self._is_compressed and self._compressor_id is not None:
-                    return decompress(
-                        memoryview(self._buffer[start + header_size : end]),
-                        self._compressor_id,
-                    ), op_code
-                else:
-                    return memoryview(self._buffer[start + header_size : end]), op_code
+                    if self._is_compressed and self._compressor_id is not None:
+                        return decompress(
+                            memoryview(self._buffer[start + header_size : end]),
+                            self._compressor_id,
+                        ), op_code
+                    else:
+                        return memoryview(self._buffer[start + header_size : end]), op_code
+        except Exception as e:
+            print(f"Exception in read: {e!r}")
+            raise e
         raise OSError("connection closed")
 
     def get_buffer(self, sizehint: int) -> memoryview:
