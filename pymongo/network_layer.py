@@ -623,11 +623,7 @@ class PyMongoProtocol(BufferedProtocol):
                     self.connection_lost(None)
                     return
                 result.set_result((self._start_index, self._body_size + self._start_index, self._op_code, self._body_size, self._overflow, self._overflow_index))
-                if self._overflow is not None:
-                    print(f"Finished message with length {self._body_size} out of {self._end_index} and start {self._start_index} and overflow length: {self._overflow_index}")
-                if self._end_index - (self._start_index + self._body_size) >= 16:
-                    print(f"Will recur since {self._end_index} - ({self._start_index} + {self._body_size}) > 16")
-                elif self._end_index - (self._start_index + self._body_size) > 0:
+                if 16 > self._end_index - (self._start_index + self._body_size) > 0:
                     print(f"Have {self._end_index - (self._start_index + self._body_size)} bytes leftover from a message of size {(self._body_size + self._start_index) - self._start_index }")
                 self._done_messages.append(result)
                 if self._overflow:
