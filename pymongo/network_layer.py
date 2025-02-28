@@ -594,8 +594,6 @@ class PyMongoProtocol(BufferedProtocol):
 
     def buffer_updated(self, nbytes: int) -> None:
         """Called when the buffer was updated with the received data"""
-        if nbytes % 10 == 1:
-            print(f"Writing {nbytes} to buffer of size {self._end_index}")
         if nbytes == 0:
             self.connection_lost(OSError("connection closed"))
             return
