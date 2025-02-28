@@ -625,7 +625,7 @@ class PyMongoProtocol(BufferedProtocol):
                     return
                 result.set_result((self._start_index, self._body_size + self._start_index, self._op_code, self._body_size, self._overflow, self._overflow_index))
                 if 16 > self._end_index - (self._start_index + self._body_size) > 0:
-                    print(f"Have {self._end_index - (self._start_index + self._body_size)} bytes leftover from a message of size {(self._body_size + self._start_index) - self._start_index }")
+                    print(f"Have {self._end_index - (self._start_index + self._body_size)} bytes leftover from a message of size {(self._body_size + self._start_index) - self._start_index} and buffer of size {self._end_index}")
                 self._done_messages.append(result)
                 if self._overflow:
                     self._start_index = self._end_index
