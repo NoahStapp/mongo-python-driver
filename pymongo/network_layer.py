@@ -471,7 +471,7 @@ class NetworkingInterface(NetworkingInterfaceBase):
 
 class PyMongoProtocol(BufferedProtocol):
     def __init__(self, timeout: Optional[float] = None, buffer_size: int = 2**14):
-        self._buffer_size = 2**20
+        self._buffer_size = 2**22
         self.transport: Transport = None  # type: ignore[assignment]
         self._buffer = memoryview(bytearray(self._buffer_size))
         self._overflow: Optional[memoryview] = None
