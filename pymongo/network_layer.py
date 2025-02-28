@@ -604,6 +604,7 @@ class PyMongoProtocol(BufferedProtocol):
                 if self._expecting_header:
                     try:
                         self._body_size, self._op_code = self.process_header()
+                        print(f"Body size {self._body_size} in buffer of size {self._end_index}")
                         self._request_id = None
                     except ProtocolError as exc:
                         self.connection_lost(exc)
