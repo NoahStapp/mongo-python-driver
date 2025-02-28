@@ -633,17 +633,17 @@ class PyMongoProtocol(BufferedProtocol):
                     self._start_index += self._body_size
                 # If we have more data after processing the last message, start processing a new message if there is at least a header remaining
                 if self._end_index - self._start_index >= 16:
-                    print(f"Preparing for recur since length is {self._end_index} and start is {self._start_index}")
                     self._read_waiter = asyncio.get_running_loop().create_future()
                     self._pending_messages.append(self._read_waiter)
-                    extra = self._end_index - self._start_index
-                    self._end_index -= extra
+                    nbytes_reprocess = self._end_index - self._start_index
+                    self._end_index -= nbytes_reprocess
                     self._expecting_header = True
                     self._body_size = 0
                     self._op_code = None  # type: ignore[assignment]
                     self._overflow = None
                     self._overflow_index = 0
-                    self.buffer_updated(extra)
+                    print(f"Recurring with {nbytes_reprocess} bytes")
+                    self.buffer_updated(nbytes_reprocess)
                 self.transport.pause_reading()
 
     def process_header(self) -> tuple[int, int]:
