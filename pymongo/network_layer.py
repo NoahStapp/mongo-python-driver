@@ -594,6 +594,7 @@ class PyMongoProtocol(BufferedProtocol):
 
     def buffer_updated(self, nbytes: int) -> None:
         """Called when the buffer was updated with the received data"""
+        print(f"Writing {nbytes} to buffer of size {self._end_index}")
         if nbytes == 0:
             self.connection_lost(OSError("connection closed"))
             return
@@ -642,7 +643,6 @@ class PyMongoProtocol(BufferedProtocol):
                     self._op_code = None  # type: ignore[assignment]
                     self._overflow = None
                     self._overflow_index = 0
-                    print(f"Recursive buffer_updated with start: {self._start_index}, extra: {extra}, length: {self._end_index}")
                     self.buffer_updated(extra)
                 self.transport.pause_reading()
 
