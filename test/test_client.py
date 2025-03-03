@@ -1787,6 +1787,8 @@ class TestClient(IntegrationTest):
             initial_count = server_description_count()
             with self.assertRaises(ServerSelectionTimeoutError):
                 client.test.test.find_one()
+            if not _IS_SYNC:
+                time.sleep(0.01)
             gc.collect()
             final_count = server_description_count()
             # If a bug like PYTHON-2433 is reintroduced then too many

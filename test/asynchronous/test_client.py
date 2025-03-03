@@ -1830,6 +1830,8 @@ class TestClient(AsyncIntegrationTest):
             initial_count = server_description_count()
             with self.assertRaises(ServerSelectionTimeoutError):
                 await client.test.test.find_one()
+            if not _IS_SYNC:
+                await asyncio.sleep(0.01)
             gc.collect()
             final_count = server_description_count()
             # If a bug like PYTHON-2433 is reintroduced then too many
