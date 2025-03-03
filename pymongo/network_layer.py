@@ -620,6 +620,7 @@ class PyMongoProtocol(BufferedProtocol):
                     self.connection_lost(None)
                     return
                 # Necessary values to construct message from buffers
+                print(f"Finished processing message of length {self._body_size} with compression: {self._is_compressed}")
                 result.set_result(
                     (
                         self._start_index,
