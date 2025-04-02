@@ -17,7 +17,7 @@
         "id": "client0",
         "useMultipleMongoses": false,
         "uriOptions": {
-          "socketTimeoutMS": 100
+          "socketTimeoutMS": 200
         },
         "observeEvents": [
           "commandStartedEvent"
@@ -71,7 +71,7 @@
                   "commitTransaction"
                 ],
                 "blockConnection": true,
-                "blockTimeMS": 150
+                "blockTimeMS": 300
               }
             }
           }
