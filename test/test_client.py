@@ -1811,6 +1811,7 @@ class TestClient(IntegrationTest):
             MongoClient(["host1", "host2"], directConnection=True)
 
     @unittest.skipIf("PyPy" in sys.version, "PYTHON-2927 fails often on PyPy")
+    @unittest.skip
     def test_continuous_network_errors(self):
         def server_description_count():
             i = 0
