@@ -2,252 +2,43 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
-from inspect import getmembers, isfunction
-from itertools import cycle, product, zip_longest
-from pathlib import Path
-from typing import Any
+from itertools import product
 
-from shrub.v3.evg_build_variant import BuildVariant
-from shrub.v3.evg_command import EvgCommandType, FunctionCall, subprocess_exec
-from shrub.v3.evg_project import EvgProject
-from shrub.v3.evg_task import EvgTask, EvgTaskDependency, EvgTaskRef
-from shrub.v3.shrub_service import ShrubService
-
-##############
-# Globals
-##############
-
-ALL_VERSIONS = ["4.0", "4.2", "4.4", "5.0", "6.0", "7.0", "8.0", "rapid", "latest"]
-CPYTHONS = ["3.9", "3.10", "3.11", "3.12", "3.13"]
-PYPYS = ["pypy3.10"]
-ALL_PYTHONS = CPYTHONS + PYPYS
-MIN_MAX_PYTHON = [CPYTHONS[0], CPYTHONS[-1]]
-BATCHTIME_WEEK = 10080
-AUTH_SSLS = [("auth", "ssl"), ("noauth", "ssl"), ("noauth", "nossl")]
-TOPOLOGIES = ["standalone", "replica_set", "sharded_cluster"]
-C_EXTS = ["without_ext", "with_ext"]
-# By default test each of the topologies with a subset of auth/ssl.
-SUB_TASKS = [
-    ".sharded_cluster .auth .ssl",
-    ".replica_set .noauth .ssl",
-    ".standalone .noauth .nossl",
-]
-SYNCS = ["sync", "async", "sync_async"]
-DISPLAY_LOOKUP = dict(
-    ssl=dict(ssl="SSL", nossl="NoSSL"),
-    auth=dict(auth="Auth", noauth="NoAuth"),
-    test_suites=dict(default="Sync", default_async="Async"),
-    coverage=dict(coverage="cov"),
-    no_ext={"1": "No C"},
-)
-HOSTS = dict()
-
-
-@dataclass
-class Host:
-    name: str
-    run_on: str
-    display_name: str
-    variables: dict[str, str] | None
-
-
-# Hosts with toolchains.
-HOSTS["rhel8"] = Host("rhel8", "rhel87-small", "RHEL8", dict())
-HOSTS["win64"] = Host("win64", "windows-64-vsMulti-small", "Win64", dict())
-HOSTS["win32"] = Host("win32", "windows-64-vsMulti-small", "Win32", dict())
-HOSTS["macos"] = Host("macos", "macos-14", "macOS", dict())
-HOSTS["macos-arm64"] = Host("macos-arm64", "macos-14-arm64", "macOS Arm64", dict())
-HOSTS["ubuntu20"] = Host("ubuntu20", "ubuntu2004-small", "Ubuntu-20", dict())
-HOSTS["ubuntu22"] = Host("ubuntu22", "ubuntu2204-small", "Ubuntu-22", dict())
-HOSTS["rhel7"] = Host("rhel7", "rhel79-small", "RHEL7", dict())
-HOSTS["perf"] = Host("perf", "rhel90-dbx-perf-large", "", dict())
-HOSTS["debian11"] = Host("debian11", "debian11-small", "Debian11", dict())
-DEFAULT_HOST = HOSTS["rhel8"]
-
-# Other hosts
-OTHER_HOSTS = ["RHEL9-FIPS", "RHEL8-zseries", "RHEL8-POWER8", "RHEL8-arm64", "Amazon2023"]
-for name, run_on in zip(
+from generate_config_utils import (
+    ALL_PYTHONS,
+    ALL_VERSIONS,
+    AUTH_SSLS,
+    BATCHTIME_WEEK,
+    C_EXTS,
+    CPYTHONS,
+    DEFAULT_HOST,
+    HOSTS,
+    MIN_MAX_PYTHON,
     OTHER_HOSTS,
-    [
-        "rhel92-fips",
-        "rhel8-zseries-small",
-        "rhel8-power-small",
-        "rhel82-arm64-small",
-        "amazon2023-arm64-latest-large-m8g",
-    ],
-):
-    HOSTS[name] = Host(name, run_on, name, dict())
-
-
-##############
-# Helpers
-##############
-
-
-def create_variant_generic(
-    tasks: list[str | EvgTaskRef],
-    display_name: str,
-    *,
-    host: Host | None = None,
-    default_run_on="rhel87-small",
-    expansions: dict | None = None,
-    **kwargs: Any,
-) -> BuildVariant:
-    """Create a build variant for the given inputs."""
-    task_refs = []
-    for t in tasks:
-        if isinstance(t, EvgTaskRef):
-            task_refs.append(t)
-        else:
-            task_refs.append(EvgTaskRef(name=t))
-    expansions = expansions and expansions.copy() or dict()
-    if "run_on" in kwargs:
-        run_on = kwargs.pop("run_on")
-    elif host:
-        run_on = [host.run_on]
-        if host.variables:
-            expansions.update(host.variables)
-    else:
-        run_on = [default_run_on]
-    if isinstance(run_on, str):
-        run_on = [run_on]
-    name = display_name.replace(" ", "-").replace("*-", "").lower()
-    return BuildVariant(
-        name=name,
-        display_name=display_name,
-        tasks=task_refs,
-        expansions=expansions or None,
-        run_on=run_on,
-        **kwargs,
-    )
-
-
-def create_variant(
-    tasks: list[str | EvgTaskRef],
-    display_name: str,
-    *,
-    version: str | None = None,
-    host: Host | None = None,
-    python: str | None = None,
-    expansions: dict | None = None,
-    **kwargs: Any,
-) -> BuildVariant:
-    expansions = expansions and expansions.copy() or dict()
-    if version:
-        expansions["VERSION"] = version
-    if python:
-        expansions["PYTHON_BINARY"] = get_python_binary(python, host)
-    return create_variant_generic(
-        tasks, display_name, version=version, host=host, expansions=expansions, **kwargs
-    )
-
-
-def get_python_binary(python: str, host: Host) -> str:
-    """Get the appropriate python binary given a python version and host."""
-    name = host.name
-    if name in ["win64", "win32"]:
-        if name == "win32":
-            base = "C:/python/32"
-        else:
-            base = "C:/python"
-        python = python.replace(".", "")
-        if python == "313t":
-            return f"{base}/Python313/python3.13t.exe"
-        return f"{base}/Python{python}/python.exe"
-
-    if name in ["rhel8", "ubuntu22", "ubuntu20", "rhel7"]:
-        return f"/opt/python/{python}/bin/python3"
-
-    if name in ["macos", "macos-arm64"]:
-        if python == "3.13t":
-            return "/Library/Frameworks/PythonT.Framework/Versions/3.13/bin/python3t"
-        return f"/Library/Frameworks/Python.Framework/Versions/{python}/bin/python3"
-
-    raise ValueError(f"no match found for python {python} on {name}")
-
-
-def get_versions_from(min_version: str) -> list[str]:
-    """Get all server versions starting from a minimum version."""
-    min_version_float = float(min_version)
-    rapid_latest = ["rapid", "latest"]
-    versions = [v for v in ALL_VERSIONS if v not in rapid_latest]
-    return [v for v in versions if float(v) >= min_version_float] + rapid_latest
-
-
-def get_versions_until(max_version: str) -> list[str]:
-    """Get all server version up to a max version."""
-    max_version_float = float(max_version)
-    versions = [v for v in ALL_VERSIONS if v not in ["rapid", "latest"]]
-    versions = [v for v in versions if float(v) <= max_version_float]
-    if not len(versions):
-        raise ValueError(f"No server versions found less <= {max_version}")
-    return versions
-
-
-def get_common_name(base: str, sep: str, **kwargs) -> str:
-    display_name = base
-    version = kwargs.pop("VERSION", None)
-    version = version or kwargs.pop("version", None)
-    if version:
-        if version not in ["rapid", "latest"]:
-            version = f"v{version}"
-        display_name = f"{display_name}{sep}{version}"
-    for key, value in kwargs.items():
-        name = value
-        if key.lower() == "python":
-            if not value.startswith("pypy"):
-                name = f"Python{value}"
-            else:
-                name = f"PyPy{value.replace('pypy', '')}"
-        elif key.lower() in DISPLAY_LOOKUP:
-            name = DISPLAY_LOOKUP[key.lower()][value]
-        else:
-            continue
-        display_name = f"{display_name}{sep}{name}"
-    return display_name
-
-
-def get_variant_name(base: str, host: Host | None = None, **kwargs) -> str:
-    """Get the display name of a variant."""
-    display_name = base
-    if host is not None:
-        display_name += f" {host.display_name}"
-    return get_common_name(display_name, " ", **kwargs)
-
-
-def get_task_name(base: str, **kwargs):
-    return get_common_name(base, "-", **kwargs).replace(" ", "-").lower()
-
-
-def zip_cycle(*iterables, empty_default=None):
-    """Get all combinations of the inputs, cycling over the shorter list(s)."""
-    cycles = [cycle(i) for i in iterables]
-    for _ in zip_longest(*iterables):
-        yield tuple(next(i, empty_default) for i in cycles)
-
-
-def handle_c_ext(c_ext, expansions) -> None:
-    """Handle c extension option."""
-    if c_ext == C_EXTS[0]:
-        expansions["NO_EXT"] = "1"
-
-
-def get_subprocess_exec(**kwargs):
-    kwargs.setdefault("binary", "bash")
-    kwargs.setdefault("working_dir", "src")
-    kwargs.setdefault("command_type", EvgCommandType.TEST)
-    return subprocess_exec(**kwargs)
-
-
-def generate_yaml(tasks=None, variants=None):
-    """Generate the yaml for a given set of tasks and variants."""
-    project = EvgProject(tasks=tasks, buildvariants=variants)
-    out = ShrubService.generate_yaml(project)
-    # Dedent by two spaces to match what we use in config.yml
-    lines = [line[2:] for line in out.splitlines()]
-    print("\n".join(lines))  # noqa: T201
-
+    PYPYS,
+    SUB_TASKS,
+    SYNCS,
+    TOPOLOGIES,
+    create_variant,
+    get_assume_role,
+    get_s3_put,
+    get_subprocess_exec,
+    get_task_name,
+    get_variant_name,
+    get_versions_from,
+    get_versions_until,
+    handle_c_ext,
+    write_functions_to_file,
+    write_tasks_to_file,
+    write_variants_to_file,
+    zip_cycle,
+)
+from shrub.v3.evg_build_variant import BuildVariant
+from shrub.v3.evg_command import (
+    FunctionCall,
+    archive_targz_pack,
+)
+from shrub.v3.evg_task import EvgTask, EvgTaskDependency, EvgTaskRef
 
 ##############
 # Variants
@@ -775,10 +566,12 @@ def create_alternative_hosts_variants():
         )
     )
 
-    expansions = dict()
-    handle_c_ext(C_EXTS[0], expansions)
     for host_name in OTHER_HOSTS:
+        expansions = dict()
+        handle_c_ext(C_EXTS[0], expansions)
         host = HOSTS[host_name]
+        if "fips" in host_name.lower():
+            expansions["REQUIRE_FIPS"] = "1"
         tags = [".6.0 .standalone !.sync_async"]
         if host_name == "Amazon2023":
             tags = [f".latest !.sync_async {t}" for t in SUB_TASKS]
@@ -1193,70 +986,80 @@ def create_serverless_tasks():
     return [EvgTask(name=task_name, tags=tags, commands=[test_func])]
 
 
-##################
-# Generate Config
-##################
+##############
+# Functions
+##############
 
 
-def write_variants_to_file():
-    mod = sys.modules[__name__]
-    here = Path(__file__).absolute().parent
-    target = here.parent / "generated_configs" / "variants.yml"
-    if target.exists():
-        target.unlink()
-    with target.open("w") as fid:
-        fid.write("buildvariants:\n")
-
-    for name, func in sorted(getmembers(mod, isfunction)):
-        if not name.endswith("_variants"):
-            continue
-        if not name.startswith("create_"):
-            raise ValueError("Variant creators must start with create_")
-        title = name.replace("create_", "").replace("_variants", "").replace("_", " ").capitalize()
-        project = EvgProject(tasks=None, buildvariants=func())
-        out = ShrubService.generate_yaml(project).splitlines()
-        with target.open("a") as fid:
-            fid.write(f"  # {title} tests\n")
-            for line in out[1:]:
-                fid.write(f"{line}\n")
-            fid.write("\n")
-
-    # Remove extra trailing newline:
-    data = target.read_text().splitlines()
-    with target.open("w") as fid:
-        for line in data[:-1]:
-            fid.write(f"{line}\n")
+def create_upload_coverage_func():
+    # Upload the coverage report for all tasks in a single build to the same directory.
+    remote_file = (
+        "coverage/${revision}/${version_id}/coverage/coverage.${build_variant}.${task_name}"
+    )
+    display_name = "Raw Coverage Report"
+    cmd = get_s3_put(
+        local_file="src/.coverage",
+        remote_file=remote_file,
+        display_name=display_name,
+        content_type="text/html",
+    )
+    return "upload coverage", [get_assume_role(), cmd]
 
 
-def write_tasks_to_file():
-    mod = sys.modules[__name__]
-    here = Path(__file__).absolute().parent
-    target = here.parent / "generated_configs" / "tasks.yml"
-    if target.exists():
-        target.unlink()
-    with target.open("w") as fid:
-        fid.write("tasks:\n")
+def create_download_and_merge_coverage_func():
+    include_expansions = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
+    args = [
+        ".evergreen/scripts/download-and-merge-coverage.sh",
+        "${bucket_name}",
+        "${revision}",
+        "${version_id}",
+    ]
+    merge_cmd = get_subprocess_exec(
+        silent=True, include_expansions_in_env=include_expansions, args=args
+    )
+    combine_cmd = get_subprocess_exec(args=[".evergreen/combine-coverage.sh"])
+    # Upload the resulting html coverage report.
+    args = [
+        ".evergreen/scripts/upload-coverage-report.sh",
+        "${bucket_name}",
+        "${revision}",
+        "${version_id}",
+    ]
+    upload_cmd = get_subprocess_exec(
+        silent=True, include_expansions_in_env=include_expansions, args=args
+    )
+    display_name = "Coverage Report HTML"
+    remote_file = "coverage/${revision}/${version_id}/htmlcov/index.html"
+    put_cmd = get_s3_put(
+        local_file="src/htmlcov/index.html",
+        remote_file=remote_file,
+        display_name=display_name,
+        content_type="text/html",
+    )
+    cmds = [get_assume_role(), merge_cmd, combine_cmd, upload_cmd, put_cmd]
+    return "download and merge coverage", cmds
 
-    for name, func in sorted(getmembers(mod, isfunction)):
-        if name.startswith("_") or not name.endswith("_tasks"):
-            continue
-        if not name.startswith("create_"):
-            raise ValueError("Task creators must start with create_")
-        title = name.replace("create_", "").replace("_tasks", "").replace("_", " ").capitalize()
-        project = EvgProject(tasks=func(), buildvariants=None)
-        out = ShrubService.generate_yaml(project).splitlines()
-        with target.open("a") as fid:
-            fid.write(f"  # {title} tests\n")
-            for line in out[1:]:
-                fid.write(f"{line}\n")
-            fid.write("\n")
 
-    # Remove extra trailing newline:
-    data = target.read_text().splitlines()
-    with target.open("w") as fid:
-        for line in data[:-1]:
-            fid.write(f"{line}\n")
+def create_upload_mo_artifacts_func():
+    include = ["./**.core", "./**.mdmp"]  # Windows: minidumps
+    archive_cmd = archive_targz_pack(target="mongo-coredumps.tgz", source_dir="./", include=include)
+    display_name = "Core Dumps - Execution"
+    remote_file = "${build_variant}/${revision}/${version_id}/${build_id}/coredumps/${task_id}-${execution}-mongodb-coredumps.tar.gz"
+    s3_dumps = get_s3_put(
+        local_file="mongo-coredumps.tgz", remote_file=remote_file, display_name=display_name
+    )
+    display_name = "drivers-tools-logs.tar.gz"
+    remote_file = "${build_variant}/${revision}/${version_id}/${build_id}/logs/${task_id}-${execution}-drivers-tools-logs.tar.gz"
+    s3_logs = get_s3_put(
+        local_file="${DRIVERS_TOOLS}/.evergreen/test_logs.tar.gz",
+        remote_file=remote_file,
+        display_name=display_name,
+    )
+    cmds = [get_assume_role(), archive_cmd, s3_dumps, s3_logs]
+    return "upload mo artifacts", cmds
 
 
-write_variants_to_file()
-write_tasks_to_file()
+mod = sys.modules[__name__]
+write_variants_to_file(mod)
+write_tasks_to_file(mod)
+write_functions_to_file(mod)
