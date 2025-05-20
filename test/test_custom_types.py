@@ -592,46 +592,99 @@ class TestTypeRegistry(unittest.TestCase):
         codec_instances_2 = [codec() for codec in self.codecs]
         self.assertNotEqual(TypeRegistry(codec_instances), TypeRegistry(codec_instances_2))
 
+    def _run_builtin_types_override_fails_test(self, base, attrs, add_codec):
+        msg = (
+            r"TypeEncoders cannot change how built-in types "
+            r"are encoded \(encoder .* transforms type .*\)"
+        )
+        for pytype in _BUILT_IN_TYPES:
+            attrs.update({"python_type": pytype, "transform_python": lambda x: x})
+            codec = type("testcodec", (base,), attrs)
+            codec_instance = codec()
+            with self.assertRaisesRegex(TypeError, msg):
+                TypeRegistry(
+                    [
+                        codec_instance,
+                    ]
+                )
+
+            # Test only some subtypes as not all can be subclassed.
+            if pytype in [
+                bool,
+                type(None),
+                RE_TYPE,
+            ]:
+                continue
+
+            class MyType(pytype):  # type: ignore
+                pass
+
+            attrs.update({"python_type": MyType, "transform_python": lambda x: x})
+            codec = type("testcodec", (base,), attrs)
+            codec_instance = codec()
+            if add_codec:
+                type_registry = TypeRegistry()
+                with self.assertRaisesRegex(TypeError, msg):
+                    type_registry.add_codec(codec_instance)
+            else:
+                with self.assertRaisesRegex(TypeError, msg):
+                    TypeRegistry(
+                        [
+                            codec_instance,
+                        ]
+                    )
+
     def test_builtin_types_override_fails(self):
-        def run_test(base, attrs):
-            msg = (
-                r"TypeEncoders cannot change how built-in types "
-                r"are encoded \(encoder .* transforms type .*\)"
+        self._run_builtin_types_override_fails_test(TypeEncoder, {}, add_codec=False)
+        self._run_builtin_types_override_fails_test(
+            TypeCodec, {"bson_type": Decimal128, "transform_bson": lambda x: x}, add_codec=False
+        )
+
+    def test_add_codec(self):
+        codec_instances = [codec() for codec in self.codecs]
+
+        def assert_proper_initialization(type_registry, codec_instances):
+            self.assertEqual(
+                type_registry._encoder_map,
+                {
+                    self.types[0]: codec_instances[0].transform_python,
+                },
             )
-            for pytype in _BUILT_IN_TYPES:
-                attrs.update({"python_type": pytype, "transform_python": lambda x: x})
-                codec = type("testcodec", (base,), attrs)
-                codec_instance = codec()
-                with self.assertRaisesRegex(TypeError, msg):
-                    TypeRegistry(
-                        [
-                            codec_instance,
-                        ]
-                    )
+            self.assertEqual(
+                type_registry._decoder_map,
+                {int: codec_instances[0].transform_bson},
+            )
 
-                # Test only some subtypes as not all can be subclassed.
-                if pytype in [
-                    bool,
-                    type(None),
-                    RE_TYPE,
-                ]:
-                    continue
+        type_registry = TypeRegistry(codec_instances[:1])
+        assert_proper_initialization(type_registry, codec_instances)
 
-                class MyType(pytype):  # type: ignore
-                    pass
+        type_registry.add_codec(codec_instances[1])
+        self.assertEqual(
+            type_registry._encoder_map,
+            {
+                self.types[0]: codec_instances[0].transform_python,
+                self.types[1]: codec_instances[1].transform_python,
+            },
+        )
+        self.assertEqual(
+            type_registry._decoder_map,
+            {int: codec_instances[0].transform_bson, str: codec_instances[1].transform_bson},
+        )
 
-                attrs.update({"python_type": MyType, "transform_python": lambda x: x})
-                codec = type("testcodec", (base,), attrs)
-                codec_instance = codec()
-                with self.assertRaisesRegex(TypeError, msg):
-                    TypeRegistry(
-                        [
-                            codec_instance,
-                        ]
-                    )
+    def test_add_codec_fails(self):
+        err_msg = "Expected an instance of TypeEncoder, TypeDecoder, or TypeCodec, got .* instead"
+        type_registry = TypeRegistry([codec() for codec in self.codecs])
+        with self.assertRaisesRegex(TypeError, err_msg):
+            type_registry.add_codec(self.codecs[0])  # type: ignore[arg-type]
 
-        run_test(TypeEncoder, {})
-        run_test(TypeCodec, {"bson_type": Decimal128, "transform_bson": lambda x: x})
+        with self.assertRaisesRegex(TypeError, err_msg):
+            type_registry.add_codec(str)  # type: ignore[arg-type]
+
+    def test_builtin_types_override_add_codec_fails(self):
+        self._run_builtin_types_override_fails_test(TypeEncoder, {}, add_codec=True)
+        self._run_builtin_types_override_fails_test(
+            TypeCodec, {"bson_type": Decimal128, "transform_bson": lambda x: x}, add_codec=True
+        )
 
 
 class TestCollectionWCustomType(IntegrationTest):

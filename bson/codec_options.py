@@ -108,8 +108,7 @@ _Fallback = Callable[[Any], Any]
 
 class TypeRegistry:
     """Encapsulates type codecs used in encoding and / or decoding BSON, as
-    well as the fallback encoder. Type registries cannot be modified after
-    instantiation.
+    well as the fallback encoder.
 
     ``TypeRegistry`` can be initialized with an iterable of type codecs, and
     a callable for the fallback encoder::
@@ -147,18 +146,33 @@ class TypeRegistry:
                 raise TypeError("fallback_encoder %r is not a callable" % (fallback_encoder))
 
         for codec in self.__type_codecs:
-            is_valid_codec = False
-            if isinstance(codec, TypeEncoder):
-                self._validate_type_encoder(codec)
-                is_valid_codec = True
-                self._encoder_map[codec.python_type] = codec.transform_python
-            if isinstance(codec, TypeDecoder):
-                is_valid_codec = True
-                self._decoder_map[codec.bson_type] = codec.transform_bson
-            if not is_valid_codec:
-                raise TypeError(
-                    f"Expected an instance of {TypeEncoder.__name__}, {TypeDecoder.__name__}, or {TypeCodec.__name__}, got {codec!r} instead"
-                )
+            self.add_codec(codec)
+
+    def add_codec(self, codec: _Codec) -> None:
+        """Adds a type codec to the registry.
+
+        :param codec: A type codec instance.
+          If a codec already exists that transforms the same python or BSON type,
+          it will be overwritten by ``codec``.
+          A TypeError will be raised if ``codec`` modifies the encoding behavior
+          of a built-in :mod:`bson` type.
+
+        .. versionadded:: 4.14
+        """
+        is_valid_codec = False
+        if isinstance(codec, TypeEncoder):
+            self._validate_type_encoder(codec)
+            is_valid_codec = True
+            self._encoder_map[codec.python_type] = codec.transform_python
+        if isinstance(codec, TypeDecoder):
+            is_valid_codec = True
+            self._decoder_map[codec.bson_type] = codec.transform_bson
+        if is_valid_codec and codec not in self.__type_codecs:
+            self.__type_codecs.append(codec)
+        elif not is_valid_codec:
+            raise TypeError(
+                f"Expected an instance of {TypeEncoder.__name__}, {TypeDecoder.__name__}, or {TypeCodec.__name__}, got {codec!r} instead"
+            )
 
     def _validate_type_encoder(self, codec: _Codec) -> None:
         from bson import _BUILT_IN_TYPES

@@ -1,6 +1,14 @@
 Changelog
 =========
 
+Changes in Version 4.14.0 (XXXX/XX/XX)
+--------------------------------------
+PyMongo 4.14 brings a number of changes including:
+
+- Added :meth:`bson.codec_options.TypeRegistry.add_codec` to allow users to extend :class:`bson.codec_options.TypeRegistry`
+  instances with additional type codecs after instantiation.
+
+
 Changes in Version 4.13.0 (2025/05/14)
 --------------------------------------
 
