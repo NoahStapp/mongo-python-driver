@@ -39,6 +39,7 @@ import time as time  # noqa: PLC0414 # needed in sync version
 import warnings
 import weakref
 from collections import defaultdict
+from contextvars import Token
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -90,7 +91,7 @@ from pymongo.logger import (
     _log_client_error,
     _log_or_warn,
 )
-from pymongo.message import _CursorAddress, _GetMore, _Query
+from pymongo.message import _RETRY_METADATA, _CursorAddress, _GetMore, _Query
 from pymongo.monitoring import ConnectionClosedReason, _EventListeners
 from pymongo.operations import (
     DeleteMany,
@@ -2789,6 +2790,7 @@ class _ClientConnectionRetryable(Generic[T]):
         self._attempt_number = 0
         self._is_run_command = is_run_command
         self._is_aggregate_write = is_aggregate_write
+        self._retry_type: Optional[str] = None
 
     def run(self) -> T:
         """Runs the supplied func() and attempts a retry
@@ -2859,6 +2861,12 @@ class _ClientConnectionRetryable(Generic[T]):
                         self._retrying = True
                         self._last_error = exc
                         self._attempt_number += 1
+                        if overloaded:
+                            self._retry_type = "overload"
+                        elif self._multiple_retries:
+                            self._retry_type = "csot"
+                        else:
+                            self._retry_type = "retryable read"
 
                         # Revert back to starting state if we're in a transaction but haven't completed the first
                         # command.
@@ -2903,6 +2911,14 @@ class _ClientConnectionRetryable(Generic[T]):
                         else:
                             raise
                     self._attempt_number += 1
+                    if overloaded:
+                        self._retry_type = "overload"
+                    elif self._operation in ["abortTransaction", "commitTransaction"]:
+                        self._retry_type = "convenient transaction"
+                    elif self._multiple_retries:
+                        self._retry_type = "csot"
+                    else:
+                        self._retry_type = "retryable write"
                     if self._bulk:
                         self._bulk.retrying = True
                     else:
@@ -2934,6 +2950,21 @@ class _ClientConnectionRetryable(Generic[T]):
                         else:
                             raise
                     time.sleep(delay)
+
+    def _set_retry_metadata(self) -> Token:
+        """Sets retry metadata in the ContextVar for _op_msg_no_header.
+
+        Returns the token to reset the ContextVar after the operation completes.
+        """
+        if self._is_retrying() and self._retry_type is not None:
+            metadata = {
+                "clientId": str(self._client._topology_settings._topology_id),
+                "retryAttempt": self._attempt_number,
+                "retryType": self._retry_type,
+            }
+        else:
+            metadata = None
+        return _RETRY_METADATA.set(metadata)
 
     def _is_not_eligible_for_retry(self) -> bool:
         """Checks if the exchange is not eligible for retry"""
@@ -3011,7 +3042,11 @@ class _ClientConnectionRetryable(Generic[T]):
                         commandName=self._operation,
                         operationId=self._operation_id,
                     )
-                return self._func(self._session, conn, self._retryable)  # type: ignore
+                token = self._set_retry_metadata()
+                try:
+                    return self._func(self._session, conn, self._retryable)  # type: ignore
+                finally:
+                    _RETRY_METADATA.reset(token)
         except PyMongoError as exc:
             if not self._retryable:
                 raise
@@ -3040,7 +3075,11 @@ class _ClientConnectionRetryable(Generic[T]):
                     commandName=self._operation,
                     operationId=self._operation_id,
                 )
-            return self._func(self._session, self._server, conn, read_pref)  # type: ignore
+            token = self._set_retry_metadata()
+            try:
+                return self._func(self._session, self._server, conn, read_pref)  # type: ignore
+            finally:
+                _RETRY_METADATA.reset(token)
 
 
 def _after_fork_child() -> None:

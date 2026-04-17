@@ -24,6 +24,7 @@ from __future__ import annotations
 import datetime
 import random
 import struct
+from contextvars import ContextVar
 from io import BytesIO as _BytesIO
 from typing import (
     TYPE_CHECKING,
@@ -52,7 +53,7 @@ from pymongo.monitoring import _EventListeners
 try:
     from pymongo import _cmessage  # type: ignore[attr-defined]
 
-    _use_c = True
+    _use_c = False
 except ImportError:
     _use_c = False
 from pymongo.errors import (
@@ -84,6 +85,11 @@ MIN_INT32 = -2147483648
 
 # Overhead allowed for encoded command documents.
 _COMMAND_OVERHEAD = 16382
+
+# ContextVar for passing retry metadata from _ClientConnectionRetryable to _op_msg_no_header.
+_RETRY_METADATA: ContextVar[Optional[Mapping[str, Any]]] = ContextVar(
+    "_RETRY_METADATA", default=None
+)
 
 _INSERT = 0
 _UPDATE = 1
@@ -341,6 +347,7 @@ def _op_msg_no_header(
     it does not perform batch splitting and the total message size is
     only checked *after* generating the entire message.
     """
+    metadata = _RETRY_METADATA.get()
     # Encode the command document in payload 0 without checking keys.
     encoded = _dict_to_bson(command, False, opts)
     flags_type = _pack_op_msg_flags_type(flags, 0)
@@ -357,6 +364,11 @@ def _op_msg_no_header(
         data = [flags_type, encoded, type_one, encoded_size, cstring, *encoded_docs]
     else:
         data = [flags_type, encoded]
+    if metadata is not None:
+        type_two = _pack_byte(2)
+        encoded_metadata = _dict_to_bson(metadata, False, opts)
+        data.extend([type_two, encoded_metadata])
+        total_size += 1 + len(encoded_metadata)
     return b"".join(data), total_size, max_doc_size
 
 
