@@ -516,7 +516,7 @@ Any changes made directly to files in the `pymongo/synchronous` directory will b
 Some top-level files (e.g. `pymongo/collection.py`) are re-export files for existing import compatibility and should not be modified directly.
 The other top-level files (e.g. `pymongo/network_layer.py`, `pymongo/pool_shared.py`) contain either shared code used in both the asynchronous and synchronous APIs, or code that is very different between the two APIs and therefore cannot be generated from the async version using `synchro`.
 
-You can run `pre-commit run --all-files synchro` before running tests to generate the latest version of the synchronous code.
+Run `pre-commit run --all-files synchro` before running tests to generate the latest version of the synchronous code.
 
 To prevent the `synchro` hook from accidentally overwriting code, it first checks to see whether a sync version
 of a file is changing and not its async counterpart, and will fail.
