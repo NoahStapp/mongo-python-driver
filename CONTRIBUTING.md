@@ -507,8 +507,10 @@ Follow the [Python Driver Release Process Wiki](https://wiki.corp.mongodb.com/di
 
 ## Project Structure and Asyncio Considerations
 
-PyMongo's source code is located in the `pymongo` directory and is further divided into the `pymongo/asynchronous` and `pymongo/synchronous` subdirectories.
-All files in the `synchronous` subdirectory are generated from the `asynchronous` subdirectory using the `synchro` pre-commit hook, which uses [unasync](https://github.com/python-trio/unasync/) and some custom transforms.
+This section describes the layout of the `pymongo/` package.
+
+Within `pymongo/`, the code is further divided into the `pymongo/asynchronous` and `pymongo/synchronous` subdirectories.
+Files in `pymongo/synchronous` are generated from `pymongo/asynchronous` using the `synchro` pre-commit hook, which uses [unasync](https://github.com/python-trio/unasync/) and some custom transforms.
 
 As a result, **all modifications** within `pymongo` must be made in either the top-level `pymongo` directory when they have to exhibit differing behavior between sync and async contexts or the `pymongo/asynchronous` directory, not `pymongo/synchronous`.
 Any changes made directly to files in the `pymongo/synchronous` directory will be overwritten by the `synchro` hook when it is run, which happens automatically on commit.
