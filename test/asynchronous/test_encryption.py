@@ -3326,6 +3326,7 @@ class TestAutomaticDecryptionKeys(AsyncEncryptionIntegrationTest):
 class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
     @async_client_context.require_no_standalone
     @async_client_context.require_version_min(8, 2, -1)
+    @async_client_context.require_version_max(8, 99, 99)
     @async_client_context.require_libmongocrypt_min(1, 15, 1)
     @async_client_context.require_pymongocrypt_min(1, 16, 0)
     async def asyncSetUp(self):
@@ -3408,7 +3409,6 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         )
         await coll.insert_one({"_id": 0, "encryptedText": encrypted_value})
 
-    @async_client_context.require_version_max(8, 99, 99)
     async def test_01_can_find_a_document_by_prefix(self):
         # Use clientEncryption.encrypt() to encrypt the string "foo" with the following EncryptOpts.
         text_opts = TextOpts(
@@ -3433,7 +3433,6 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         value.pop("__safeContent__", None)
         self.assertEqual(value, expected)
 
-    @async_client_context.require_version_max(8, 99, 99)
     async def test_02_can_find_a_document_by_suffix(self):
         # Use clientEncryption.encrypt() to encrypt the string "baz" with the following EncryptOpts:
         text_opts = TextOpts(
@@ -3458,7 +3457,6 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         value.pop("__safeContent__", None)
         self.assertEqual(value, expected)
 
-    @async_client_context.require_version_max(8, 99, 99)
     async def test_03_no_document_found_by_prefix(self):
         # Use clientEncryption.encrypt() to encrypt the string "baz" with the following EncryptOpts:
         text_opts = TextOpts(
@@ -3481,7 +3479,6 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         # Assert that no documents are returned.
         self.assertIsNone(value)
 
-    @async_client_context.require_version_max(8, 99, 99)
     async def test_04_no_document_found_by_suffix(self):
         # Use clientEncryption.encrypt() to encrypt the string "foo" with the following EncryptOpts:
         text_opts = TextOpts(
@@ -3558,7 +3555,6 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         # Assert that no documents are returned.
         self.assertIsNone(value)
 
-    @async_client_context.require_version_max(8, 99, 99)
     async def test_07_contentionFactor_is_required(self):
         from pymongocrypt.errors import MongoCryptError
 
