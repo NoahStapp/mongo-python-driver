@@ -3390,6 +3390,7 @@ class TestExplicitTextEncryptionProse(EncryptionIntegrationTest):
         )
         coll.insert_one({"_id": 0, "encryptedText": encrypted_value})
 
+    @client_context.require_version_max(8, 99, 99)
     def test_01_can_find_a_document_by_prefix(self):
         # Use clientEncryption.encrypt() to encrypt the string "foo" with the following EncryptOpts.
         text_opts = TextOpts(
@@ -3414,6 +3415,7 @@ class TestExplicitTextEncryptionProse(EncryptionIntegrationTest):
         value.pop("__safeContent__", None)
         self.assertEqual(value, expected)
 
+    @client_context.require_version_max(8, 99, 99)
     def test_02_can_find_a_document_by_suffix(self):
         # Use clientEncryption.encrypt() to encrypt the string "baz" with the following EncryptOpts:
         text_opts = TextOpts(
@@ -3438,6 +3440,7 @@ class TestExplicitTextEncryptionProse(EncryptionIntegrationTest):
         value.pop("__safeContent__", None)
         self.assertEqual(value, expected)
 
+    @client_context.require_version_max(8, 99, 99)
     def test_03_no_document_found_by_prefix(self):
         # Use clientEncryption.encrypt() to encrypt the string "baz" with the following EncryptOpts:
         text_opts = TextOpts(
@@ -3460,6 +3463,7 @@ class TestExplicitTextEncryptionProse(EncryptionIntegrationTest):
         # Assert that no documents are returned.
         self.assertIsNone(value)
 
+    @client_context.require_version_max(8, 99, 99)
     def test_04_no_document_found_by_suffix(self):
         # Use clientEncryption.encrypt() to encrypt the string "foo" with the following EncryptOpts:
         text_opts = TextOpts(
@@ -3536,6 +3540,7 @@ class TestExplicitTextEncryptionProse(EncryptionIntegrationTest):
         # Assert that no documents are returned.
         self.assertIsNone(value)
 
+    @client_context.require_version_max(8, 99, 99)
     def test_07_contentionFactor_is_required(self):
         from pymongocrypt.errors import MongoCryptError
 

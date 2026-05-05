@@ -3408,6 +3408,7 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         )
         await coll.insert_one({"_id": 0, "encryptedText": encrypted_value})
 
+    @async_client_context.require_version_max(8, 99, 99)
     async def test_01_can_find_a_document_by_prefix(self):
         # Use clientEncryption.encrypt() to encrypt the string "foo" with the following EncryptOpts.
         text_opts = TextOpts(
@@ -3432,6 +3433,7 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         value.pop("__safeContent__", None)
         self.assertEqual(value, expected)
 
+    @async_client_context.require_version_max(8, 99, 99)
     async def test_02_can_find_a_document_by_suffix(self):
         # Use clientEncryption.encrypt() to encrypt the string "baz" with the following EncryptOpts:
         text_opts = TextOpts(
@@ -3456,6 +3458,7 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         value.pop("__safeContent__", None)
         self.assertEqual(value, expected)
 
+    @async_client_context.require_version_max(8, 99, 99)
     async def test_03_no_document_found_by_prefix(self):
         # Use clientEncryption.encrypt() to encrypt the string "baz" with the following EncryptOpts:
         text_opts = TextOpts(
@@ -3478,6 +3481,7 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         # Assert that no documents are returned.
         self.assertIsNone(value)
 
+    @async_client_context.require_version_max(8, 99, 99)
     async def test_04_no_document_found_by_suffix(self):
         # Use clientEncryption.encrypt() to encrypt the string "foo" with the following EncryptOpts:
         text_opts = TextOpts(
@@ -3554,6 +3558,7 @@ class TestExplicitTextEncryptionProse(AsyncEncryptionIntegrationTest):
         # Assert that no documents are returned.
         self.assertIsNone(value)
 
+    @async_client_context.require_version_max(8, 99, 99)
     async def test_07_contentionFactor_is_required(self):
         from pymongocrypt.errors import MongoCryptError
 
