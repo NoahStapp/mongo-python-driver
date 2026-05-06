@@ -265,7 +265,7 @@ static PyObject* _transfer_traceback(PyObject *old_exc, PyObject *new_exc) {
 #endif
 
 /* Rewrap the current exception as InvalidBSON(str(e)) if it is not already an InvalidBSON error. */
-static void cbson_rewrap_as_invalid_bson(void) {
+static void _rewrap_as_invalid_bson(void) {
 /* 3.12 */
 #if PY_VERSION_HEX >= 0x030C0000
     PyObject *exc = PyErr_GetRaisedException();
@@ -285,6 +285,7 @@ static void cbson_rewrap_as_invalid_bson(void) {
             Py_DECREF(InvalidBSON);
         }
     }
+    /* Steals reference to exc. */
     PyErr_SetRaisedException(exc);
 #else
     PyObject *etype = NULL, *evalue = NULL, *etrace = NULL;
@@ -356,60 +357,58 @@ static PyObject* datetime_from_millis(long long millis) {
                                           timeinfo.tm_sec,
                                           microseconds);
     if(!datetime) {
-        /*
-        * Calling _error clears the error state, so fetch it first.
-        */
-/* 3.12 */
-#if PY_VERSION_HEX >= 0x030C0000
-        PyObject *exc = PyErr_GetRaisedException();
+        /* 3.12 */
+        #if PY_VERSION_HEX >= 0x030C0000
+            PyObject *exc = PyErr_GetRaisedException();
 
-        /* Only add additional error message on ValueError exceptions. */
-        if (exc && PyErr_GivenExceptionMatches(exc, PyExc_ValueError)) {
-            PyObject* err_msg = PyObject_Str(exc);
-            if (err_msg) {
-                PyObject* appendage = PyUnicode_FromString(" (Consider Using CodecOptions(datetime_conversion=DATETIME_AUTO) or MongoClient(datetime_conversion='DATETIME_AUTO')). See: https://www.mongodb.com/docs/languages/python/pymongo-driver/current/data-formats/dates-and-times/#handling-out-of-range-datetimes");
-                if (appendage) {
-                    PyObject* msg = PyUnicode_Concat(err_msg, appendage);
-                    if (msg) {
-                        PyObject* new_exc = PyObject_CallOneArg(PyExc_ValueError, msg);
-                        if (new_exc) {
-                            exc = _transfer_traceback(exc, new_exc);
-                        }
-                        Py_DECREF(msg);
-                    }
-                }
-                Py_XDECREF(appendage);
-            }
-            Py_XDECREF(err_msg);
-        }
-        /* Steals reference to exc. */
-        PyErr_SetRaisedException(exc);
-#else
-        PyObject *etype = NULL, *evalue = NULL, *etrace = NULL;
-        PyErr_Fetch(&etype, &evalue, &etrace);
-
-        /* Only add additional error message on ValueError exceptions. */
-        if (PyErr_GivenExceptionMatches(etype, PyExc_ValueError)) {
-            if (evalue) {
-                PyObject* err_msg = PyObject_Str(evalue);
+            /* Only add additional error message on ValueError exceptions. */
+            if (exc && PyErr_GivenExceptionMatches(exc, PyExc_ValueError)) {
+                PyObject* err_msg = PyObject_Str(exc);
                 if (err_msg) {
                     PyObject* appendage = PyUnicode_FromString(" (Consider Using CodecOptions(datetime_conversion=DATETIME_AUTO) or MongoClient(datetime_conversion='DATETIME_AUTO')). See: https://www.mongodb.com/docs/languages/python/pymongo-driver/current/data-formats/dates-and-times/#handling-out-of-range-datetimes");
                     if (appendage) {
                         PyObject* msg = PyUnicode_Concat(err_msg, appendage);
                         if (msg) {
-                            Py_DECREF(evalue);
-                            evalue = msg;
+                            PyObject* new_exc = PyObject_CallOneArg(PyExc_ValueError, msg);
+                            if (new_exc) {
+                                exc = _transfer_traceback(exc, new_exc);
+                            }
+                            Py_DECREF(msg);
                         }
                     }
                     Py_XDECREF(appendage);
                 }
                 Py_XDECREF(err_msg);
             }
-            PyErr_NormalizeException(&etype, &evalue, &etrace);
-        }
-        /* Steals references to args. */
-        PyErr_Restore(etype, evalue, etrace);
-#endif
+            /* Steals reference to exc. */
+            PyErr_SetRaisedException(exc);
+        #else
+            /* Calling _error clears the error state, so fetch it first.*/
+            PyObject *etype = NULL, *evalue = NULL, *etrace = NULL;
+            PyErr_Fetch(&etype, &evalue, &etrace);
+
+            /* Only add additional error message on ValueError exceptions. */
+            if (PyErr_GivenExceptionMatches(etype, PyExc_ValueError)) {
+                if (evalue) {
+                    PyObject* err_msg = PyObject_Str(evalue);
+                    if (err_msg) {
+                        PyObject* appendage = PyUnicode_FromString(" (Consider Using CodecOptions(datetime_conversion=DATETIME_AUTO) or MongoClient(datetime_conversion='DATETIME_AUTO')). See: https://www.mongodb.com/docs/languages/python/pymongo-driver/current/data-formats/dates-and-times/#handling-out-of-range-datetimes");
+                        if (appendage) {
+                            PyObject* msg = PyUnicode_Concat(err_msg, appendage);
+                            if (msg) {
+                                Py_DECREF(evalue);
+                                evalue = msg;
+                            }
+                        }
+                        Py_XDECREF(appendage);
+                    }
+                    Py_XDECREF(err_msg);
+                }
+                PyErr_NormalizeException(&etype, &evalue, &etrace);
+            }
+            /* Steals references to args. */
+            PyErr_Restore(etype, evalue, etrace);
+        #endif
     }
     return datetime;
 }
@@ -1804,6 +1803,7 @@ void handle_invalid_doc_error(PyObject* dict) {
         }
     }
 cleanup:
+    /* Steals reference to exc. */
     PyErr_SetRaisedException(exc);
     Py_XDECREF(msg);
     Py_XDECREF(InvalidDocument);
@@ -2783,7 +2783,7 @@ static PyObject* get_value(PyObject* self, PyObject* name, const char* buffer,
      * Wrap any non-InvalidBSON errors in InvalidBSON.
      */
     if (PyErr_Occurred()) {
-        cbson_rewrap_as_invalid_bson();
+        _rewrap_as_invalid_bson();
     } else {
         PyObject *InvalidBSON = _error("InvalidBSON");
         if (InvalidBSON) {
@@ -2821,7 +2821,7 @@ static int _element_to_dict(PyObject* self, const char* string,
     if (!*name) {
         /* If NULL is returned then wrap the UnicodeDecodeError
            in an InvalidBSON error */
-        cbson_rewrap_as_invalid_bson();
+        _rewrap_as_invalid_bson();
         return -1;
     }
     position += (unsigned)name_length + 1;
