@@ -249,10 +249,11 @@ static int _write_element_to_buffer(PyObject* self, buffer_t buffer,
  */
 static int write_raw_doc(buffer_t buffer, PyObject* raw, PyObject* _raw);
 
+/* 3.12 */
 #if PY_VERSION_HEX >= 0x030C0000
-/* Transfer traceback from old_exc to new_exc, decref old_exc, return new_exc.
+/* Transfer traceback from old_exc to new_exc.
  * Steals reference to old_exc. */
-static PyObject* cbson_transfer_traceback(PyObject *old_exc, PyObject *new_exc) {
+static PyObject* _transfer_traceback(PyObject *old_exc, PyObject *new_exc) {
     PyObject *tb = PyException_GetTraceback(old_exc);
     if (tb) {
         PyException_SetTraceback(new_exc, tb);
@@ -263,9 +264,9 @@ static PyObject* cbson_transfer_traceback(PyObject *old_exc, PyObject *new_exc) 
 }
 #endif
 
-/* Rewrap the current exception as InvalidBSON(str(e)).
- * Only wraps PyExc_Exception subclasses; no-ops if already InvalidBSON. */
+/* Rewrap the current exception as InvalidBSON(str(e)) if it is not already an InvalidBSON error. */
 static void cbson_rewrap_as_invalid_bson(void) {
+/* 3.12 */
 #if PY_VERSION_HEX >= 0x030C0000
     PyObject *exc = PyErr_GetRaisedException();
     if (exc && PyErr_GivenExceptionMatches(exc, PyExc_Exception)) {
@@ -276,7 +277,7 @@ static void cbson_rewrap_as_invalid_bson(void) {
                 if (err_msg) {
                     PyObject *new_exc = PyObject_CallOneArg(InvalidBSON, err_msg);
                     if (new_exc) {
-                        exc = cbson_transfer_traceback(exc, new_exc);
+                        exc = _transfer_traceback(exc, new_exc);
                     }
                 }
                 Py_XDECREF(err_msg);
@@ -358,6 +359,7 @@ static PyObject* datetime_from_millis(long long millis) {
         /*
         * Calling _error clears the error state, so fetch it first.
         */
+/* 3.12 */
 #if PY_VERSION_HEX >= 0x030C0000
         PyObject *exc = PyErr_GetRaisedException();
 
@@ -371,7 +373,7 @@ static PyObject* datetime_from_millis(long long millis) {
                     if (msg) {
                         PyObject* new_exc = PyObject_CallOneArg(PyExc_ValueError, msg);
                         if (new_exc) {
-                            exc = cbson_transfer_traceback(exc, new_exc);
+                            exc = _transfer_traceback(exc, new_exc);
                         }
                         Py_DECREF(msg);
                     }
@@ -1767,6 +1769,7 @@ fail:
 /* Update Invalid Document error to include doc as a property.
  */
 void handle_invalid_doc_error(PyObject* dict) {
+/* 3.12 */
 #if PY_VERSION_HEX >= 0x030C0000
     PyObject *exc = PyErr_GetRaisedException();
     PyObject *msg = NULL, *new_msg = NULL;
@@ -1796,7 +1799,7 @@ void handle_invalid_doc_error(PyObject* dict) {
             PyObject* exc_args[2] = {new_msg, dict};
             PyObject* new_exc = PyObject_Vectorcall(InvalidDocument, exc_args, 2, NULL);
             if (new_exc) {
-                exc = cbson_transfer_traceback(exc, new_exc);
+                exc = _transfer_traceback(exc, new_exc);
             }
         }
     }
