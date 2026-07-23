@@ -37,6 +37,7 @@ from typing import (
 
 import bson
 from bson import CodecOptions, _dict_to_bson, _make_c_string
+from bson.adapters import _bson_deserializable_class, _decode_typed_batch
 from bson.raw_bson import (
     _RAW_ARRAY_BSON_OPTIONS,
     DEFAULT_RAW_BSON_OPTIONS,
@@ -1131,6 +1132,40 @@ def _batched_write_command_impl(
     return to_send, length
 
 
+def _unpack_typed_response(
+    payload_document: bytes | memoryview,
+    codec_options: CodecOptions[Any],
+    user_fields: Optional[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Decode an OP_MSG reply whose document_class implements from_bson.
+
+    The envelope (ok, cursor.id, ns, $clusterTime, ...) is decoded with the
+    same raw-batch machinery as _OpMsg.raw_response; the documents in
+    cursor.firstBatch/nextBatch are decoded via the document_class's
+    from_bson_batch hook when it has one (one batched decode), or one raw
+    BSON slice at a time through from_bson otherwise. Replies whose user
+    documents do not live under a cursor field (command acks, distinct,
+    find_one_and_*) are decoded as plain dict envelopes.
+    """
+    if not user_fields or "cursor" not in user_fields:
+        dict_options = codec_options.with_options(document_class=dict)
+        return bson._decode_all_selective(payload_document, dict_options, user_fields)
+    adapter: Any = codec_options.document_class
+    envelope: Any = bson._decode_selective(
+        RawBSONDocument(payload_document), user_fields, _RAW_ARRAY_BSON_OPTIONS
+    )
+    cursor = envelope.get("cursor")
+    if cursor:
+        for key in ("firstBatch", "nextBatch"):
+            batch = cursor.get(key)
+            if batch is None:
+                continue
+            cursor[key] = _decode_typed_batch(
+                adapter, bson._array_of_documents_to_buffer(batch), codec_options
+            )
+    return [envelope]
+
+
 class _OpMsg:
     """A MongoDB OP_MSG response message."""
 
@@ -1180,6 +1215,8 @@ class _OpMsg:
         """
         # If _OpMsg is in-use, this cannot be a legacy response.
         assert not legacy_response
+        if _bson_deserializable_class(codec_options.document_class):
+            return _unpack_typed_response(self.payload_document, codec_options, user_fields)
         return bson._decode_all_selective(self.payload_document, codec_options, user_fields)
 
     def command_response(self, codec_options: CodecOptions[Any]) -> dict[str, Any]:

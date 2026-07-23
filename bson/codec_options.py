@@ -32,6 +32,7 @@ from typing import (
     cast,
 )
 
+from bson.adapters import _resolve_document_class
 from bson.binary import (
     ALL_UUID_REPRESENTATIONS,
     UUID_REPRESENTATION_NAMES,
@@ -388,11 +389,16 @@ else:
             except TypeError:
                 is_mapping = False
             if not (is_mapping or _raw_document_class(doc_class)):
-                raise TypeError(
-                    "document_class must be dict, bson.son.SON, "
-                    "bson.raw_bson.RawBSONDocument, or a "
-                    "subclass of collections.abc.MutableMapping"
-                )
+                resolved = _resolve_document_class(doc_class)
+                if resolved is None:
+                    raise TypeError(
+                        "document_class must be dict, bson.son.SON, "
+                        "bson.raw_bson.RawBSONDocument, or a "
+                        "subclass of collections.abc.MutableMapping. It may "
+                        "also be a dataclass, a pydantic v2 model, or a "
+                        "class implementing the from_bson protocol"
+                    )
+                doc_class = resolved
             if not isinstance(tz_aware, bool):
                 raise TypeError(f"tz_aware must be True or False, was: tz_aware={tz_aware}")
             if uuid_representation not in ALL_UUID_REPRESENTATIONS:
