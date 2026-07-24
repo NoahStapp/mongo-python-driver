@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import time as time  # noqa: PLC0414 # needed in sync version
 import warnings
@@ -81,6 +82,8 @@ from pymongo.lock import (
 )
 from pymongo.logger import (
     _CLIENT_LOGGER,
+    _COMMAND_LOGGER,
+    _SERVER_SELECTION_LOGGER,
     _log_client_error,
     _log_or_warn,
 )
@@ -2781,7 +2784,17 @@ class _ClientConnectionRetryable(Generic[T]):
         self._server: Server = None  # type: ignore
         self._deprioritized_servers: list[Server] = []
         self._operation = operation
-        self._operation_id = operation_id if operation_id is not None else _randint()
+        # Only generate an operation id when APM/logging is enabled
+        if operation_id is None and (
+            (
+                self._client._event_listeners is not None
+                and self._client._event_listeners.enabled_for_commands
+            )
+            or _COMMAND_LOGGER.isEnabledFor(logging.DEBUG)
+            or _SERVER_SELECTION_LOGGER.isEnabledFor(logging.DEBUG)
+        ):
+            operation_id = _randint()
+        self._operation_id = operation_id
         self._attempt_number = 0
         self._is_run_command = is_run_command
         self._is_aggregate_write = is_aggregate_write
@@ -3010,7 +3023,9 @@ class _ClientConnectionRetryable(Generic[T]):
                     self._retryable = False
                 if self._retrying:
                     self._log_retry(is_write=True)
-                # One operation id across all attempts of this operation.
+                # One operation id across all attempts of this operation if APM/logging is enabled
+                if self._operation_id is None:
+                    return self._func(self._session, conn, self._retryable)  # type: ignore
                 with _op_id._OpIdContext(self._operation_id):
                     return self._func(self._session, conn, self._retryable)  # type: ignore
         except PyMongoError as exc:
@@ -3035,7 +3050,9 @@ class _ClientConnectionRetryable(Generic[T]):
                 self._check_last_error()
             if self._retrying:
                 self._log_retry(is_write=False)
-            # One operation id across all attempts of this operation.
+            # One operation id across all attempts of this operation if APM/logging is enabled
+            if self._operation_id is None:
+                return self._func(self._session, self._server, conn, read_pref)  # type: ignore
             with _op_id._OpIdContext(self._operation_id):
                 return self._func(self._session, self._server, conn, read_pref)  # type: ignore
 
