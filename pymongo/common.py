@@ -35,6 +35,7 @@ from typing import (
 from urllib.parse import unquote_plus
 
 from bson import SON
+from bson.adapters import _resolve_document_class
 from bson.binary import UuidRepresentation
 from bson.codec_options import CodecOptions, DatetimeConversion, TypeRegistry
 from bson.raw_bson import RawBSONDocument
@@ -503,9 +504,7 @@ def validate_auth_mechanism_properties(option: str, value: Any) -> dict[str, Uni
     return props
 
 
-def validate_document_class(
-    option: str, value: Any
-) -> Union[type[MutableMapping[str, Any]], type[RawBSONDocument]]:
+def validate_document_class(option: str, value: Any) -> Any:
     """Validate the document_class option."""
     # Generic aliases like SON[str, Any] or dict[str, Any] aren't classes, so
     # resolve to their origin before the subclass check. Whether issubclass()
@@ -517,12 +516,21 @@ def validate_document_class(
         is_mapping = issubclass(check_class, abc.MutableMapping)
     except TypeError:
         is_mapping = False
-    if not is_mapping and not issubclass(value, RawBSONDocument):
-        raise TypeError(
-            f"{option} must be dict, bson.son.SON, "
-            "bson.raw_bson.RawBSONDocument, or a "
-            "subclass of collections.MutableMapping"
-        )
+    try:
+        is_raw = issubclass(check_class, RawBSONDocument)
+    except TypeError:
+        is_raw = False
+    if not is_mapping and not is_raw:
+        resolved = _resolve_document_class(value)
+        if resolved is None:
+            raise TypeError(
+                f"{option} must be dict, bson.son.SON, "
+                "bson.raw_bson.RawBSONDocument, or a "
+                "subclass of collections.MutableMapping. It may also be a "
+                "dataclass, a pydantic v2 model, or a class implementing "
+                "the from_bson protocol"
+            )
+        return resolved
     return value
 
 

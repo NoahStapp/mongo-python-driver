@@ -55,6 +55,7 @@ from typing import (
     cast,
 )
 
+from bson.adapters import _DocumentAdapter
 from bson.codec_options import DEFAULT_CODEC_OPTIONS, CodecOptions, TypeRegistry
 from bson.timestamp import Timestamp
 from pymongo import _csot, _op_id, common, helpers_shared, periodic_executor
@@ -1307,6 +1308,10 @@ class MongoClient(common.BaseObject, Generic[_DocumentType]):
             if option == "document_class":
                 if value is dict:
                     return "document_class=dict"
+                elif isinstance(value, _DocumentAdapter):
+                    # Handle adapter instances (e.g., _DataclassAdapter)
+                    doc_type = value.document_type
+                    return f"document_class={doc_type.__module__}.{doc_type.__name__}"
                 else:
                     return f"document_class={value.__module__}.{value.__name__}"
             if option == "authmechanismproperties":
