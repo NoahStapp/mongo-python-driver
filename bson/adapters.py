@@ -32,18 +32,23 @@ where ``data`` is a buffer of N raw BSON documents laid out back-to-back;
 it must return a list of N instances. When absent, the driver slices the
 buffer and calls ``from_bson`` once per document.
 
-Finally, a class whose instances are built by plain assignment of decoded
-fields may advertise a static construction layout::
+A class that wants decoded documents rather than raw bytes implements the
+dict-level hook instead::
 
     @classmethod
-    def __bson_construct_plan__(cls):
-        return BsonConstructPlan(fields=("_id", "name", "age"))
+    def from_bson_dict(cls, doc, codec_options):
+        ...
 
-which lets the driver construct instances itself, one batched decode per
-cursor batch with no per-document protocol calls (and, in a future C fast
-path, no intermediate dict). The plan takes precedence over
-``from_bson_batch``, which takes precedence over ``from_bson``; each tier
-is optional with the tier below as its fallback.
+where ``doc`` is one fully decoded document: the driver decodes each
+cursor batch itself (one batched decode, no raw-batch handling) and calls
+the hook once per document. This is the easiest tier to implement — no
+BSON handling in user code — and the fastest. With it present,
+``from_bson`` is not required.
+
+The tiers form a ladder of decreasing driver involvement, and the driver
+uses the highest rung a class implements: ``from_bson_dict`` (driver
+decodes, class constructs), then ``from_bson_batch`` (class decodes the
+batch buffer), then ``from_bson`` (class decodes each document).
 
 Plain dataclasses and pydantic v2 models are auto-wrapped in the shipped
 adapters below at the ``CodecOptions`` validation gate.
@@ -54,7 +59,7 @@ from __future__ import annotations
 import dataclasses
 import struct
 import sys
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     from bson.codec_options import CodecOptions
@@ -67,69 +72,23 @@ def _bson_deserializable_class(document_class: Any) -> bool:
     return getattr(document_class, "_type_marker", None) == _BSON_DESERIALIZABLE_MARKER
 
 
-class BsonConstructPlan(NamedTuple):
-    """Static construction layout advertised via ``__bson_construct_plan__``.
-
-    The plan is queried once per batch, never per document; it must be
-    immutable and describe construction only — validation or coercion belongs
-    in the class's constructor.
-
-    Under the ``"call"`` strategy every decoded key is passed to the factory
-    as a keyword argument (after ``fields``->``params`` renaming), so extra
-    wire keys raise ``TypeError`` from the constructor and missing keys fall
-    through to constructor defaults — the same semantics as ``cls(**decoded)``.
-    Under ``"setattr"`` the instance is allocated with ``__new__`` and fields
-    are assigned directly; ``__init__`` never runs.
-    """
-
-    fields: tuple[str, ...]
-    """Expected wire keys, in expected order."""
-
-    params: Optional[tuple[str, ...]] = None
-    """Constructor keyword names for ``fields``; ``None`` means identical."""
-
-    strategy: str = "call"
-    """``"call"`` (invoke the factory) or ``"setattr"`` (allocate + assign)."""
-
-    factory: Optional[Any] = None
-    """Callable constructing one instance; ``None`` means the class itself."""
-
-
-def _construct_batch_with_plan(
+def _dict_batch_constructor(
     document_class: Any,
-    plan: BsonConstructPlan,
-    data: bytes | memoryview,
     codec_options: CodecOptions[Any],
-) -> list[Any]:
-    """Pure-Python reference executor for ``__bson_construct_plan__``.
+) -> Optional[Callable[[list[dict[str, Any]]], list[Any]]]:
+    """Return a callable constructing instances from already-decoded documents.
 
-    Decodes the whole buffer with one ``decode_all`` call and constructs the
-    instances per the plan. A C fast path would instead decode straight into
-    a vectorcall argument array, skipping the intermediate dicts.
+    Classes on the ``from_bson_dict`` tier (which includes the shipped
+    adapters) need no raw batch bytes, which lets reply unpacking decode
+    the whole reply to dicts in a single pass (see
+    ``pymongo.message._unpack_typed_response``). Returns ``None`` for
+    ``from_bson``/``from_bson_batch``-only implementations: those are owed
+    raw BSON bytes.
     """
-    import bson
-
-    if plan.strategy not in ("call", "setattr"):
-        raise ValueError(f"unknown BsonConstructPlan strategy: {plan.strategy!r}")
-    target = plan.factory if plan.factory is not None else document_class
-    rename = None
-    if plan.params is not None and plan.params != plan.fields:
-        rename = dict(zip(plan.fields, plan.params))
-    dict_options = codec_options.with_options(document_class=dict)
-    docs = []
-    for decoded in bson.decode_all(data, dict_options):
-        if rename is None:
-            fields = decoded
-        else:
-            fields = {rename.get(key, key): value for key, value in decoded.items()}
-        if plan.strategy == "call":
-            docs.append(target(**fields))
-        else:
-            obj = target.__new__(target)
-            for key, value in fields.items():
-                setattr(obj, key, value)
-            docs.append(obj)
-    return docs
+    from_bson_dict = getattr(document_class, "from_bson_dict", None)
+    if from_bson_dict is not None:
+        return lambda docs: [from_bson_dict(decoded, codec_options) for decoded in docs]
+    return None
 
 
 class _DocumentAdapter:
@@ -161,21 +120,23 @@ class _DocumentAdapter:
         self._dict_options_cache = (codec_options, dict_options)
         return dict_options
 
-    def _from_dict(self, decoded: dict[str, Any]) -> Any:
+    def from_bson_dict(self, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> Any:
         """Construct one ``document_type`` instance from a decoded document."""
         raise NotImplementedError
 
     def from_bson(self, data: Any, codec_options: CodecOptions[Any]) -> Any:
         import bson
 
-        return self._from_dict(bson.decode(data, self._as_dict_options(codec_options)))
+        return self.from_bson_dict(
+            bson.decode(data, self._as_dict_options(codec_options)), codec_options
+        )
 
     def from_bson_batch(self, data: Any, codec_options: CodecOptions[Any]) -> list[Any]:
         import bson
 
-        from_dict = self._from_dict
+        from_bson_dict = self.from_bson_dict
         return [
-            from_dict(decoded)
+            from_bson_dict(decoded, codec_options)
             for decoded in bson.decode_all(data, self._as_dict_options(codec_options))
         ]
 
@@ -192,32 +153,21 @@ class _DocumentAdapter:
 
 
 class _DataclassAdapter(_DocumentAdapter):
-    """Decodes BSON into a plain dataclass.
+    """Decodes BSON into a plain dataclass via ``cls(**doc)``.
 
-    Built on the construct-plan layer: a dataclass has a static field set
-    and a named-parameter ``__init__``, so the driver can construct it
-    directly. ``_from_dict`` remains the fallback tier.
+    Extra wire keys raise ``TypeError`` from the constructor and missing
+    keys fall through to field defaults.
     """
 
-    def __init__(self, document_type: type[Any]) -> None:
-        super().__init__(document_type)
-        self._plan = BsonConstructPlan(
-            fields=tuple(field.name for field in dataclasses.fields(document_type)),
-            factory=document_type,
-        )
-
-    def __bson_construct_plan__(self) -> BsonConstructPlan:
-        return self._plan
-
-    def _from_dict(self, decoded: dict[str, Any]) -> Any:
-        return self.document_type(**decoded)
+    def from_bson_dict(self, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> Any:
+        return self.document_type(**doc)
 
 
 class _PydanticAdapter(_DocumentAdapter):
     """Decodes BSON into a pydantic v2 model via ``model_validate``."""
 
-    def _from_dict(self, decoded: dict[str, Any]) -> Any:
-        return self.document_type.model_validate(decoded)
+    def from_bson_dict(self, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> Any:
+        return self.document_type.model_validate(doc)
 
 
 def _decode_typed_batch(
@@ -225,14 +175,20 @@ def _decode_typed_batch(
 ) -> list[Any]:
     """Decode a buffer of back-to-back raw BSON documents into instances.
 
-    Dispatches to the richest protocol tier the class provides: a
-    ``__bson_construct_plan__`` layout (driver-side construction), then
-    ``from_bson_batch`` (one batched decode), then slicing the buffer and
-    calling ``from_bson`` once per document.
+    Dispatches to the richest protocol tier the class provides:
+    ``from_bson_dict`` (one batched decode, one hook call per decoded
+    document), then ``from_bson_batch`` (one batched decode by the class),
+    then slicing the buffer and calling ``from_bson`` once per document.
     """
-    plan_hook = getattr(document_class, "__bson_construct_plan__", None)
-    if plan_hook is not None:
-        return _construct_batch_with_plan(document_class, plan_hook(), data, codec_options)
+    from_bson_dict = getattr(document_class, "from_bson_dict", None)
+    if from_bson_dict is not None:
+        import bson
+
+        dict_options = codec_options.with_options(document_class=dict)
+        return [
+            from_bson_dict(decoded, codec_options)
+            for decoded in bson.decode_all(data, dict_options)
+        ]
     from_bson_batch = getattr(document_class, "from_bson_batch", None)
     if from_bson_batch is not None:
         return from_bson_batch(data, codec_options)

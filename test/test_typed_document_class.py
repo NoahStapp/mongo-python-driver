@@ -29,19 +29,21 @@ import bson
 from bson import encode
 from bson.adapters import (
     _BSON_DESERIALIZABLE_MARKER,
-    BsonConstructPlan,
     _bson_deserializable_class,
     _DataclassAdapter,
     _decode_typed_batch,
+    _dict_batch_constructor,
     _PydanticAdapter,
     _resolve_document_class,
 )
 from bson.codec_options import CodecOptions
+from bson.int64 import Int64
 from bson.objectid import ObjectId
 from bson.raw_bson import RawBSONDocument
 from bson.son import SON
 from pymongo.common import validate_document_class
 from pymongo.errors import OperationFailure
+from pymongo.message import _unpack_typed_response
 from test import IntegrationTest, UnitTest, unittest
 from test.utils_shared import OvertCommandListener
 
@@ -66,6 +68,19 @@ class ProtocolDoc:
     @classmethod
     def from_bson(cls, data: Any, codec_options: CodecOptions[Any]) -> ProtocolDoc:
         return cls(bson.decode(data, codec_options.with_options(document_class=dict)))
+
+
+class DictHookDoc:
+    """A hand-rolled class implementing only the from_bson_dict hook."""
+
+    _type_marker = _BSON_DESERIALIZABLE_MARKER
+
+    def __init__(self, fields: dict[str, Any]) -> None:
+        self.fields = fields
+
+    @classmethod
+    def from_bson_dict(cls, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> DictHookDoc:
+        return cls(doc)
 
 
 class NotADocumentClass:
@@ -182,6 +197,56 @@ class TestAdapters(UnitTest):
     def test_from_bson_batch_empty_buffer(self):
         self.assertEqual(_DataclassAdapter(UserDC).from_bson_batch(b"", CodecOptions()), [])
 
+    def test_dataclass_extra_keys_raise_type_error(self):
+        # Same semantics as cls(**decoded): unexpected wire keys are passed
+        # through and the constructor rejects them.
+        buffer = encode({"_id": ObjectId(), "name": "x", "age": 1, "extra": True})
+        with self.assertRaises(TypeError):
+            _decode_typed_batch(_DataclassAdapter(UserDC), buffer, CodecOptions())
+
+    def test_dataclass_missing_keys_use_constructor_defaults(self):
+        @dataclass
+        class DefaultedDC:
+            _id: ObjectId
+            name: str
+            age: int = -1
+
+        buffer = encode({"_id": ObjectId(), "name": "x"})
+        (doc,) = _decode_typed_batch(_DataclassAdapter(DefaultedDC), buffer, CodecOptions())
+        self.assertEqual(doc.age, -1)
+
+    def test_bson_scalars_survive_dataclass_path(self):
+        oid = ObjectId()
+        when = datetime.datetime(2026, 7, 23, 12, 0, 0)
+
+        @dataclass
+        class Event:
+            _id: ObjectId
+            when: datetime.datetime
+
+        (event,) = _decode_typed_batch(
+            _DataclassAdapter(Event), encode({"_id": oid, "when": when}), CodecOptions()
+        )
+        self.assertEqual(event._id, oid)
+        self.assertEqual(event.when, when)
+
+    def test_adapters_expose_from_bson_dict(self):
+        oid = ObjectId()
+        user = _DataclassAdapter(UserDC).from_bson_dict(
+            {"_id": oid, "name": "Ada", "age": 36}, CodecOptions()
+        )
+        self.assertEqual(user, UserDC(oid, "Ada", 36))
+
+        class FakeModel:
+            @classmethod
+            def model_validate(cls, obj: Any) -> Any:
+                return ("validated", obj["name"])
+
+        self.assertEqual(
+            _PydanticAdapter(FakeModel).from_bson_dict({"name": "x"}, CodecOptions()),
+            ("validated", "x"),
+        )
+
 
 class TestDecodeTypedBatch(UnitTest):
     def setUp(self):
@@ -190,21 +255,67 @@ class TestDecodeTypedBatch(UnitTest):
             encode({"_id": ObjectId(), "name": f"user{i}", "age": i}) for i in range(3)
         )
 
-    def test_uses_from_bson_batch_when_available(self):
-        # _PydanticAdapter advertises no construct plan, so batch decoding
-        # goes through its from_bson_batch hook.
+    def test_adapter_uses_from_bson_dict(self):
+        # The driver decodes the buffer once and calls the adapter's
+        # from_bson_dict per document; the raw from_bson_batch tier is
+        # never consulted.
         class FakeModel:
             @classmethod
             def model_validate(cls, obj: Any) -> Any:
                 return obj
 
         adapter = _PydanticAdapter(FakeModel)
-        with mock.patch.object(
-            adapter, "from_bson_batch", wraps=adapter.from_bson_batch
-        ) as batch_hook:
+        with (
+            mock.patch.object(adapter, "from_bson_dict", wraps=adapter.from_bson_dict) as dict_hook,
+            mock.patch.object(adapter, "from_bson_batch") as batch_hook,
+        ):
             users = _decode_typed_batch(adapter, self.buffer, CodecOptions())
-        batch_hook.assert_called_once()
+        self.assertEqual(dict_hook.call_count, 3)
+        batch_hook.assert_not_called()
         self.assertEqual([u["age"] for u in users], [0, 1, 2])
+
+    def test_from_bson_dict_only_class(self):
+        # The protocol's easiest entry: marker + from_bson_dict, no
+        # from_bson required.
+        docs = _decode_typed_batch(DictHookDoc, self.buffer, CodecOptions())
+        self.assertEqual(len(docs), 3)
+        for i, doc in enumerate(docs):
+            self.assertIsInstance(doc, DictHookDoc)
+            self.assertEqual(doc.fields["age"], i)
+
+    def test_from_bson_dict_outranks_from_bson_batch(self):
+        class BothDoc(DictHookDoc):
+            @classmethod
+            def from_bson_batch(cls, data: Any, codec_options: CodecOptions[Any]) -> Any:
+                raise AssertionError("from_bson_dict must outrank from_bson_batch")
+
+        docs = _decode_typed_batch(BothDoc, self.buffer, CodecOptions())
+        self.assertEqual([d.fields["age"] for d in docs], [0, 1, 2])
+
+    def test_from_bson_dict_polymorphic_dispatch(self):
+        # Discriminated unions: the hook sees the decoded document, so it
+        # can dispatch construction on a type field.
+        class Shape:
+            _type_marker = _BSON_DESERIALIZABLE_MARKER
+
+            def __init__(self, doc: dict[str, Any]) -> None:
+                self.doc = doc
+
+            @classmethod
+            def from_bson_dict(cls, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> Shape:
+                return shapes[doc["kind"]](doc)
+
+        class Circle(Shape):
+            pass
+
+        class Square(Shape):
+            pass
+
+        shapes = {"circle": Circle, "square": Square}
+        buffer = encode({"kind": "circle", "r": 1.0}) + encode({"kind": "square", "s": 2.0})
+        circle, square = _decode_typed_batch(Shape, buffer, CodecOptions())
+        self.assertIsInstance(circle, Circle)
+        self.assertIsInstance(square, Square)
 
     def test_falls_back_to_per_document_from_bson(self):
         # ProtocolDoc implements only from_bson: each document must arrive
@@ -232,135 +343,153 @@ class TestDecodeTypedBatch(UnitTest):
         self.assertEqual(_decode_typed_batch(ProtocolDoc, b"", CodecOptions()), [])
 
 
-class PlannedDoc:
-    """A hand-rolled class advertising a static construction plan."""
+class TestDictBatchConstructor(UnitTest):
+    """Tier dispatch for the single-pass unpack fast path.
 
-    _type_marker = _BSON_DESERIALIZABLE_MARKER
+    Classes constructible from decoded documents (the from_bson_dict tier,
+    which includes the shipped adapters) yield a constructor callable;
+    classes owed raw BSON bytes (from_bson / from_bson_batch
+    implementations) yield None.
+    """
 
-    def __init__(self, _id: ObjectId, name: str, age: int = -1) -> None:
-        self._id = _id
-        self.name = name
-        self.age = age
+    def test_from_bson_dict_class(self):
+        ctor = _dict_batch_constructor(DictHookDoc, CodecOptions())
+        assert ctor is not None
+        (doc,) = ctor([{"a": 1}])
+        self.assertIsInstance(doc, DictHookDoc)
+        self.assertEqual(doc.fields, {"a": 1})
 
-    @classmethod
-    def __bson_construct_plan__(cls) -> BsonConstructPlan:
-        return BsonConstructPlan(fields=("_id", "name", "age"))
+    def test_from_bson_dict_receives_codec_options(self):
+        seen: list[CodecOptions[Any]] = []
 
-    @classmethod
-    def from_bson(cls, data: Any, codec_options: CodecOptions[Any]) -> PlannedDoc:
-        raise AssertionError("plan-based decoding must not fall back to from_bson")
+        class CapturingDoc(DictHookDoc):
+            @classmethod
+            def from_bson_dict(
+                cls, doc: dict[str, Any], codec_options: CodecOptions[Any]
+            ) -> CapturingDoc:
+                seen.append(codec_options)
+                return cls(doc)
+
+        opts: CodecOptions[Any] = CodecOptions(tz_aware=True)
+        ctor = _dict_batch_constructor(CapturingDoc, opts)
+        assert ctor is not None
+        ctor([{"a": 1}])
+        self.assertIs(seen[0], opts)
+
+    def test_dataclass_adapter_constructs(self):
+        oid = ObjectId()
+        ctor = _dict_batch_constructor(_DataclassAdapter(UserDC), CodecOptions())
+        assert ctor is not None
+        self.assertEqual(ctor([{"_id": oid, "name": "n", "age": 3}]), [UserDC(oid, "n", 3)])
+
+    def test_shipped_adapter_without_plan_uses_from_bson_dict(self):
+        class FakeModel:
+            @classmethod
+            def model_validate(cls, obj: Any) -> Any:
+                return ("validated", obj["name"])
+
+        ctor = _dict_batch_constructor(_PydanticAdapter(FakeModel), CodecOptions())
+        assert ctor is not None
+        self.assertEqual(ctor([{"name": "x"}]), [("validated", "x")])
+
+    def test_from_bson_class_returns_none(self):
+        self.assertIsNone(_dict_batch_constructor(ProtocolDoc, CodecOptions()))
+
+    def test_from_bson_batch_class_returns_none(self):
+        class BatchOnly:
+            _type_marker = _BSON_DESERIALIZABLE_MARKER
+
+            @classmethod
+            def from_bson(cls, data: Any, codec_options: CodecOptions[Any]) -> Any:
+                raise AssertionError("unused")
+
+            @classmethod
+            def from_bson_batch(cls, data: Any, codec_options: CodecOptions[Any]) -> Any:
+                raise AssertionError("unused")
+
+        self.assertIsNone(_dict_batch_constructor(BatchOnly, CodecOptions()))
 
 
-class TestConstructPlan(UnitTest):
+class TestUnpackTypedResponseSinglePass(UnitTest):
+    """Reply unpacking for classes the driver constructs from decoded dicts.
+
+    Such classes need no raw batch bytes, so the reply is decoded to dicts
+    in a single pass exactly like the plain-dict path (envelope included)
+    and the batch documents are replaced with constructed instances.
+    """
+
+    USER_FIELDS = {"cursor": {"firstBatch": 1}}
+
     def setUp(self):
         super().setUp()
-        self.oids = [ObjectId() for _ in range(3)]
-        self.buffer = b"".join(
-            encode({"_id": oid, "name": f"user{i}", "age": i}) for i, oid in enumerate(self.oids)
+        self.oids = [ObjectId() for _ in range(2)]
+        self.batch = [{"_id": oid, "name": f"user{i}", "age": i} for i, oid in enumerate(self.oids)]
+
+    def _payload(self, **extra_cursor_fields: Any) -> bytes:
+        cursor: dict[str, Any] = {"firstBatch": self.batch, "id": Int64(0), "ns": "db.coll"}
+        cursor.update(extra_cursor_fields)
+        return encode({"cursor": cursor, "ok": 1.0})
+
+    def test_batch_documents_constructed(self):
+        opts = CodecOptions(document_class=UserDC)  # type: ignore[type-var]
+        (envelope,) = _unpack_typed_response(self._payload(), opts, self.USER_FIELDS)
+        self.assertEqual(
+            envelope["cursor"]["firstBatch"],
+            [UserDC(oid, f"user{i}", i) for i, oid in enumerate(self.oids)],
         )
 
-    def test_dataclass_adapter_advertises_plan(self):
-        plan = _DataclassAdapter(UserDC).__bson_construct_plan__()
-        self.assertEqual(plan.fields, ("_id", "name", "age"))
-        self.assertIs(plan.factory, UserDC)
-        self.assertEqual(plan.strategy, "call")
+    def test_envelope_subdocuments_are_plain_dicts(self):
+        # Non-user envelope fields must decode like the plain-dict path:
+        # nested documents (e.g. postBatchResumeToken) come back as dicts,
+        # not RawBSONDocument.
+        opts = CodecOptions(document_class=UserDC)  # type: ignore[type-var]
+        payload = self._payload(postBatchResumeToken={"_data": "abc"})
+        (envelope,) = _unpack_typed_response(payload, opts, self.USER_FIELDS)
+        token = envelope["cursor"]["postBatchResumeToken"]
+        self.assertIsInstance(token, dict)
+        self.assertEqual(token, {"_data": "abc"})
 
-    def test_plan_preferred_over_from_bson_batch(self):
-        adapter = _DataclassAdapter(UserDC)
-        with mock.patch.object(adapter, "from_bson_batch") as batch_hook:
-            users = _decode_typed_batch(adapter, self.buffer, CodecOptions())
-        batch_hook.assert_not_called()
-        self.assertEqual(len(users), 3)
-        for i, user in enumerate(users):
-            self.assertIsInstance(user, UserDC)
-            self.assertEqual(user._id, self.oids[i])
-            self.assertEqual(user.age, i)
+    def test_envelope_respects_codec_options(self):
+        # Envelope fields outside user_fields must honor the user's codec
+        # options (here tz_aware), like the plain-dict path does.
+        when = datetime.datetime(2026, 8, 6, tzinfo=datetime.timezone.utc)
+        opts: CodecOptions[Any] = CodecOptions(document_class=UserDC, tz_aware=True)
+        payload = self._payload(atTime=when)
+        (envelope,) = _unpack_typed_response(payload, opts, self.USER_FIELDS)
+        self.assertEqual(envelope["cursor"]["atTime"], when)
 
-    def test_hand_rolled_plan_call_strategy(self):
-        docs = _decode_typed_batch(PlannedDoc, self.buffer, CodecOptions())
-        self.assertEqual(len(docs), 3)
-        for i, doc in enumerate(docs):
-            self.assertIsInstance(doc, PlannedDoc)
-            self.assertEqual(doc._id, self.oids[i])
-            self.assertEqual(doc.name, f"user{i}")
-            self.assertEqual(doc.age, i)
-
-    def test_plan_param_renaming(self):
-        class RenamedDoc:
-            _type_marker = _BSON_DESERIALIZABLE_MARKER
-
-            def __init__(self, id: ObjectId, name: str, age: int) -> None:
-                self.id = id
-                self.name = name
-                self.age = age
-
-            @classmethod
-            def __bson_construct_plan__(cls) -> BsonConstructPlan:
-                return BsonConstructPlan(
-                    fields=("_id", "name", "age"), params=("id", "name", "age")
-                )
-
-        docs = _decode_typed_batch(RenamedDoc, self.buffer, CodecOptions())
-        self.assertEqual([d.id for d in docs], self.oids)
-
-    def test_plan_extra_keys_raise_type_error(self):
-        # Same semantics as cls(**decoded): unexpected wire keys are passed
-        # through and the constructor rejects them.
-        buffer = encode({"_id": ObjectId(), "name": "x", "age": 1, "extra": True})
-        with self.assertRaises(TypeError):
-            _decode_typed_batch(PlannedDoc, buffer, CodecOptions())
-
-    def test_plan_missing_keys_use_constructor_defaults(self):
-        buffer = encode({"_id": ObjectId(), "name": "x"})
-        (doc,) = _decode_typed_batch(PlannedDoc, buffer, CodecOptions())
-        self.assertEqual(doc.age, -1)
-
-    def test_setattr_strategy_skips_init(self):
-        class SetattrDoc:
-            _type_marker = _BSON_DESERIALIZABLE_MARKER
-
-            def __init__(self) -> None:
-                raise AssertionError("__init__ must not run under the setattr strategy")
-
-            @classmethod
-            def __bson_construct_plan__(cls) -> BsonConstructPlan:
-                return BsonConstructPlan(fields=("_id", "name", "age"), strategy="setattr")
-
-        docs = _decode_typed_batch(SetattrDoc, self.buffer, CodecOptions())
-        self.assertEqual(len(docs), 3)
-        for i, doc in enumerate(docs):
-            self.assertIsInstance(doc, SetattrDoc)
-            self.assertEqual(doc.name, f"user{i}")
-            self.assertEqual(doc.age, i)
-
-    def test_unknown_strategy_raises(self):
-        class BadPlanDoc:
-            _type_marker = _BSON_DESERIALIZABLE_MARKER
-
-            @classmethod
-            def __bson_construct_plan__(cls) -> BsonConstructPlan:
-                return BsonConstructPlan(fields=("_id",), strategy="bogus")
-
-        with self.assertRaisesRegex(ValueError, "bogus"):
-            _decode_typed_batch(BadPlanDoc, self.buffer, CodecOptions())
-
-    def test_empty_buffer(self):
-        self.assertEqual(_decode_typed_batch(PlannedDoc, b"", CodecOptions()), [])
-
-    def test_bson_scalars_survive_plan_path(self):
-        oid = ObjectId()
-        when = datetime.datetime(2026, 7, 23, 12, 0, 0)
-
-        @dataclass
-        class Event:
-            _id: ObjectId
-            when: datetime.datetime
-
-        (event,) = _decode_typed_batch(
-            _DataclassAdapter(Event), encode({"_id": oid, "when": when}), CodecOptions()
+    def test_next_batch_constructed(self):
+        opts = CodecOptions(document_class=UserDC)  # type: ignore[type-var]
+        payload = encode(
+            {"cursor": {"nextBatch": self.batch, "id": Int64(0), "ns": "db.coll"}, "ok": 1.0}
         )
-        self.assertEqual(event._id, oid)
-        self.assertEqual(event.when, when)
+        (envelope,) = _unpack_typed_response(payload, opts, {"cursor": {"nextBatch": 1}})
+        batch = envelope["cursor"]["nextBatch"]
+        self.assertEqual(len(batch), 2)
+        self.assertIsInstance(batch[0], UserDC)
+
+    def test_from_bson_dict_class_takes_single_pass(self):
+        opts = CodecOptions(document_class=DictHookDoc)  # type: ignore[type-var]
+        (envelope,) = _unpack_typed_response(self._payload(), opts, self.USER_FIELDS)
+        docs = envelope["cursor"]["firstBatch"]
+        self.assertEqual([doc.fields["age"] for doc in docs], [0, 1])
+        self.assertIsInstance(docs[0], DictHookDoc)
+
+    def test_raw_protocol_class_still_gets_raw_slices(self):
+        received: list[type] = []
+
+        class RecordingDoc(ProtocolDoc):
+            @classmethod
+            def from_bson(cls, data: Any, codec_options: CodecOptions[Any]) -> RecordingDoc:
+                received.append(type(data))
+                return super().from_bson(data, codec_options)  # type: ignore[return-value]
+
+        opts = CodecOptions(document_class=RecordingDoc)  # type: ignore[type-var]
+        (envelope,) = _unpack_typed_response(self._payload(), opts, self.USER_FIELDS)
+        docs = envelope["cursor"]["firstBatch"]
+        self.assertEqual([doc.fields["age"] for doc in docs], [0, 1])
+        for received_type in received:
+            self.assertIn(received_type, (bytes, memoryview))
 
 
 class TestCodecOptionsGate(UnitTest):
@@ -452,6 +581,17 @@ class TestTypedDocumentClassIntegration(IntegrationTest):
         agg = (coll.aggregate([{"$sort": {"age": -1}}], batchSize=3)).to_list()
         self.assertEqual(agg[0].fields["age"], 9)
         self.assertTrue(all(isinstance(d, ProtocolDoc) for d in docs + agg))
+
+    def test_from_bson_dict_class_find_and_aggregate(self):
+        coll = self.typed_coll(DictHookDoc)
+        doc = coll.find_one({"name": "user0"})
+        self.assertIsInstance(doc, DictHookDoc)
+        self.assertEqual(doc.fields["name"], "user0")
+        docs = coll.find(batch_size=4).to_list()
+        self.assertEqual(len(docs), 10)
+        agg = (coll.aggregate([{"$sort": {"age": -1}}], batchSize=3)).to_list()
+        self.assertEqual(agg[0].fields["age"], 9)
+        self.assertTrue(all(isinstance(d, DictHookDoc) for d in docs + agg))
 
     def test_bson_scalar_fidelity(self):
         @dataclass
