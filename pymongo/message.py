@@ -37,11 +37,7 @@ from typing import (
 
 import bson
 from bson import CodecOptions, _dict_to_bson, _make_c_string
-from bson.adapters import (
-    _bson_deserializable_class,
-    _decode_typed_batch,
-    _dict_batch_constructor,
-)
+from bson.adapters import _bson_deserializable_class
 from bson.raw_bson import (
     _RAW_ARRAY_BSON_OPTIONS,
     DEFAULT_RAW_BSON_OPTIONS,
@@ -1143,48 +1139,24 @@ def _unpack_typed_response(
 ) -> list[dict[str, Any]]:
     """Decode an OP_MSG reply whose document_class implements from_bson.
 
-    Classes on the from_bson_dict tier (which includes the shipped
-    adapters) take a single-pass fast path: the whole reply is decoded to
-    dicts exactly like the plain-dict unpack, then the
-    cursor.firstBatch/nextBatch documents are replaced with constructed
-    instances. For classes owed raw
-    BSON bytes (from_bson / from_bson_batch-only implementations) the
-    envelope (ok, cursor.id, ns,
-    $clusterTime, ...) is decoded with the same raw-batch machinery as
-    _OpMsg.raw_response and the batch documents are decoded via the
-    from_bson_batch hook when the class has one (one batched decode), or
-    one raw BSON slice at a time through from_bson otherwise. Replies whose
-    user documents do not live under a cursor field (command acks, distinct,
-    find_one_and_*) are decoded as plain dict envelopes.
+    The whole reply is decoded to dicts in a single pass exactly like the
+    plain-dict unpack, then the cursor.firstBatch/nextBatch documents are
+    replaced with constructed instances. Replies whose user documents do
+    not live under a cursor field (command acks, distinct, find_one_and_*)
+    are decoded as plain dict envelopes.
     """
+    dict_options = codec_options.with_options(document_class=dict)
     if not user_fields or "cursor" not in user_fields:
-        dict_options = codec_options.with_options(document_class=dict)
         return bson._decode_all_selective(payload_document, dict_options, user_fields)
-    adapter: Any = codec_options.document_class
-    from_dicts = _dict_batch_constructor(adapter, codec_options)
-    if from_dicts is not None:
-        dict_options = codec_options.with_options(document_class=dict)
-        dict_envelope = bson._decode_all_selective(payload_document, dict_options, user_fields)[0]
-        dict_cursor = dict_envelope.get("cursor")
-        if dict_cursor:
-            for key in ("firstBatch", "nextBatch"):
-                batch = dict_cursor.get(key)
-                if batch is not None:
-                    dict_cursor[key] = from_dicts(batch)
-        return [dict_envelope]
-    envelope: Any = bson._decode_selective(
-        RawBSONDocument(payload_document), user_fields, _RAW_ARRAY_BSON_OPTIONS
-    )
-    cursor = envelope.get("cursor")
-    if cursor:
+    dict_envelope = bson._decode_all_selective(payload_document, dict_options, user_fields)[0]
+    dict_cursor = dict_envelope.get("cursor")
+    if dict_cursor:
+        from_bson = codec_options.document_class.from_bson
         for key in ("firstBatch", "nextBatch"):
-            batch = cursor.get(key)
-            if batch is None:
-                continue
-            cursor[key] = _decode_typed_batch(
-                adapter, bson._array_of_documents_to_buffer(batch), codec_options
-            )
-    return [envelope]
+            batch = dict_cursor.get(key)
+            if batch is not None:
+                dict_cursor[key] = [from_bson(doc, codec_options) for doc in batch]
+    return [dict_envelope]
 
 
 class _OpMsg:

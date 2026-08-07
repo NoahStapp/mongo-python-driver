@@ -528,7 +528,7 @@ def validate_document_class(option: str, value: Any) -> Any:
                 "bson.raw_bson.RawBSONDocument, or a "
                 "subclass of collections.MutableMapping. It may also be a "
                 "dataclass, a pydantic v2 model, or a class implementing "
-                "the from_bson protocol"
+                "the from_bson hook"
             )
         return resolved
     return value

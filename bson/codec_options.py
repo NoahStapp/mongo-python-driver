@@ -396,7 +396,7 @@ else:
                         "bson.raw_bson.RawBSONDocument, or a "
                         "subclass of collections.abc.MutableMapping. It may "
                         "also be a dataclass, a pydantic v2 model, or a "
-                        "class implementing the from_bson protocol"
+                        "class implementing the from_bson hook"
                     )
                 doc_class = resolved
             if not isinstance(tz_aware, bool):
