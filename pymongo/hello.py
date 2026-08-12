@@ -25,7 +25,7 @@ from typing import Any, Generic, Optional
 from bson.objectid import ObjectId
 from pymongo import common
 from pymongo.server_type import SERVER_TYPE
-from pymongo.typings import ClusterTime, _DocumentType
+from pymongo.typings import ClusterTime, _MappingDocumentType
 
 
 def _get_server_type(doc: Mapping[str, Any]) -> int:
@@ -64,7 +64,7 @@ class HelloCompat:
     LEGACY_ERROR = "not master"
 
 
-class Hello(Generic[_DocumentType]):
+class Hello(Generic[_MappingDocumentType]):
     """Parse a hello response from the server.
 
     .. versionadded:: 3.12
@@ -72,9 +72,9 @@ class Hello(Generic[_DocumentType]):
 
     __slots__ = ("_awaitable", "_doc", "_is_readable", "_is_writable", "_server_type")
 
-    def __init__(self, doc: _DocumentType, awaitable: bool = False) -> None:
+    def __init__(self, doc: _MappingDocumentType, awaitable: bool = False) -> None:
         self._server_type = _get_server_type(doc)
-        self._doc: _DocumentType = doc
+        self._doc: _MappingDocumentType = doc
         self._is_writable = self._server_type in (
             SERVER_TYPE.RSPrimary,
             SERVER_TYPE.Standalone,
@@ -86,7 +86,7 @@ class Hello(Generic[_DocumentType]):
         self._awaitable = awaitable
 
     @property
-    def document(self) -> _DocumentType:
+    def document(self) -> _MappingDocumentType:
         """The complete hello command response document.
 
         .. versionadded:: 3.4

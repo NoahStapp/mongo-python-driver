@@ -876,13 +876,16 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         .. versionadded:: 3.0
         """
         common.validate_is_document_type("document", document)
-        if not (isinstance(document, RawBSONDocument) or "_id" in document):
-            document["_id"] = ObjectId()  # type: ignore[index]
+        # validate_is_document_type ensures document is a mutable mapping or
+        # RawBSONDocument (typed document classes are decode-only).
+        doc = cast("Union[MutableMapping[str, Any], RawBSONDocument]", document)
+        if not (isinstance(doc, RawBSONDocument) or "_id" in doc):
+            doc["_id"] = ObjectId()
 
         write_concern = self._write_concern_for(session)
         return InsertOneResult(
             self._insert_one(
-                document,
+                doc,
                 ordered=True,
                 write_concern=write_concern,
                 op_id=None,
@@ -956,11 +959,15 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
             """A generator that validates documents and handles _ids."""
             for document in documents:
                 common.validate_is_document_type("document", document)
-                if not isinstance(document, RawBSONDocument):
-                    if "_id" not in document:
-                        document["_id"] = ObjectId()  # type: ignore[index]
-                    inserted_ids.append(document["_id"])
-                yield (message._INSERT, document)
+                # validate_is_document_type ensures document is a mutable
+                # mapping or RawBSONDocument (typed document classes are
+                # decode-only).
+                doc = cast("Union[MutableMapping[str, Any], RawBSONDocument]", document)
+                if not isinstance(doc, RawBSONDocument):
+                    if "_id" not in doc:
+                        doc["_id"] = ObjectId()
+                    inserted_ids.append(doc["_id"])
+                yield (message._INSERT, doc)
 
         write_concern = self._write_concern_for(session)
         blk = _Bulk(self, ordered, bypass_document_validation, comment=comment)

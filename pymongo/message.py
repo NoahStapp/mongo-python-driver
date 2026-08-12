@@ -1131,6 +1131,33 @@ def _batched_write_command_impl(
     return to_send, length
 
 
+def _unpack_typed_response(
+    payload_document: bytes | memoryview,
+    codec_options: CodecOptions[Any],
+    user_fields: Optional[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Decode an OP_MSG reply whose document_class implements from_bson.
+
+    The whole reply is decoded to dicts in a single pass exactly like the
+    plain-dict unpack, then the cursor.firstBatch/nextBatch documents are
+    replaced with constructed instances. Replies whose user documents do
+    not live under a cursor field (command acks, distinct, find_one_and_*)
+    are decoded as plain dict envelopes.
+    """
+    dict_options = codec_options._dict_options
+    if not user_fields or "cursor" not in user_fields:
+        return bson._decode_all_selective(payload_document, dict_options, user_fields)
+    dict_envelope = bson._decode_all_selective(payload_document, dict_options, user_fields)[0]
+    dict_cursor = dict_envelope.get("cursor")
+    if dict_cursor:
+        from_bson = codec_options._document_adapter.from_bson
+        for key in ("firstBatch", "nextBatch"):
+            batch = dict_cursor.get(key)
+            if batch is not None:
+                dict_cursor[key] = [from_bson(doc, codec_options) for doc in batch]
+    return [dict_envelope]
+
+
 class _OpMsg:
     """A MongoDB OP_MSG response message."""
 
@@ -1180,6 +1207,8 @@ class _OpMsg:
         """
         # If _OpMsg is in-use, this cannot be a legacy response.
         assert not legacy_response
+        if codec_options.document_class is not dict and codec_options._document_adapter is not None:
+            return _unpack_typed_response(self.payload_document, codec_options, user_fields)
         return bson._decode_all_selective(self.payload_document, codec_options, user_fields)
 
     def command_response(self, codec_options: CodecOptions[Any]) -> dict[str, Any]:

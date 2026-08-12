@@ -136,7 +136,7 @@ from bson.tz_util import utc
 # Import some modules for type-checking only.
 if TYPE_CHECKING:
     from bson.raw_bson import RawBSONDocument
-    from bson.typings import _DocumentType, _ReadableBuffer
+    from bson.typings import _MappingDocumentType, _ReadableBuffer
 
 try:
     from bson import _cbson  # type: ignore[attr-defined]
@@ -613,14 +613,14 @@ def _elements_to_dict(
     return result
 
 
-def _bson_to_dict(data: Any, opts: CodecOptions[_DocumentType]) -> _DocumentType:
+def _bson_to_dict(data: Any, opts: CodecOptions[_MappingDocumentType]) -> _MappingDocumentType:
     """Decode a BSON string to document_class."""
     data, view = get_data_and_view(data)
     try:
         if _raw_document_class(opts.document_class):
             return opts.document_class(data, opts)  # type:ignore[call-arg]
         _, end = _get_object_size(data, 0, len(data))
-        return cast("_DocumentType", _elements_to_dict(data, view, 4, end, opts))
+        return cast("_MappingDocumentType", _elements_to_dict(data, view, 4, end, opts))
     except InvalidBSON:
         raise
     except Exception:
@@ -1053,12 +1053,14 @@ def decode(data: _ReadableBuffer, codec_options: None = None) -> dict[str, Any]:
 
 
 @overload
-def decode(data: _ReadableBuffer, codec_options: CodecOptions[_DocumentType]) -> _DocumentType: ...
+def decode(
+    data: _ReadableBuffer, codec_options: CodecOptions[_MappingDocumentType]
+) -> _MappingDocumentType: ...
 
 
 def decode(
-    data: _ReadableBuffer, codec_options: Optional[CodecOptions[_DocumentType]] = None
-) -> Union[dict[str, Any], _DocumentType]:
+    data: _ReadableBuffer, codec_options: Optional[CodecOptions[_MappingDocumentType]] = None
+) -> Union[dict[str, Any], _MappingDocumentType]:
     """Decode BSON to a document.
 
     By default, returns a BSON document represented as a Python
@@ -1087,14 +1089,16 @@ def decode(
     if not isinstance(opts, CodecOptions):
         raise _CODEC_OPTIONS_TYPE_ERROR
 
-    return cast("Union[dict[str, Any], _DocumentType]", _bson_to_dict(data, opts))
+    return cast("Union[dict[str, Any], _MappingDocumentType]", _bson_to_dict(data, opts))
 
 
-def _decode_all(data: _ReadableBuffer, opts: CodecOptions[_DocumentType]) -> list[_DocumentType]:
+def _decode_all(
+    data: _ReadableBuffer, opts: CodecOptions[_MappingDocumentType]
+) -> list[_MappingDocumentType]:
     """Decode a BSON data to multiple documents."""
     data, view = get_data_and_view(data)
     data_len = len(data)
-    docs: list[_DocumentType] = []
+    docs: list[_MappingDocumentType] = []
     position = 0
     end = data_len - 1
     use_raw = _raw_document_class(opts.document_class)
@@ -1132,13 +1136,13 @@ def decode_all(data: _ReadableBuffer, codec_options: None = None) -> list[dict[s
 
 @overload
 def decode_all(
-    data: _ReadableBuffer, codec_options: CodecOptions[_DocumentType]
-) -> list[_DocumentType]: ...
+    data: _ReadableBuffer, codec_options: CodecOptions[_MappingDocumentType]
+) -> list[_MappingDocumentType]: ...
 
 
 def decode_all(
-    data: _ReadableBuffer, codec_options: Optional[CodecOptions[_DocumentType]] = None
-) -> Union[list[dict[str, Any]], list[_DocumentType]]:
+    data: _ReadableBuffer, codec_options: Optional[CodecOptions[_MappingDocumentType]] = None
+) -> Union[list[dict[str, Any]], list[_MappingDocumentType]]:
     """Decode BSON data to multiple documents.
 
     `data` must be a bytes-like object implementing the buffer protocol that
@@ -1170,12 +1174,12 @@ def decode_all(
 
 
 def _decode_selective(
-    rawdoc: Any, fields: Any, codec_options: CodecOptions[_DocumentType]
-) -> _DocumentType:
+    rawdoc: Any, fields: Any, codec_options: CodecOptions[_MappingDocumentType]
+) -> _MappingDocumentType:
     if _raw_document_class(codec_options.document_class):
         # If document_class is RawBSONDocument, use vanilla dictionary for
         # decoding command response.
-        doc: _DocumentType = {}  # type:ignore[assignment]
+        doc: _MappingDocumentType = {}  # type:ignore[assignment]
     else:
         # Else, use the specified document_class.
         doc = codec_options.document_class()
@@ -1234,8 +1238,8 @@ def _convert_raw_document_lists_to_streams(document: Any) -> None:
 
 
 def _decode_all_selective(
-    data: Any, codec_options: CodecOptions[_DocumentType], fields: Any
-) -> list[_DocumentType]:
+    data: Any, codec_options: CodecOptions[_MappingDocumentType], fields: Any
+) -> list[_MappingDocumentType]:
     """Decode BSON data to a single document while using user-provided
     custom decoding logic.
 
@@ -1284,13 +1288,13 @@ def decode_iter(data: bytes, codec_options: None = None) -> Iterator[dict[str, A
 
 @overload
 def decode_iter(
-    data: bytes, codec_options: CodecOptions[_DocumentType]
-) -> Iterator[_DocumentType]: ...
+    data: bytes, codec_options: CodecOptions[_MappingDocumentType]
+) -> Iterator[_MappingDocumentType]: ...
 
 
 def decode_iter(
-    data: bytes, codec_options: Optional[CodecOptions[_DocumentType]] = None
-) -> Union[Iterator[dict[str, Any]], Iterator[_DocumentType]]:
+    data: bytes, codec_options: Optional[CodecOptions[_MappingDocumentType]] = None
+) -> Union[Iterator[dict[str, Any]], Iterator[_MappingDocumentType]]:
     """Decode BSON data to multiple documents as a generator.
 
     Works similarly to the decode_all function, but yields one document at a
@@ -1331,14 +1335,14 @@ def decode_file_iter(
 
 @overload
 def decode_file_iter(
-    file_obj: Union[BinaryIO, IO[bytes]], codec_options: CodecOptions[_DocumentType]
-) -> Iterator[_DocumentType]: ...
+    file_obj: Union[BinaryIO, IO[bytes]], codec_options: CodecOptions[_MappingDocumentType]
+) -> Iterator[_MappingDocumentType]: ...
 
 
 def decode_file_iter(
     file_obj: Union[BinaryIO, IO[bytes]],
-    codec_options: Optional[CodecOptions[_DocumentType]] = None,
-) -> Union[Iterator[dict[str, Any]], Iterator[_DocumentType]]:
+    codec_options: Optional[CodecOptions[_MappingDocumentType]] = None,
+) -> Union[Iterator[dict[str, Any]], Iterator[_MappingDocumentType]]:
     """Decode bson data from a file to multiple documents as a generator.
 
     Works similarly to the decode_all function, but reads from the file object

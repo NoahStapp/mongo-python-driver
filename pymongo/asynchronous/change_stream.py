@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Generic, Optional, Union
+from typing import TYPE_CHECKING, Any, Generic, Optional, Union, cast
 
 from bson import CodecOptions, _bson_to_dict
 from bson.raw_bson import RawBSONDocument
@@ -432,7 +432,10 @@ class AsyncChangeStream(Generic[_DocumentType]):
         self._start_at_operation_time = None
 
         if self._decode_custom:
-            return _bson_to_dict(change.raw, self._orig_codec_options)
+            # Typed document classes are not supported together with a custom
+            # type registry; this re-decode instantiates document_class as a
+            # mapping.
+            return _bson_to_dict(change.raw, cast("CodecOptions[Any]", self._orig_codec_options))
         return change
 
     async def __aenter__(self) -> AsyncChangeStream[_DocumentType]:

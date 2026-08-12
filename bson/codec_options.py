@@ -21,6 +21,7 @@ import datetime
 import enum
 from collections.abc import Iterable, Mapping
 from collections.abc import MutableMapping as _MutableMapping
+from functools import cached_property
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -32,6 +33,7 @@ from typing import (
     cast,
 )
 
+from bson.adapters import _resolve_document_class
 from bson.binary import (
     ALL_UUID_REPRESENTATIONS,
     UUID_REPRESENTATION_NAMES,
@@ -264,6 +266,9 @@ if TYPE_CHECKING:
         # CodecOptions API
         def with_options(self, **kwargs: Any) -> CodecOptions[Any]: ...
 
+        _document_adapter: Any
+        _dict_options: CodecOptions[dict[str, Any]]
+
         def _arguments_repr(self) -> str: ...
 
         # NamedTuple API
@@ -322,7 +327,9 @@ else:
 
             :param document_class: BSON documents returned in queries will be decoded
                 to an instance of this class. Must be a subclass of
-                :class:`~collections.abc.MutableMapping`. Defaults to :class:`dict`.
+                :class:`~collections.abc.MutableMapping`, a dataclass, a pydantic v2
+                model, or a class implementing the ``from_bson`` hook. Defaults to
+                :class:`dict`.
             :param tz_aware: If ``True``, BSON datetimes will be decoded to timezone
                 aware instances of :class:`~datetime.datetime`. Otherwise they will be
                 naive. Defaults to ``False``.
@@ -388,11 +395,14 @@ else:
             except TypeError:
                 is_mapping = False
             if not (is_mapping or _raw_document_class(doc_class)):
-                raise TypeError(
-                    "document_class must be dict, bson.son.SON, "
-                    "bson.raw_bson.RawBSONDocument, or a "
-                    "subclass of collections.abc.MutableMapping"
-                )
+                if _resolve_document_class(doc_class) is None:
+                    raise TypeError(
+                        "document_class must be dict, bson.son.SON, "
+                        "bson.raw_bson.RawBSONDocument, or a "
+                        "subclass of collections.abc.MutableMapping. It may "
+                        "also be a dataclass, a pydantic v2 model, or a "
+                        "class implementing the from_bson hook"
+                    )
             if not isinstance(tz_aware, bool):
                 raise TypeError(f"tz_aware must be True or False, was: tz_aware={tz_aware}")
             if uuid_representation not in ALL_UUID_REPRESENTATIONS:
@@ -430,6 +440,21 @@ else:
                     datetime_conversion,
                 ),
             )
+
+        @cached_property
+        def _document_adapter(self) -> Any:
+            """The from_bson implementation for this document_class, or None
+            for mapping classes."""
+            return _resolve_document_class(self.document_class)
+
+        @cached_property
+        def _dict_options(self) -> CodecOptions:
+            """This CodecOptions with document_class=dict, used to decode the
+            reply envelope on the typed document path.
+
+            Skipping re-validation is safe since dict is always a valid document_class and every other field is unchanged.
+            """
+            return self._replace(document_class=dict)
 
         def _arguments_repr(self) -> str:
             """Representation of the arguments used to create this object."""
