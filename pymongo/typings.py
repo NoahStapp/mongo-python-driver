@@ -25,7 +25,12 @@ from typing import (
     Union,
 )
 
-from bson.typings import _DocumentOut, _DocumentType, _DocumentTypeArg
+from bson.typings import (
+    _DocumentOut,
+    _DocumentType,
+    _DocumentTypeArg,
+    _MappingDocumentType,
+)
 
 if TYPE_CHECKING:
     from pymongo.asynchronous.bulk import _AsyncBulk
@@ -72,6 +77,7 @@ __all__ = [
     "_DocumentOut",
     "_DocumentType",
     "_DocumentTypeArg",
+    "_MappingDocumentType",
     "_Pipeline",
     "strip_optional",
 ]

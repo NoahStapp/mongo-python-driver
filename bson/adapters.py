@@ -29,6 +29,7 @@ Plain dataclasses and pydantic v2 models are automatically handled by the driver
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import sys
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -78,10 +79,48 @@ class _DataclassAdapter(_DocumentAdapter):
         return self.document_type(**doc)
 
 
+def _pydantic_field_consumes_id(field: Any) -> bool:
+    """Return True if a pydantic Field consumes the top-level ``_id`` document key."""
+    alias = field.validation_alias if field.validation_alias is not None else field.alias
+    if isinstance(alias, str):
+        return alias == "_id"
+    # AliasChoices has .choices and AliasPath has .path; an AliasPath consumes
+    # the document key that is its first element.
+    choices = getattr(alias, "choices", None)
+    if choices is not None:
+        return any(
+            choice == "_id" or getattr(choice, "path", [None])[0] == "_id" for choice in choices
+        )
+    path = getattr(alias, "path", None)
+    return bool(path and path[0] == "_id")
+
+
 class _PydanticAdapter(_DocumentAdapter):
-    """Decodes BSON into a pydantic v2 model via ``model_validate``."""
+    """Decodes BSON into a pydantic v2 model via ``model_validate``.
+
+    The model must alias the ``_id`` field or use an extra to opt out of strict decoding.
+    """
+
+    def __init__(self, document_type: type[Any]) -> None:
+        super().__init__(document_type)
+        extra = document_type.model_config.get("extra")
+        if extra is None and not any(
+            _pydantic_field_consumes_id(field) for field in document_type.model_fields.values()
+        ):
+            raise TypeError(
+                f"pydantic model {document_type.__name__!r} has no field aliased to '_id' and "
+                "does not set 'extra' in model_config, so decoded documents would silently "
+                "lose their '_id' key. Map the key explicitly, e.g. "
+                "id: ObjectId = Field(alias='_id'), or opt out of strict decoding with "
+                "model_config = ConfigDict(extra='ignore')"
+            )
+        self._extra: Optional[str] = None
+        if extra is None and "extra" in inspect.signature(document_type.model_validate).parameters:
+            self._extra = "forbid"
 
     def from_bson(self, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> Any:
+        if self._extra is not None:
+            return self.document_type.model_validate(doc, extra=self._extra)
         return self.document_type.model_validate(doc)
 
 

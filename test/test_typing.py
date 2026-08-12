@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -55,6 +56,24 @@ else:
     Movie = dict
     ImplicitMovie = dict
     NotRequired = None
+
+
+@dataclass
+class MovieDC:
+    name: str
+    year: int
+
+
+class MovieFromBson:
+    _type_marker = 102
+
+    def __init__(self, name: str, year: int) -> None:
+        self.name = name
+        self.year = year
+
+    @classmethod
+    def from_bson(cls, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> MovieFromBson:
+        return cls(name=doc["name"], year=doc["year"])
 
 
 try:
@@ -613,6 +632,34 @@ class TestCodecOptionsDocumentType(unittest.TestCase):
         options = CodecOptions(SON[str, Any])
         obj = options.document_class()
         obj["a"] = 1
+
+
+class TestTypedDocumentClass(unittest.TestCase):
+    @only_type_check
+    def test_dataclass_document_type(self) -> None:
+        options: CodecOptions[MovieDC] = CodecOptions(document_class=MovieDC)
+        assert options.document_class is MovieDC
+        client: MongoClient[MovieDC] = MongoClient(document_class=MovieDC)
+        coll: Collection[MovieDC] = client.test.test
+        retrieved = coll.find_one({"_id": "foo"})
+        assert retrieved is not None
+        assert retrieved.year == 1971
+
+    @only_type_check
+    def test_from_bson_document_type(self) -> None:
+        options: CodecOptions[MovieFromBson] = CodecOptions(document_class=MovieFromBson)
+        assert options.document_class is MovieFromBson
+        client: MongoClient[MovieFromBson] = MongoClient(document_class=MovieFromBson)
+        coll: Collection[MovieFromBson] = client.test.test
+        retrieved = coll.find_one({"_id": "foo"})
+        assert retrieved is not None
+        assert retrieved.name == "THX-1138"
+
+    @only_type_check
+    def test_dataclass_cursor_iteration(self) -> None:
+        client: MongoClient[MovieDC] = MongoClient(document_class=MovieDC)
+        movies: list[MovieDC] = list(client.test.test.find())
+        assert movies[0].name == "THX-1138"
 
 
 class TestBSONFromVectorType(unittest.TestCase):

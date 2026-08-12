@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import datetime
+import inspect
 import sys
 import types
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from typing import Any
 from unittest import mock
@@ -31,6 +33,7 @@ from bson.adapters import (
     _BSON_DESERIALIZABLE_MARKER,
     _bson_deserializable_class,
     _DataclassAdapter,
+    _DocumentAdapter,
     _PydanticAdapter,
     _resolve_document_class,
 )
@@ -73,9 +76,11 @@ class NotADocumentClass:
 
 
 try:
-    from pydantic import BaseModel, ConfigDict, Field, ValidationError
+    from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
     _HAVE_PYDANTIC = True
+    # model_validate accepts a runtime `extra` argument from pydantic 2.12.
+    _PYDANTIC_RUNTIME_EXTRA = "extra" in inspect.signature(BaseModel.model_validate).parameters
 
     class UserModel(BaseModel):
         model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
@@ -85,6 +90,7 @@ try:
 
 except ImportError:
     _HAVE_PYDANTIC = False
+    _PYDANTIC_RUNTIME_EXTRA = False
 
 
 class TestDocumentClassResolution(AsyncUnitTest):
@@ -136,6 +142,8 @@ class TestDocumentClassResolution(AsyncUnitTest):
         fake_pydantic = types.ModuleType("pydantic")
 
         class FakeBaseModel:
+            model_config = {"extra": "ignore"}
+
             @classmethod
             def model_validate(cls, obj: Any) -> Any:
                 return obj
@@ -153,10 +161,13 @@ class TestDocumentClassResolution(AsyncUnitTest):
 
 class TestAdapters(AsyncUnitTest):
     def test_adapter_eq_hash_repr(self):
+        class OtherAdapter(_DocumentAdapter):
+            pass
+
         a, b = _DataclassAdapter(UserDC), _DataclassAdapter(UserDC)
         self.assertEqual(a, b)
         self.assertEqual(hash(a), hash(b))
-        self.assertNotEqual(a, _PydanticAdapter(UserDC))
+        self.assertNotEqual(a, OtherAdapter(UserDC))
         self.assertIn("UserDC", repr(a))
 
     def test_dataclass_extra_keys_raise_type_error(self):
@@ -202,6 +213,8 @@ class TestAdapters(AsyncUnitTest):
         self.assertEqual(user, UserDC(oid, "Ada", 36))
 
         class FakeModel:
+            model_config = {"extra": "ignore"}
+
             @classmethod
             def model_validate(cls, obj: Any) -> Any:
                 return ("validated", obj["name"])
@@ -210,6 +223,84 @@ class TestAdapters(AsyncUnitTest):
             _PydanticAdapter(FakeModel).from_bson({"name": "x"}, CodecOptions()),
             ("validated", "x"),
         )
+
+
+@unittest.skipUnless(_HAVE_PYDANTIC, "pydantic v2 is not installed")
+class TestPydanticAdapterContract(AsyncUnitTest):
+    """The _id / unknown-key contract for pydantic models (PYTHON-4192 finding #9).
+
+    Pydantic cannot declare ``_id`` as a plain field (leading underscore means
+    private attribute), so a model must either map the ``_id`` document key
+    through a field alias or opt out of strict decoding explicitly.
+    """
+
+    def test_model_without_id_mapping_rejected(self):
+        class Natural(BaseModel):
+            name: str
+            age: int
+
+        with self.assertRaisesRegex(TypeError, "aliased to '_id'"):
+            CodecOptions(document_class=Natural)
+
+    def test_explicit_extra_ignore_opts_out(self):
+        class Lenient(BaseModel):
+            model_config = ConfigDict(extra="ignore")
+            name: str
+
+        opts = CodecOptions(document_class=Lenient)
+        doc = opts._document_adapter.from_bson({"_id": ObjectId(), "name": "x"}, opts)
+        self.assertEqual(doc, Lenient(name="x"))
+
+    def test_explicit_extra_allow_preserves_id(self):
+        class Open(BaseModel):
+            model_config = ConfigDict(extra="allow")
+            name: str
+
+        opts = CodecOptions(document_class=Open)
+        oid = ObjectId()
+        doc = opts._document_adapter.from_bson({"_id": oid, "name": "x"}, opts)
+        self.assertEqual(doc.model_extra, {"_id": oid})
+
+    def test_aliased_model_decodes_id(self):
+        opts = CodecOptions(document_class=UserModel)
+        oid = ObjectId()
+        user = opts._document_adapter.from_bson({"_id": oid, "name": "x", "age": 1}, opts)
+        self.assertEqual(user.id, oid)
+
+    @unittest.skipUnless(_PYDANTIC_RUNTIME_EXTRA, "requires pydantic >= 2.12")
+    def test_unknown_keys_rejected_by_default(self):
+        opts = CodecOptions(document_class=UserModel)
+        with self.assertRaises(ValidationError):
+            opts._document_adapter.from_bson(
+                {"_id": ObjectId(), "name": "x", "age": 1, "stray": True}, opts
+            )
+
+    def test_explicit_extra_config_beats_default_strictness(self):
+        class Lenient(BaseModel):
+            model_config = ConfigDict(arbitrary_types_allowed=True, extra="ignore")
+            id: ObjectId = Field(alias="_id")
+            name: str
+
+        opts = CodecOptions(document_class=Lenient)
+        doc = opts._document_adapter.from_bson(
+            {"_id": ObjectId(), "name": "x", "stray": True}, opts
+        )
+        self.assertEqual(doc.name, "x")
+
+    def test_validation_alias_forms_recognized(self):
+        class ViaValidationAlias(BaseModel):
+            model_config = ConfigDict(arbitrary_types_allowed=True)
+            ident: ObjectId = Field(validation_alias="_id")
+
+        class ViaAliasChoices(BaseModel):
+            model_config = ConfigDict(arbitrary_types_allowed=True)
+            ident: ObjectId = Field(validation_alias=AliasChoices("_id", "ident"))
+
+        for model in (ViaValidationAlias, ViaAliasChoices):
+            with self.subTest(model=model.__name__):
+                opts = CodecOptions(document_class=model)
+                self.assertIs(opts.document_class, model)
+                self.assertIsInstance(opts._document_adapter, _PydanticAdapter)
 
 
 class TestFromBsonHook(AsyncUnitTest):
@@ -267,7 +358,7 @@ class TestUnpackTypedResponseSinglePass(AsyncUnitTest):
         return encode({"cursor": cursor, "ok": 1.0})
 
     def test_batch_documents_constructed(self):
-        opts = CodecOptions(document_class=UserDC)  # type: ignore[type-var]
+        opts = CodecOptions(document_class=UserDC)
         (envelope,) = _unpack_typed_response(self._payload(), opts, self.USER_FIELDS)
         self.assertEqual(
             envelope["cursor"]["firstBatch"],
@@ -278,7 +369,7 @@ class TestUnpackTypedResponseSinglePass(AsyncUnitTest):
         # Non-user envelope fields must decode like the plain-dict path:
         # nested documents (e.g. postBatchResumeToken) come back as dicts,
         # not RawBSONDocument.
-        opts = CodecOptions(document_class=UserDC)  # type: ignore[type-var]
+        opts = CodecOptions(document_class=UserDC)
         payload = self._payload(postBatchResumeToken={"_data": "abc"})
         (envelope,) = _unpack_typed_response(payload, opts, self.USER_FIELDS)
         token = envelope["cursor"]["postBatchResumeToken"]
@@ -295,7 +386,7 @@ class TestUnpackTypedResponseSinglePass(AsyncUnitTest):
         self.assertEqual(envelope["cursor"]["atTime"], when)
 
     def test_next_batch_constructed(self):
-        opts = CodecOptions(document_class=UserDC)  # type: ignore[type-var]
+        opts = CodecOptions(document_class=UserDC)
         payload = encode(
             {"cursor": {"nextBatch": self.batch, "id": Int64(0), "ns": "db.coll"}, "ok": 1.0}
         )
@@ -305,15 +396,15 @@ class TestUnpackTypedResponseSinglePass(AsyncUnitTest):
         self.assertIsInstance(batch[0], UserDC)
 
     def test_from_bson_class_takes_single_pass(self):
-        opts = CodecOptions(document_class=ProtocolDoc)  # type: ignore[type-var]
+        opts = CodecOptions(document_class=ProtocolDoc)
         (envelope,) = _unpack_typed_response(self._payload(), opts, self.USER_FIELDS)
         docs = envelope["cursor"]["firstBatch"]
         self.assertEqual([doc.fields["age"] for doc in docs], [0, 1])
         self.assertIsInstance(docs[0], ProtocolDoc)
 
     def test_hook_called_once_per_batch_document(self):
-        opts = CodecOptions(document_class=UserDC)  # type: ignore[type-var]
-        adapter = opts.document_class
+        opts = CodecOptions(document_class=UserDC)
+        adapter = opts._document_adapter
         with mock.patch.object(adapter, "from_bson", wraps=adapter.from_bson) as dict_hook:
             _unpack_typed_response(self._payload(), opts, self.USER_FIELDS)
         self.assertEqual(dict_hook.call_count, len(self.batch))
@@ -331,7 +422,7 @@ class TestUnpackTypedResponseSinglePass(AsyncUnitTest):
                 seen.append(codec_options)
                 return cls(doc)
 
-        opts = CodecOptions(document_class=CapturingDoc)  # type: ignore[type-var]
+        opts = CodecOptions(document_class=CapturingDoc)
         _unpack_typed_response(self._payload(), opts, self.USER_FIELDS)
         self.assertEqual(len(seen), len(self.batch))
         for received in seen:
@@ -340,16 +431,65 @@ class TestUnpackTypedResponseSinglePass(AsyncUnitTest):
 
 class TestCodecOptionsGate(AsyncUnitTest):
     def test_dataclass_document_class(self):
-        opts = CodecOptions(document_class=UserDC)  # type: ignore[type-var]
-        self.assertIsInstance(opts.document_class, _DataclassAdapter)
-        self.assertIs(opts.document_class.document_type, UserDC)
+        opts = CodecOptions(document_class=UserDC)
+        self.assertIs(opts.document_class, UserDC)
+        self.assertIsInstance(opts._document_adapter, _DataclassAdapter)
+        self.assertIs(opts._document_adapter.document_type, UserDC)
 
     def test_protocol_document_class(self):
-        opts = CodecOptions(document_class=ProtocolDoc)  # type: ignore[type-var]
+        opts = CodecOptions(document_class=ProtocolDoc)
         self.assertIs(opts.document_class, ProtocolDoc)
+        self.assertIs(opts._document_adapter, ProtocolDoc)
+
+    def test_document_class_supports_mapping_introspection(self):
+        # The public attribute holds the user's class, so mapping checks
+        # answer False instead of raising on an adapter instance.
+        opts = CodecOptions(document_class=UserDC)
+        self.assertFalse(issubclass(opts.document_class, MutableMapping))
+
+    def test_document_adapter_is_memoized(self):
+        opts = CodecOptions(document_class=UserDC)
+        self.assertIs(opts._document_adapter, opts._document_adapter)
+
+    def test_document_adapter_none_for_mapping_classes(self):
+        self.assertIsNone(CodecOptions()._document_adapter)
+        self.assertIsNone(CodecOptions(document_class=SON)._document_adapter)
+        self.assertIsNone(CodecOptions(document_class=RawBSONDocument)._document_adapter)
+
+    def test_document_adapter_survives_replace(self):
+        # _replace/_make bypass __new__, so the adapter must resolve lazily.
+        opts = CodecOptions(document_class=UserDC)._replace(tz_aware=True)
+        self.assertIsInstance(opts._document_adapter, _DataclassAdapter)
+
+    def test_adapter_resolved_lazily_and_memoized(self):
+        # __new__ resolves the adapter once for validation only; the first
+        # _document_adapter access resolves it again and caches it, so
+        # repeated access on the per-reply hot path costs no resolution.
+        import bson.codec_options as codec_options_mod
+
+        with mock.patch.object(
+            codec_options_mod,
+            "_resolve_document_class",
+            wraps=_resolve_document_class,
+        ) as resolve:
+            opts = CodecOptions(document_class=UserDC)
+            self.assertEqual(resolve.call_count, 1)
+            self.assertIsInstance(opts._document_adapter, _DataclassAdapter)
+            self.assertEqual(resolve.call_count, 2)
+            self.assertIsInstance(opts._document_adapter, _DataclassAdapter)
+            self.assertEqual(resolve.call_count, 2)
+
+    def test_dict_options_memoized(self):
+        opts = CodecOptions(document_class=UserDC, tz_aware=True)
+        dict_options = opts._dict_options
+        self.assertIs(dict_options.document_class, dict)
+        self.assertEqual(dict_options, opts.with_options(document_class=dict))
+        # Memoized: the typed unpack path reads this on every reply.
+        self.assertIs(opts._dict_options, dict_options)
 
     def test_unsupported_class_still_raises(self):
         with self.assertRaisesRegex(TypeError, "document_class must be dict"):
+            # The static rejection matches the runtime one.
             CodecOptions(document_class=NotADocumentClass)  # type: ignore[type-var]
 
     def test_marker_without_hook_rejected_at_construction(self):
@@ -357,15 +497,17 @@ class TestCodecOptionsGate(AsyncUnitTest):
             _type_marker = _BSON_DESERIALIZABLE_MARKER
 
         with self.assertRaisesRegex(TypeError, "does not implement from_bson"):
+            # The static rejection matches the runtime one.
             CodecOptions(document_class=HooklessDoc)  # type: ignore[type-var]
 
     def test_equality_and_repr(self):
         self.assertEqual(CodecOptions(document_class=UserDC), CodecOptions(document_class=UserDC))
         self.assertNotEqual(CodecOptions(document_class=UserDC), CodecOptions())
-        self.assertIn("UserDC", repr(CodecOptions(document_class=UserDC)))  # type: ignore[type-var]
+        self.assertIn("UserDC", repr(CodecOptions(document_class=UserDC)))
+        self.assertNotIn("Adapter", repr(CodecOptions(document_class=UserDC)))
 
     def test_with_options_round_trip(self):
-        opts = CodecOptions(document_class=UserDC)  # type: ignore[type-var]
+        opts = CodecOptions(document_class=UserDC)
         self.assertEqual(opts.with_options(tz_aware=True).document_class, opts.document_class)
         self.assertIs(opts.with_options(document_class=dict).document_class, dict)
 
@@ -375,8 +517,7 @@ class TestCodecOptionsGate(AsyncUnitTest):
         self.assertIs(CodecOptions(document_class=RawBSONDocument).document_class, RawBSONDocument)
 
     def test_validate_document_class_accepts_dataclass(self):
-        resolved = validate_document_class("document_class", UserDC)
-        self.assertIsInstance(resolved, _DataclassAdapter)
+        self.assertIs(validate_document_class("document_class", UserDC), UserDC)
         self.assertIs(validate_document_class("document_class", ProtocolDoc), ProtocolDoc)
         self.assertIs(validate_document_class("document_class", dict), dict)
         with self.assertRaisesRegex(TypeError, "document_class must be dict"):
@@ -384,9 +525,10 @@ class TestCodecOptionsGate(AsyncUnitTest):
 
     def test_client_document_class_kwarg(self):
         client = self.simple_client(connect=False, document_class=UserDC)
-        self.assertIsInstance(client.codec_options.document_class, _DataclassAdapter)
-        # Client repr must not crash with an adapter document_class.
-        repr(client)
+        self.assertIs(client.codec_options.document_class, UserDC)
+        # Client repr prints the user's class, not the private adapter.
+        self.assertIn("UserDC", repr(client))
+        self.assertNotIn("Adapter", repr(client))
 
 
 class TestTypedDocumentClassIntegration(AsyncIntegrationTest):
@@ -445,9 +587,9 @@ class TestTypedDocumentClassIntegration(AsyncIntegrationTest):
         await coll.drop()
         when = datetime.datetime(2026, 7, 22, 12, 0, 0)
         await coll.insert_one({"_id": ObjectId(), "when": when})
-        event = await self.db.get_collection(  # type: ignore[type-var]
+        event = await self.db.get_collection(
             "typed_events",
-            codec_options=CodecOptions(document_class=Event),  # type: ignore[type-var]
+            codec_options=CodecOptions(document_class=Event),
         ).find_one()
         self.assertIsInstance(event._id, ObjectId)
         self.assertIsInstance(event.when, datetime.datetime)
@@ -456,9 +598,9 @@ class TestTypedDocumentClassIntegration(AsyncIntegrationTest):
     async def test_getmore_envelope_across_batches(self):
         listener = OvertCommandListener()
         client = await self.async_rs_or_single_client(event_listeners=[listener])
-        coll = client.pymongo_test.get_collection(  # type: ignore[type-var]
+        coll = client.pymongo_test.get_collection(
             "typed_docs",
-            codec_options=CodecOptions(document_class=UserDC),  # type: ignore[type-var]
+            codec_options=CodecOptions(document_class=UserDC),
         )
         users = await coll.find(batch_size=3).to_list()
         self.assertEqual(len(users), 10)

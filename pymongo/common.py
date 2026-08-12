@@ -521,8 +521,7 @@ def validate_document_class(option: str, value: Any) -> Any:
     except TypeError:
         is_raw = False
     if not is_mapping and not is_raw:
-        resolved = _resolve_document_class(value)
-        if resolved is None:
+        if _resolve_document_class(value) is None:
             raise TypeError(
                 f"{option} must be dict, bson.son.SON, "
                 "bson.raw_bson.RawBSONDocument, or a "
@@ -530,7 +529,6 @@ def validate_document_class(option: str, value: Any) -> Any:
                 "dataclass, a pydantic v2 model, or a class implementing "
                 "the from_bson hook"
             )
-        return resolved
     return value
 
 

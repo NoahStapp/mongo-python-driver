@@ -37,7 +37,6 @@ from typing import (
 
 import bson
 from bson import CodecOptions, _dict_to_bson, _make_c_string
-from bson.adapters import _bson_deserializable_class
 from bson.raw_bson import (
     _RAW_ARRAY_BSON_OPTIONS,
     DEFAULT_RAW_BSON_OPTIONS,
@@ -1145,13 +1144,13 @@ def _unpack_typed_response(
     not live under a cursor field (command acks, distinct, find_one_and_*)
     are decoded as plain dict envelopes.
     """
-    dict_options = codec_options.with_options(document_class=dict)
+    dict_options = codec_options._dict_options
     if not user_fields or "cursor" not in user_fields:
         return bson._decode_all_selective(payload_document, dict_options, user_fields)
     dict_envelope = bson._decode_all_selective(payload_document, dict_options, user_fields)[0]
     dict_cursor = dict_envelope.get("cursor")
     if dict_cursor:
-        from_bson = codec_options.document_class.from_bson
+        from_bson = codec_options._document_adapter.from_bson
         for key in ("firstBatch", "nextBatch"):
             batch = dict_cursor.get(key)
             if batch is not None:
@@ -1208,7 +1207,7 @@ class _OpMsg:
         """
         # If _OpMsg is in-use, this cannot be a legacy response.
         assert not legacy_response
-        if _bson_deserializable_class(codec_options.document_class):
+        if codec_options.document_class is not dict and codec_options._document_adapter is not None:
             return _unpack_typed_response(self.payload_document, codec_options, user_fields)
         return bson._decode_all_selective(self.payload_document, codec_options, user_fields)
 

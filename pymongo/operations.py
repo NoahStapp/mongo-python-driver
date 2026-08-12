@@ -401,7 +401,7 @@ class ReplaceOne(Generic[_DocumentType]):
         """Add this operation to the _AsyncBulk/_Bulk instance `bulkobj`."""
         bulkobj.add_replace(
             self._filter,
-            self._doc,
+            self._doc,  # type: ignore[arg-type]
             self._upsert,
             collation=validate_collation_or_none(self._collation),
             hint=self._hint,
@@ -417,7 +417,7 @@ class ReplaceOne(Generic[_DocumentType]):
         bulkobj.add_replace(
             self._namespace,
             self._filter,
-            self._doc,
+            self._doc,  # type: ignore[arg-type]
             self._upsert,
             collation=validate_collation_or_none(self._collation),
             hint=self._hint,
