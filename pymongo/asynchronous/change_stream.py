@@ -128,14 +128,21 @@ class AsyncChangeStream(Generic[_DocumentType]):
         validate_collation_or_none(collation)
         common.validate_non_negative_integer_or_none("batchSize", batch_size)
 
+        options = target.codec_options
+        if options._document_adapter is not None:
+            # Change stream documents are driver-defined envelopes
+            # (operationType, fullDocument, ...) that a typed
+            # document_class cannot describe; decode them as dicts.
+            options = cast("CodecOptions[_DocumentType]", options._dict_options)
+            target = target.with_options(codec_options=options)  # type: ignore
         self._decode_custom = False
-        self._orig_codec_options: CodecOptions[_DocumentType] = target.codec_options
-        if target.codec_options.type_registry._decoder_map:
+        self._orig_codec_options: CodecOptions[_DocumentType] = options
+        if options.type_registry._decoder_map:
             self._decode_custom = True
             # Keep the type registry so that we support encoding custom types
             # in the pipeline.
             self._target = target.with_options(  # type: ignore
-                codec_options=target.codec_options.with_options(document_class=RawBSONDocument)
+                codec_options=options.with_options(document_class=RawBSONDocument)
             )
         else:
             self._target = target
@@ -432,9 +439,9 @@ class AsyncChangeStream(Generic[_DocumentType]):
         self._start_at_operation_time = None
 
         if self._decode_custom:
-            # Typed document classes are not supported together with a custom
-            # type registry; this re-decode instantiates document_class as a
-            # mapping.
+            # Re-decode the raw change document so custom type decoders
+            # apply. _orig_codec_options is always mapping-based: a typed
+            # document_class was replaced with dict in __init__.
             return _bson_to_dict(change.raw, cast("CodecOptions[Any]", self._orig_codec_options))
         return change
 

@@ -38,7 +38,11 @@ from pymongo.asynchronous.change_stream import AsyncDatabaseChangeStream
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.asynchronous.command_cursor import AsyncCommandCursor
 from pymongo.common import _ecoc_coll_name, _esc_coll_name
-from pymongo.database_shared import _check_name, _CodecDocumentType
+from pymongo.database_shared import (
+    _check_command_codec_options,
+    _check_name,
+    _CodecDocumentType,
+)
 from pymongo.errors import CollectionInvalid, InvalidOperation
 from pymongo.operations import _Op
 from pymongo.read_preferences import ReadPreference, _ServerMode
@@ -700,9 +704,15 @@ class AsyncDatabase(common.BaseObject, Generic[_DocumentType]):
         .. _aggregate command:
             https://mongodb.com/docs/manual/reference/command/aggregate
         """
+        database = self
+        if database.codec_options._document_adapter is not None:
+            # Database-level pipelines ($currentOp, $listLocalSessions, ...)
+            # return server metadata documents, never this database's user
+            # documents; they must not decode into a typed document_class.
+            database = database.with_options(codec_options=database.codec_options._dict_options)
         async with self.client._tmp_session(session) as s:
             cmd = _DatabaseAggregationCommand(
-                self,
+                database,
                 AsyncCommandCursor,
                 pipeline,
                 kwargs,
@@ -877,7 +887,8 @@ class AsyncDatabase(common.BaseObject, Generic[_DocumentType]):
             Otherwise, defaults to
             :attr:`~pymongo.read_preferences.ReadPreference.PRIMARY`.
         :param codec_options: A :class:`~bson.codec_options.CodecOptions`
-            instance.
+            instance. Must use a mapping ``document_class``; typed document
+            classes raise :exc:`TypeError`.
         :param session: A
             :class:`~pymongo.asynchronous.client_session.AsyncClientSession`.
         :param comment: A user-provided comment to attach to this
@@ -913,6 +924,7 @@ class AsyncDatabase(common.BaseObject, Generic[_DocumentType]):
 
         .. seealso:: The MongoDB documentation on `commands <https://dochub.mongodb.org/core/commands>`_.
         """
+        _check_command_codec_options(codec_options, "command")
         opts = codec_options or DEFAULT_CODEC_OPTIONS
         if comment is not None:
             kwargs["comment"] = comment
@@ -983,7 +995,8 @@ class AsyncDatabase(common.BaseObject, Generic[_DocumentType]):
           Otherwise, defaults to
           :attr:`~pymongo.read_preferences.ReadPreference.PRIMARY`.
         :param codec_options: A :class:`~bson.codec_options.CodecOptions`
-          instance.
+          instance. Must use a mapping ``document_class``; typed document
+          classes raise :exc:`TypeError`.
         :param session: A
           :class:`~pymongo.asynchronous.client_session.AsyncClientSession`.
         :param comment: A user-provided comment to attach to future getMores for this
@@ -1007,6 +1020,7 @@ class AsyncDatabase(common.BaseObject, Generic[_DocumentType]):
 
         .. seealso:: The MongoDB documentation on `commands <https://dochub.mongodb.org/core/commands>`_.
         """
+        _check_command_codec_options(codec_options, "cursor_command")
         if isinstance(command, str):
             command_name = command
         else:
@@ -1014,6 +1028,12 @@ class AsyncDatabase(common.BaseObject, Generic[_DocumentType]):
 
         async with self._client._tmp_session(session) as tmp_session:
             opts = codec_options or DEFAULT_CODEC_OPTIONS
+            cursor_codec_options = self.codec_options
+            if cursor_codec_options._document_adapter is not None:
+                # cursor_command does not obey this database's codec_options
+                # (see docstring); getMore replies must not decode into a
+                # typed document_class.
+                cursor_codec_options = cursor_codec_options._dict_options
             if read_preference is None:
                 read_preference = (
                     tmp_session and tmp_session._txn_read_preference()
@@ -1036,7 +1056,9 @@ class AsyncDatabase(common.BaseObject, Generic[_DocumentType]):
                     session=session,
                     **kwargs,
                 )
-                coll = self.get_collection("$cmd", read_preference=read_preference)
+                coll = self.get_collection(
+                    "$cmd", read_preference=read_preference, codec_options=cursor_codec_options
+                )
                 if response.get("cursor"):
                     cmd_cursor = AsyncCommandCursor(
                         coll,
@@ -1087,9 +1109,16 @@ class AsyncDatabase(common.BaseObject, Generic[_DocumentType]):
         **kwargs: Any,
     ) -> AsyncCommandCursor[MutableMapping[str, Any]]:
         """Internal listCollections helper."""
+        codec_options = self.codec_options
+        if codec_options._document_adapter is not None:
+            # listCollections returns collection-info documents that a typed
+            # document_class cannot describe; decode them as dicts.
+            codec_options = codec_options._dict_options
         coll = cast(
             AsyncCollection[MutableMapping[str, Any]],
-            self.get_collection("$cmd", read_preference=read_preference),
+            self.get_collection(
+                "$cmd", read_preference=read_preference, codec_options=codec_options
+            ),
         )
         cmd = {"listCollections": 1, "cursor": {}}
         cmd.update(kwargs)

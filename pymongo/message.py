@@ -1158,6 +1158,18 @@ def _unpack_typed_response(
     return [dict_envelope]
 
 
+def _decode_command_reply(
+    payload_document: bytes | memoryview,
+    codec_options: CodecOptions[Any],
+    user_fields: Optional[Mapping[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    """Decode one raw OP_MSG command reply, routing typed document
+    classes through the from_bson unpack."""
+    if codec_options.document_class is not dict and codec_options._document_adapter is not None:
+        return _unpack_typed_response(payload_document, codec_options, user_fields)
+    return bson._decode_all_selective(payload_document, codec_options, user_fields)
+
+
 class _OpMsg:
     """A MongoDB OP_MSG response message."""
 
@@ -1207,9 +1219,7 @@ class _OpMsg:
         """
         # If _OpMsg is in-use, this cannot be a legacy response.
         assert not legacy_response
-        if codec_options.document_class is not dict and codec_options._document_adapter is not None:
-            return _unpack_typed_response(self.payload_document, codec_options, user_fields)
-        return bson._decode_all_selective(self.payload_document, codec_options, user_fields)
+        return _decode_command_reply(self.payload_document, codec_options, user_fields)
 
     def command_response(self, codec_options: CodecOptions[Any]) -> dict[str, Any]:
         """Unpack a command response."""

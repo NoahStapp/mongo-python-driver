@@ -46,12 +46,16 @@ from typing import (
     cast,
 )
 
-from bson import _decode_all_selective
 from pymongo import _csot, _op_id, helpers_shared, message
 from pymongo._telemetry import _CommandTelemetry
 from pymongo.compression_support import _NO_COMPRESSION
 from pymongo.errors import NotPrimaryError, OperationFailure
-from pymongo.message import _BulkWriteContextBase, _convert_exception, _OpMsg
+from pymongo.message import (
+    _BulkWriteContextBase,
+    _convert_exception,
+    _decode_command_reply,
+    _OpMsg,
+)
 from pymongo.monitoring import _is_speculative_authenticate
 
 if TYPE_CHECKING:
@@ -218,9 +222,7 @@ async def _run_command(
 
     if client and client._encrypter and reply and decrypt_reply:
         decrypted = await client._encrypter.decrypt(reply.raw_command_response())
-        docs = cast(
-            "list[dict[str, Any]]", _decode_all_selective(decrypted, codec_options, user_fields)
-        )
+        docs = _decode_command_reply(cast(bytes, decrypted), codec_options, user_fields)
 
     return docs, reply, telemetry.duration
 

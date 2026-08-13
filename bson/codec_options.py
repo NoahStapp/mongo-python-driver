@@ -394,15 +394,19 @@ else:
                 is_mapping = issubclass(check_class, _MutableMapping)
             except TypeError:
                 is_mapping = False
-            if not (is_mapping or _raw_document_class(doc_class)):
-                if _resolve_document_class(doc_class) is None:
-                    raise TypeError(
-                        "document_class must be dict, bson.son.SON, "
-                        "bson.raw_bson.RawBSONDocument, or a "
-                        "subclass of collections.abc.MutableMapping. It may "
-                        "also be a dataclass, a pydantic v2 model, or a "
-                        "class implementing the from_bson hook"
-                    )
+            # Resolve unconditionally: a mapping class carrying the typed
+            # decoding marker but no from_bson hook must fail here, not on
+            # the first decoded reply.
+            if _resolve_document_class(doc_class) is None and not (
+                is_mapping or _raw_document_class(doc_class)
+            ):
+                raise TypeError(
+                    "document_class must be dict, bson.son.SON, "
+                    "bson.raw_bson.RawBSONDocument, or a "
+                    "subclass of collections.abc.MutableMapping. It may "
+                    "also be a dataclass, a pydantic v2 model, or a "
+                    "class implementing the from_bson hook"
+                )
             if not isinstance(tz_aware, bool):
                 raise TypeError(f"tz_aware must be True or False, was: tz_aware={tz_aware}")
             if uuid_representation not in ALL_UUID_REPRESENTATIONS:

@@ -322,6 +322,12 @@ class JSONOptions(_BASE_CLASS):
                 "NUMBERLONG, or ISO8601 from DatetimeRepresentation."
             )
         self = cast(JSONOptions, super().__new__(cls, *args, **kwargs))
+        if self._document_adapter is not None:
+            raise TypeError(
+                "JSONOptions.document_class must be dict or a subclass of "
+                "collections.abc.MutableMapping; typed document classes are "
+                "only supported when decoding MongoDB command replies"
+            )
         if json_mode not in (JSONMode.LEGACY, JSONMode.RELAXED, JSONMode.CANONICAL):
             raise ValueError(
                 "JSONOptions.json_mode must be one of LEGACY, RELAXED, or CANONICAL from JSONMode."

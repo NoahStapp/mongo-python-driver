@@ -161,4 +161,8 @@ def _grid_out_property(field_name: str, docstring: str) -> Any:
 def _clear_entity_type_registry(entity: Any, **kwargs: Any) -> Any:
     """Clear the given database/collection object's type registry."""
     codecopts = entity.codec_options.with_options(type_registry=None)
+    if codecopts._document_adapter is not None:
+        # GridFS files and chunks documents are driver metadata that a
+        # typed document_class cannot describe; decode them as dicts.
+        codecopts = codecopts._dict_options
     return entity.with_options(codec_options=codecopts, **kwargs)

@@ -18,17 +18,18 @@ from __future__ import annotations
 
 import datetime
 import inspect
+import io
 import sys
 import types
 from collections.abc import MutableMapping
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from typing import Any, Optional
 from unittest import mock
 
 sys.path[0:0] = [""]
 
 import bson
-from bson import encode
+from bson import encode, json_util
 from bson.adapters import (
     _BSON_DESERIALIZABLE_MARKER,
     _bson_deserializable_class,
@@ -38,11 +39,17 @@ from bson.adapters import (
     _PydanticAdapter,
     _resolve_document_class,
 )
-from bson.codec_options import CodecOptions
+from bson.binary import Binary
+from bson.codec_options import CodecOptions, TypeDecoder, TypeRegistry
+from bson.decimal128 import Decimal128
 from bson.int64 import Int64
 from bson.objectid import ObjectId
 from bson.raw_bson import RawBSONDocument
 from bson.son import SON
+from gridfs.asynchronous import AsyncGridFSBucket
+from gridfs.grid_file_shared import _clear_entity_type_registry
+from pymongo.asynchronous.change_stream import AsyncCollectionChangeStream
+from pymongo.asynchronous.command_cursor import AsyncCommandCursor
 from pymongo.common import validate_document_class
 from pymongo.errors import OperationFailure
 from pymongo.message import _unpack_typed_response
@@ -118,6 +125,14 @@ try:
         name: str
         age: int
 
+    class AutoIdUserModel(BaseModel):
+        """A round-trip-capable model whose ``_id`` defaults to None."""
+
+        model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+        id: Optional[ObjectId] = Field(alias="_id", default=None)
+        name: str
+        age: int
+
 except ImportError:
     _HAVE_PYDANTIC = False
     _PYDANTIC_RUNTIME_EXTRA = False
@@ -133,6 +148,17 @@ class TestDocumentClassResolution(AsyncUnitTest):
 
         with self.assertRaisesRegex(TypeError, "does not implement from_bson"):
             _resolve_document_class(HooklessDoc)
+
+    def test_marker_class_with_only_to_bson_rejected(self):
+        class EncodeOnlyDoc:
+            _type_marker = _BSON_DESERIALIZABLE_MARKER
+
+            @classmethod
+            def to_bson(cls, doc: Any, codec_options: CodecOptions[Any]) -> dict[str, Any]:
+                return {}
+
+        with self.assertRaisesRegex(TypeError, "does not implement from_bson"):
+            CodecOptions(document_class=EncodeOnlyDoc)  # type: ignore[type-var]
 
     def test_dataclass_wrapped_in_adapter(self):
         resolved = _resolve_document_class(UserDC)
@@ -317,6 +343,96 @@ class TestPydanticAdapterContract(AsyncUnitTest):
         )
         self.assertEqual(doc.name, "x")
 
+    def test_extra_forbid_without_id_mapping_rejected(self):
+        # extra='forbid' with no _id alias would make every decode raise
+        # ValidationError on the reply's '_id' key; rejected at construction
+        # exactly like the implicit-strict (extra unset) case.
+        class Strict(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            x: int
+
+        with self.assertRaisesRegex(TypeError, "extra='forbid'"):
+            _PydanticAdapter(Strict)
+        with self.assertRaisesRegex(TypeError, "extra='forbid'"):
+            CodecOptions(document_class=Strict)
+
+    def test_extra_forbid_with_id_mapping_allowed(self):
+        # extra='forbid' plus an _id alias is the intended strict setup: known
+        # keys decode, unknown keys still raise.
+        class StrictWithId(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            id: Optional[int] = Field(alias="_id", default=None)
+            x: int
+
+        adapter = _PydanticAdapter(StrictWithId)
+        self.assertEqual(adapter.from_bson({"_id": 1, "x": 2}, CodecOptions()).id, 1)
+        with self.assertRaises(ValidationError):
+            adapter.from_bson({"_id": 1, "x": 2, "stray": 3}, CodecOptions())
+
+    def test_implicit_strict_decode_requires_validate_extra_kwarg(self):
+        # On pydantic < 2.12 model_validate has no extra= argument, so the
+        # driver cannot enforce strict decoding: unknown wire keys would be
+        # silently dropped, then deleted by a read-modify-replace. A model
+        # relying on implicit strictness is rejected at construction instead.
+        class Old(BaseModel):
+            id: Optional[int] = Field(alias="_id", default=None)
+
+            @classmethod
+            def model_validate(cls, obj: Any) -> Any:  # the pydantic < 2.12 signature
+                return super().model_validate(obj)
+
+        with self.assertRaisesRegex(TypeError, "pydantic"):
+            _PydanticAdapter(Old)
+        with self.assertRaisesRegex(TypeError, "pydantic"):
+            CodecOptions(document_class=Old)
+
+    def test_explicit_extra_works_without_validate_extra_kwarg(self):
+        # An explicit extra policy is enforced by pydantic itself on every
+        # version, so it must keep working without the extra= kwarg.
+        class OldLenient(BaseModel):
+            model_config = ConfigDict(extra="ignore")
+            name: str
+
+        class OldLenientCompat(OldLenient):
+            @classmethod
+            def model_validate(cls, obj: Any) -> Any:
+                return super().model_validate(obj)
+
+        adapter = _PydanticAdapter(OldLenientCompat)
+        doc = adapter.from_bson({"_id": 1, "name": "x", "junk": 2}, CodecOptions())
+        self.assertEqual(doc.name, "x")
+
+    def test_to_bson_strips_none_id(self):
+        adapter = _PydanticAdapter(AutoIdUserModel)
+        self.assertEqual(
+            adapter.to_bson(AutoIdUserModel(name="ada", age=1), CodecOptions()),
+            {"name": "ada", "age": 1},
+        )
+        oid = ObjectId()
+        self.assertEqual(
+            adapter.to_bson(AutoIdUserModel(id=oid, name="ada", age=1), CodecOptions()),
+            {"_id": oid, "name": "ada", "age": 1},
+        )
+
+    def test_validation_only_id_alias_cannot_write(self):
+        class ViaValidationAlias(BaseModel):
+            model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+            ident: ObjectId = Field(validation_alias="_id")
+
+        opts = CodecOptions(document_class=ViaValidationAlias)
+        model = ViaValidationAlias(ident=ObjectId())
+        with self.assertRaisesRegex(TypeError, "validation-only alias"):
+            _convert_typed_document(model, opts)
+
+    def test_serialization_alias_id_round_trips(self):
+        class Symmetric(BaseModel):
+            model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+            ident: ObjectId = Field(validation_alias="_id", serialization_alias="_id")
+
+        adapter = _PydanticAdapter(Symmetric)
+        oid = ObjectId()
+        self.assertEqual(adapter.to_bson(Symmetric(ident=oid), CodecOptions()), {"_id": oid})
+
     def test_validation_alias_forms_recognized(self):
         class ViaValidationAlias(BaseModel):
             model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -408,6 +524,39 @@ class TestConvertTypedDocument(AsyncUnitTest):
         with self.assertRaisesRegex(TypeError, "does not implement to_bson"):
             _convert_typed_document(ProtocolDoc({"x": 1}), opts)
 
+    def test_protocol_class_with_own_document_type_attribute(self):
+        # An ODM-style protocol class may use `document_type` for its own
+        # purposes (a collection name, a related class); dispatch must not
+        # mistake the attribute for the adapter contract: isinstance() against
+        # a string crashes, against an unrelated class silently skips to_bson.
+        class Unrelated:
+            pass
+
+        for attr in ("movies", Unrelated):
+            with self.subTest(document_type=attr):
+
+                class Movie:
+                    _type_marker = _BSON_DESERIALIZABLE_MARKER
+                    document_type = attr
+
+                    def __init__(self, title: str) -> None:
+                        self.title = title
+
+                    @classmethod
+                    def from_bson(
+                        cls, doc: dict[str, Any], codec_options: CodecOptions[Any]
+                    ) -> Movie:
+                        return cls(doc["title"])
+
+                    @classmethod
+                    def to_bson(
+                        cls, doc: Movie, codec_options: CodecOptions[Any]
+                    ) -> dict[str, Any]:
+                        return {"title": doc.title}
+
+                opts = CodecOptions(document_class=Movie)
+                self.assertEqual(_convert_typed_document(Movie("Alien"), opts), {"title": "Alien"})
+
 
 class TestToBsonHook(AsyncUnitTest):
     """Semantics of the adapters' to_bson hook."""
@@ -440,6 +589,54 @@ class TestToBsonHook(AsyncUnitTest):
         # The dumped document must survive wire encoding.
         encode(dumped)
 
+    def test_dataclass_to_bson_converts_dataclasses_in_containers(self):
+        @dataclass
+        class Item:
+            label: str
+
+        @dataclass
+        class Box:
+            _id: ObjectId
+            items: list[Item]
+            by_name: dict[str, Item]
+            pair: tuple[Item, Item]
+
+        oid = ObjectId()
+        box = Box(oid, [Item("a")], {"b": Item("b")}, (Item("c"), Item("d")))
+        dumped = _DataclassAdapter(Box).to_bson(box, CodecOptions())
+        self.assertEqual(
+            dumped,
+            {
+                "_id": oid,
+                "items": [{"label": "a"}],
+                "by_name": {"b": {"label": "b"}},
+                # Tuples dump as lists; both encode to BSON arrays.
+                "pair": [{"label": "c"}, {"label": "d"}],
+            },
+        )
+        encode(dumped)
+
+    def test_dataclass_to_bson_shares_leaf_values(self):
+        # Unlike dataclasses.asdict, leaf values are returned by reference,
+        # never deep-copied: the BSON encoder only reads the dumped document,
+        # and copying values like a large Binary payload would dominate the
+        # cost of a write.
+        @dataclass
+        class Blob:
+            _id: ObjectId
+            payload: Binary
+            created: datetime.datetime
+
+        blob = Blob(
+            ObjectId(),
+            Binary(b"x" * 1024),
+            datetime.datetime.now(datetime.timezone.utc),
+        )
+        dumped = _DataclassAdapter(Blob).to_bson(blob, CodecOptions())
+        self.assertIs(dumped["_id"], blob._id)
+        self.assertIs(dumped["payload"], blob.payload)
+        self.assertIs(dumped["created"], blob.created)
+
     def test_dataclass_without_id_field_rejected(self):
         # A dataclass with no _id field would write documents its own
         # from_bson could never read back, so it is rejected up front.
@@ -451,6 +648,44 @@ class TestToBsonHook(AsyncUnitTest):
             _DataclassAdapter(NoIdDC)
         with self.assertRaisesRegex(TypeError, "_id"):
             CodecOptions(document_class=NoIdDC)
+
+    def test_dataclass_with_init_false_field_rejected(self):
+        # to_bson writes every dataclass field, but from_bson calls cls(**doc),
+        # which cannot accept an init=False field: every decode would crash.
+        @dataclass
+        class Metered:
+            _id: Optional[ObjectId] = None
+            total: int = field(init=False, default=0)
+
+        with self.assertRaisesRegex(TypeError, "init=False"):
+            _DataclassAdapter(Metered)
+        with self.assertRaisesRegex(TypeError, "init=False"):
+            CodecOptions(document_class=Metered)
+
+    def test_dataclass_with_required_init_only_arg_rejected(self):
+        # A required InitVar is demanded by cls(**doc) but never stored in
+        # documents, so every decode would crash.
+        @dataclass
+        class Seeded:
+            seed: InitVar[int]
+            _id: Optional[ObjectId] = None
+
+        with self.assertRaisesRegex(TypeError, "init-only"):
+            _DataclassAdapter(Seeded)
+        with self.assertRaisesRegex(TypeError, "init-only"):
+            CodecOptions(document_class=Seeded)
+
+    def test_dataclass_with_defaulted_init_var_allowed(self):
+        # An InitVar with a default round-trips: to_bson never writes it and
+        # cls(**doc) falls back to the default on decode.
+        @dataclass
+        class Tunable:
+            _id: Optional[ObjectId] = None
+            scale: InitVar[int] = 1
+
+        adapter = _DataclassAdapter(Tunable)
+        oid = ObjectId()
+        self.assertEqual(adapter.from_bson({"_id": oid}, CodecOptions()), Tunable(_id=oid))
 
     @unittest.skipUnless(_HAVE_PYDANTIC, "pydantic v2 is not installed")
     def test_pydantic_to_bson_dumps_wire_names(self):
@@ -623,6 +858,28 @@ class TestCodecOptionsGate(AsyncUnitTest):
             # The static rejection matches the runtime one.
             CodecOptions(document_class=HooklessDoc)  # type: ignore[type-var]
 
+    def test_mapping_with_marker_but_no_hook_rejected_at_construction(self):
+        # A mapping class would otherwise pass the mapping check here and
+        # only blow up on the first decoded reply, deep in the message layer.
+        class HooklessMap(dict):
+            _type_marker = _BSON_DESERIALIZABLE_MARKER
+
+        with self.assertRaisesRegex(TypeError, "does not implement from_bson"):
+            CodecOptions(document_class=HooklessMap)
+
+    def test_mapping_with_marker_and_hook_opts_into_typed_decoding(self):
+        # Documents current semantics: a mapping class carrying the marker
+        # and hook takes the typed decode path, not the mapping one.
+        class MarkedMap(dict):
+            _type_marker = _BSON_DESERIALIZABLE_MARKER
+
+            @classmethod
+            def from_bson(cls, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> MarkedMap:
+                return cls(doc)
+
+        opts = CodecOptions(document_class=MarkedMap)
+        self.assertIs(opts._document_adapter, MarkedMap)
+
     def test_equality_and_repr(self):
         self.assertEqual(CodecOptions(document_class=UserDC), CodecOptions(document_class=UserDC))
         self.assertNotEqual(CodecOptions(document_class=UserDC), CodecOptions())
@@ -717,6 +974,16 @@ class TestTypedDocumentClassIntegration(AsyncIntegrationTest):
         self.assertIsInstance(event._id, ObjectId)
         self.assertIsInstance(event.when, datetime.datetime)
         self.assertEqual(event.when, when)
+
+    async def test_database_aggregate_decodes_as_dicts(self):
+        # Database-level pipelines return server metadata documents, which
+        # must not decode into the typed document_class.
+        client = await self.async_rs_or_single_client(document_class=UserDC)
+        cursor = await client.admin.aggregate([{"$currentOp": {}}])
+        ops = await cursor.to_list()
+        self.assertTrue(ops)
+        for op in ops:
+            self.assertIsInstance(op, dict)
 
     async def test_getmore_envelope_across_batches(self):
         listener = OvertCommandListener()
@@ -973,6 +1240,204 @@ class TestPydanticWriteIntegration(AsyncIntegrationTest):
         self.assertEqual(result.modified_count, 1)
         user = await self.typed.find_one({"_id": oid})
         self.assertEqual(user.age, 37)
+
+    async def test_insert_one_generates_id_when_none(self):
+        typed = self.db.get_collection(
+            "typed_writes_pydantic", codec_options=CodecOptions(document_class=AutoIdUserModel)
+        )
+        result = await typed.insert_one(AutoIdUserModel(name="Ada", age=36))
+        self.assertIsInstance(result.inserted_id, ObjectId)
+        user = await typed.find_one({"_id": result.inserted_id})
+        self.assertEqual(user.name, "Ada")
+
+
+class _ToDecimalDecoder(TypeDecoder):
+    bson_type = Decimal128
+
+    def transform_bson(self, value: Decimal128) -> Any:
+        return value.to_decimal()
+
+
+class TestTypedChangeStreamUnit(AsyncUnitTest):
+    def _change_stream(self, coll):
+        # (target, pipeline, full_document, resume_after, max_await_time_ms,
+        #  batch_size, collation, start_at_operation_time, session, start_after)
+        return AsyncCollectionChangeStream(
+            coll, None, None, None, None, None, None, None, None, None
+        )
+
+    async def test_typed_document_class_is_replaced_with_dict(self):
+        client = self.simple_client(connect=False)
+        coll = client.db.get_collection(
+            "typed_cs", codec_options=CodecOptions(document_class=UserDC)
+        )
+        cs = self._change_stream(coll)
+        self.assertIs(cs._target.codec_options.document_class, dict)
+        self.assertIs(cs._orig_codec_options.document_class, dict)
+        self.assertFalse(cs._decode_custom)
+
+    async def test_typed_document_class_with_custom_type_registry(self):
+        client = self.simple_client(connect=False)
+        codec_options = CodecOptions(
+            document_class=UserDC, type_registry=TypeRegistry([_ToDecimalDecoder()])
+        )
+        coll = client.db.get_collection("typed_cs", codec_options=codec_options)
+        cs = self._change_stream(coll)
+        # The custom-type-registry path re-decodes each raw change document
+        # with _orig_codec_options, which must not be typed.
+        self.assertTrue(cs._decode_custom)
+        self.assertIs(cs._orig_codec_options.document_class, dict)
+        self.assertIs(cs._target.codec_options.document_class, RawBSONDocument)
+
+
+class TestTypedChangeStream(AsyncIntegrationTest):
+    @async_client_context.require_change_streams
+    async def test_watch_with_typed_document_class_yields_dict_envelopes(self):
+        coll = self.db.get_collection("typed_cs", codec_options=CodecOptions(document_class=UserDC))
+        await coll.drop()
+        oid = ObjectId()
+        async with await coll.watch(max_await_time_ms=250) as stream:
+            await coll.insert_one({"_id": oid, "name": "ada", "age": 1})
+            change = await stream.next()
+            self.assertIsInstance(change, dict)
+            self.assertEqual(change["operationType"], "insert")
+            self.assertEqual(change["fullDocument"], {"_id": oid, "name": "ada", "age": 1})
+            self.assertIsNotNone(stream.resume_token)
+
+
+class _IdentityDecryptEncrypter:
+    """Stands in for _Encrypter(bypass_auto_encryption=True); decrypt is identity."""
+
+    _bypass_auto_encryption = True
+
+    async def decrypt(self, response: bytes) -> bytes:
+        return bytes(response)
+
+    async def close(self) -> None:
+        pass
+
+
+class TestTypedDocumentAutoDecryption(AsyncIntegrationTest):
+    async def test_command_reply_decoded_typed_with_encrypter(self):
+        coll = self.db.typed_decrypt
+        await coll.drop()
+        oid = ObjectId()
+        await coll.insert_one({"_id": oid, "name": "ada", "age": 1})
+
+        client = await self.async_rs_or_single_client()
+        client._encrypter = _IdentityDecryptEncrypter()
+        typed = client[self.db.name].get_collection(
+            "typed_decrypt", codec_options=CodecOptions(document_class=UserDC)
+        )
+        cursor = await typed.aggregate([])
+        self.assertEqual(await cursor.to_list(), [UserDC(_id=oid, name="ada", age=1)])
+
+
+class TestTypedGridFS(AsyncIntegrationTest):
+    async def test_gridfs_ignores_typed_document_class(self):
+        db = self.client.get_database(
+            self.db.name, codec_options=CodecOptions(document_class=UserDC)
+        )
+        bucket = AsyncGridFSBucket(db)
+        oid = await bucket.upload_from_stream("hello.txt", b"hello world")
+        stream = await bucket.open_download_stream(oid)
+        self.assertEqual(await stream.read(), b"hello world")
+
+    async def test_clear_entity_type_registry_replaces_typed_document_class(self):
+        client = self.simple_client(connect=False)
+        coll = client.db.get_collection(
+            "fs.files", codec_options=CodecOptions(document_class=UserDC)
+        )
+        cleared = _clear_entity_type_registry(coll)
+        self.assertIs(cleared.codec_options.document_class, dict)
+
+
+class TestTypedClientBulkWrite(AsyncIntegrationTest):
+    @async_client_context.require_version_min(8, 0, 0, -24)
+    async def test_results_cursor_decodes_as_dict(self):
+        client = await self.async_rs_or_single_client(document_class=UserDC)
+        captured = []
+        real_cursor = AsyncCommandCursor
+
+        def capture(coll, *args, **kwargs):
+            captured.append(coll)
+            return real_cursor(coll, *args, **kwargs)
+
+        with mock.patch("pymongo.asynchronous.client_bulk.AsyncCommandCursor", side_effect=capture):
+            result = await client.bulk_write(
+                [InsertOne(namespace=f"{self.db.name}.typed_bulk", document={"i": 1})],
+                verbose_results=True,
+            )
+        self.assertEqual(result.inserted_count, 1)
+        self.assertEqual(len(captured), 1)
+        # getMore replies on the results cursor decode with this collection's
+        # codec options; a typed document_class cannot describe per-op results.
+        self.assertIs(captured[0].codec_options.document_class, dict)
+
+
+class TestTypedDatabaseCursors(AsyncIntegrationTest):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.typed_db = self.client.get_database(
+            self.db.name, codec_options=CodecOptions(document_class=UserDC)
+        )
+
+    async def test_list_collections_multi_batch(self):
+        await self.db.typed_lc_a.insert_one({})
+        await self.db.typed_lc_b.insert_one({})
+        names = await self.typed_db.list_collection_names(cursor={"batchSize": 1})
+        self.assertIn("typed_lc_a", names)
+        self.assertIn("typed_lc_b", names)
+
+    async def test_cursor_command_multi_batch(self):
+        coll = self.db.typed_cursor_cmd
+        await coll.drop()
+        await coll.insert_many([{"i": i} for i in range(4)])
+        cursor = await self.typed_db.cursor_command("find", coll.name, batchSize=2)
+        docs = await cursor.to_list()
+        self.assertEqual(sorted(d["i"] for d in docs), [0, 1, 2, 3])
+
+    async def test_command_rejects_typed_codec_options_param(self):
+        # command decodes its reply with the given options and has no
+        # cursor batch a typed class could describe; the requested type
+        # must fail loudly instead of silently returning dicts.
+        with self.assertRaisesRegex(TypeError, "not supported by command"):
+            # The static rejection matches the runtime one.
+            await self.db.command(
+                "ping",
+                codec_options=CodecOptions(document_class=UserDC),  # type: ignore[type-var]
+            )
+
+    async def test_cursor_command_rejects_typed_codec_options_param(self):
+        with self.assertRaisesRegex(TypeError, "not supported by cursor_command"):
+            # The static rejection matches the runtime one.
+            await self.db.cursor_command(
+                "find",
+                "typed_cursor_cmd",
+                codec_options=CodecOptions(document_class=UserDC),  # type: ignore[type-var]
+            )
+
+
+class TestStandaloneBsonRejectsTyped(AsyncUnitTest):
+    def test_standalone_decode_apis_reject_typed_options(self):
+        # The decode APIs statically reject typed options; these calls
+        # deliberately bypass mypy to pin the runtime rejection.
+        data = encode({"a": 1})
+        opts = CodecOptions(document_class=UserDC)
+        with self.assertRaisesRegex(TypeError, "mapping document_class"):
+            bson.decode(data, opts)  # type: ignore[type-var]
+        with self.assertRaisesRegex(TypeError, "mapping document_class"):
+            bson.decode_all(data, opts)  # type: ignore[type-var]
+        with self.assertRaisesRegex(TypeError, "mapping document_class"):
+            next(bson.decode_iter(data, opts))  # type: ignore[type-var]
+        with self.assertRaisesRegex(TypeError, "mapping document_class"):
+            next(bson.decode_file_iter(io.BytesIO(data), opts))  # type: ignore[type-var]
+
+
+class TestJSONOptionsRejectsTyped(AsyncUnitTest):
+    def test_json_options_rejects_typed_document_class(self):
+        with self.assertRaisesRegex(TypeError, "typed document classes"):
+            json_util.JSONOptions(document_class=UserDC)
 
 
 if __name__ == "__main__":

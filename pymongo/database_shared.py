@@ -18,9 +18,30 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, Optional, TypeVar
 
 from pymongo.errors import InvalidName
+
+if TYPE_CHECKING:
+    from bson.codec_options import CodecOptions
+
+
+def _check_command_codec_options(
+    codec_options: Optional[CodecOptions[Any]], method_name: str
+) -> None:
+    """Reject a typed document_class passed as a command method's codec_options.
+
+    Command replies have no cursor batch for a typed document_class to
+    describe, so the requested type would be silently ignored and plain
+    dicts returned; fail loudly instead.
+    """
+    if codec_options is not None and codec_options._document_adapter is not None:
+        raise TypeError(
+            f"typed document_class {codec_options.document_class!r} is not "
+            f"supported by {method_name}(); pass codec_options with a mapping "
+            "document_class, or use find()/aggregate() on a collection with a "
+            "typed document_class instead"
+        )
 
 
 def _check_name(name: str) -> None:

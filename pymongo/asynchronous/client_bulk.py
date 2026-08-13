@@ -327,9 +327,15 @@ class _AsyncClientBulk:
         if result.get("cursor"):
             if session:
                 session._leave_alive = True
+            codec_options = self.client.codec_options
+            if codec_options._document_adapter is not None:
+                # Per-operation bulkWrite results are driver metadata that a
+                # typed document_class cannot describe; decode them as dicts.
+                codec_options = codec_options._dict_options
             coll = AsyncCollection(
                 database=AsyncDatabase(self.client, "admin"),
                 name="$cmd.bulkWrite",
+                codec_options=codec_options,
             )
             cmd_cursor = AsyncCommandCursor(
                 coll,

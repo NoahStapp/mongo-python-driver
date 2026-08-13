@@ -1048,6 +1048,16 @@ def encode(
     return _dict_to_bson(document, check_keys, codec_options)
 
 
+def _reject_typed_document_class(opts: CodecOptions[Any]) -> None:
+    """Reject typed document_class options: only driver replies support from_bson."""
+    if opts._document_adapter is not None:
+        raise TypeError(
+            f"typed document_class {opts.document_class!r} is only supported when "
+            "decoding MongoDB command replies; standalone bson functions require "
+            "a mapping document_class"
+        )
+
+
 @overload
 def decode(data: _ReadableBuffer, codec_options: None = None) -> dict[str, Any]: ...
 
@@ -1088,6 +1098,7 @@ def decode(
     opts: CodecOptions[Any] = codec_options or DEFAULT_CODEC_OPTIONS
     if not isinstance(opts, CodecOptions):
         raise _CODEC_OPTIONS_TYPE_ERROR
+    _reject_typed_document_class(opts)
 
     return cast("Union[dict[str, Any], _MappingDocumentType]", _bson_to_dict(data, opts))
 
@@ -1169,6 +1180,7 @@ def decode_all(
 
     if not isinstance(codec_options, CodecOptions):
         raise _CODEC_OPTIONS_TYPE_ERROR
+    _reject_typed_document_class(codec_options)
 
     return _decode_all(data, codec_options)
 
@@ -1316,6 +1328,7 @@ def decode_iter(
     opts = codec_options or DEFAULT_CODEC_OPTIONS
     if not isinstance(opts, CodecOptions):
         raise _CODEC_OPTIONS_TYPE_ERROR
+    _reject_typed_document_class(opts)
 
     position = 0
     end = len(data) - 1
@@ -1359,6 +1372,7 @@ def decode_file_iter(
     .. versionadded:: 2.8
     """
     opts = codec_options or DEFAULT_CODEC_OPTIONS
+    _reject_typed_document_class(opts)
     while True:
         # Read size of next object.
         size_data: Any = file_obj.read(4)
