@@ -29,6 +29,7 @@ from typing import (
     Union,
 )
 
+from bson.adapters import _convert_typed_document
 from bson.objectid import ObjectId
 from bson.raw_bson import RawBSONDocument
 from pymongo import _csot, common
@@ -112,6 +113,7 @@ class _Bulk:
         self.current_run = None
         self.next_run = None
         self.is_encrypted = False
+        self._original_codec_options = collection.codec_options
 
     @property
     def bulk_ctx_class(self) -> type[_BulkWriteContext]:
@@ -125,11 +127,12 @@ class _Bulk:
 
     def add_insert(self, document: _DocumentOut) -> None:
         """Add an insert document to the list of ops."""
-        validate_is_document_type("document", document)
+        doc = _convert_typed_document(document, self._original_codec_options)
+        validate_is_document_type("document", doc)
         # Generate ObjectId client side.
-        if not (isinstance(document, RawBSONDocument) or "_id" in document):
-            document["_id"] = ObjectId()
-        self.ops.append((_INSERT, document))
+        if not (isinstance(doc, RawBSONDocument) or "_id" in doc):
+            doc["_id"] = ObjectId()
+        self.ops.append((_INSERT, doc))
 
     def add_update(
         self,
@@ -174,8 +177,9 @@ class _Bulk:
         sort: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """Create a replace document and add it to the list of ops."""
-        validate_ok_for_replace(replacement)
-        cmd: dict[str, Any] = {"q": selector, "u": replacement}
+        replacement_doc = _convert_typed_document(replacement, self._original_codec_options)
+        validate_ok_for_replace(replacement_doc)
+        cmd: dict[str, Any] = {"q": selector, "u": replacement_doc}
         if upsert is not None:
             cmd["upsert"] = upsert
         if collation is not None:

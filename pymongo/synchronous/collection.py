@@ -32,6 +32,7 @@ from typing import (
     overload,
 )
 
+from bson.adapters import _convert_typed_document
 from bson.codec_options import DEFAULT_CODEC_OPTIONS, CodecOptions
 from bson.objectid import ObjectId
 from bson.raw_bson import RawBSONDocument
@@ -875,10 +876,8 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         .. versionadded:: 3.0
         """
-        common.validate_is_document_type("document", document)
-        # validate_is_document_type ensures document is a mutable mapping or
-        # RawBSONDocument (typed document classes are decode-only).
-        doc = cast("Union[MutableMapping[str, Any], RawBSONDocument]", document)
+        doc = _convert_typed_document(document, self.codec_options)
+        common.validate_is_document_type("document", doc)
         if not (isinstance(doc, RawBSONDocument) or "_id" in doc):
             doc["_id"] = ObjectId()
 
@@ -958,11 +957,8 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
         def gen() -> Iterator[tuple[int, Mapping[str, Any]]]:
             """A generator that validates documents and handles _ids."""
             for document in documents:
-                common.validate_is_document_type("document", document)
-                # validate_is_document_type ensures document is a mutable
-                # mapping or RawBSONDocument (typed document classes are
-                # decode-only).
-                doc = cast("Union[MutableMapping[str, Any], RawBSONDocument]", document)
+                doc = _convert_typed_document(document, self.codec_options)
+                common.validate_is_document_type("document", doc)
                 if not isinstance(doc, RawBSONDocument):
                     if "_id" not in doc:
                         doc["_id"] = ObjectId()
@@ -1208,15 +1204,16 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         .. versionadded:: 3.0
         """
+        replacement_doc = _convert_typed_document(replacement, self.codec_options)
         common.validate_is_mapping("filter", filter)
-        common.validate_ok_for_replace(replacement)
+        common.validate_ok_for_replace(replacement_doc)
         if let is not None:
             common.validate_is_mapping("let", let)
         write_concern = self._write_concern_for(session)
         return UpdateResult(
             self._update_retryable(
                 filter,
-                replacement,
+                replacement_doc,
                 _Op.UPDATE,
                 upsert,
                 write_concern=write_concern,
@@ -3522,8 +3519,9 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         .. versionadded:: 3.0
         """
-        common.validate_ok_for_replace(replacement)
-        kwargs["update"] = replacement
+        replacement_doc = _convert_typed_document(replacement, self.codec_options)
+        common.validate_ok_for_replace(replacement_doc)
+        kwargs["update"] = replacement_doc
         if comment is not None:
             kwargs["comment"] = comment
         return self._find_and_modify(
@@ -3673,9 +3671,10 @@ class Collection(common.BaseObject, Generic[_DocumentType]):
 
         .. versionadded:: 3.0
         """
-        common.validate_ok_for_update(update)
+        update_doc = _convert_typed_document(update, self.codec_options)
+        common.validate_ok_for_update(update_doc)
         common.validate_list_or_none("array_filters", array_filters)
-        kwargs["update"] = update
+        kwargs["update"] = update_doc
         if comment is not None:
             kwargs["comment"] = comment
         return self._find_and_modify(

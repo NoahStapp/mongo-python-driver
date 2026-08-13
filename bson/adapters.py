@@ -31,6 +31,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import sys
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
@@ -44,6 +45,20 @@ def _bson_deserializable_class(document_class: Any) -> bool:
     return getattr(document_class, "_type_marker", None) == _BSON_DESERIALIZABLE_MARKER
 
 
+def _convert_typed_document(document: Any, codec_options: CodecOptions[Any]) -> Any:
+    if isinstance(document, Mapping):
+        return document
+    adapter = codec_options._document_adapter
+    if adapter is not None and isinstance(document, getattr(adapter, "document_type", adapter)):
+        if hasattr(adapter, "to_bson"):
+            return adapter.to_bson(document, codec_options)
+        else:
+            raise TypeError(
+                f"{getattr(adapter, 'document_type', adapter)!r} does not implement to_bson, cannot serialize to a document."
+            )
+    return document
+
+
 class _DocumentAdapter:
     """Wraps a user document type in the ``from_bson`` protocol."""
 
@@ -54,6 +69,10 @@ class _DocumentAdapter:
 
     def from_bson(self, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> Any:
         """Construct one ``document_type`` instance from a decoded document."""
+        raise NotImplementedError
+
+    def to_bson(self, doc: Any, codec_options: CodecOptions[Any]) -> Any:
+        """Convert one ``document_type`` instance into a dictionary document."""
         raise NotImplementedError
 
     def __eq__(self, other: Any) -> Any:
@@ -75,8 +94,20 @@ class _DataclassAdapter(_DocumentAdapter):
     keys fall through to field defaults.
     """
 
+    def __init__(self, document_type: type[Any]) -> None:
+        super().__init__(document_type)
+        self._field_names = [f.name for f in dataclasses.fields(document_type)]
+        if "_id" not in self._field_names:
+            raise TypeError(f"{self.document_type!r} must define an `_id` field.")
+
     def from_bson(self, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> Any:
         return self.document_type(**doc)
+
+    def to_bson(self, doc: Any, codec_options: CodecOptions[Any]) -> Any:
+        doc = dataclasses.asdict(doc)
+        if "_id" in doc and doc["_id"] is None:
+            del doc["_id"]
+        return doc
 
 
 def _pydantic_field_consumes_id(field: Any) -> bool:
@@ -123,6 +154,9 @@ class _PydanticAdapter(_DocumentAdapter):
             return self.document_type.model_validate(doc, extra=self._extra)
         return self.document_type.model_validate(doc)
 
+    def to_bson(self, doc: Any, codec_options: CodecOptions[Any]) -> Any:
+        return doc.model_dump(by_alias=True)
+
 
 def _resolve_document_class(document_class: Any) -> Optional[Any]:
     """Resolve a non-mapping document_class to a typed decoding implementation.
@@ -132,10 +166,13 @@ def _resolve_document_class(document_class: Any) -> Optional[Any]:
     Raises ``TypeError`` for pydantic v1 models.
     """
     if _bson_deserializable_class(document_class):
-        if getattr(document_class, "from_bson", None) is None:
+        if (
+            getattr(document_class, "from_bson", None) is None
+            and getattr(document_class, "to_bson", None) is None
+        ):
             raise TypeError(
                 f"{document_class!r} sets _type_marker = {_BSON_DESERIALIZABLE_MARKER} "
-                "but does not implement from_bson"
+                "but does not implement from_bson or to_bson"
             )
         return document_class
     if isinstance(document_class, type) and dataclasses.is_dataclass(document_class):

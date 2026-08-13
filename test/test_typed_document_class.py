@@ -22,7 +22,7 @@ import sys
 import types
 from collections.abc import MutableMapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 from unittest import mock
 
 sys.path[0:0] = [""]
@@ -32,6 +32,7 @@ from bson import encode
 from bson.adapters import (
     _BSON_DESERIALIZABLE_MARKER,
     _bson_deserializable_class,
+    _convert_typed_document,
     _DataclassAdapter,
     _DocumentAdapter,
     _PydanticAdapter,
@@ -45,7 +46,13 @@ from bson.son import SON
 from pymongo.common import validate_document_class
 from pymongo.errors import OperationFailure
 from pymongo.message import _unpack_typed_response
-from test import IntegrationTest, UnitTest, unittest
+from pymongo.operations import InsertOne, ReplaceOne
+from test import (
+    IntegrationTest,
+    UnitTest,
+    client_context,
+    unittest,
+)
 from test.utils_shared import OvertCommandListener
 
 _IS_SYNC = True
@@ -56,6 +63,21 @@ class UserDC:
     _id: ObjectId
     name: str
     age: int
+
+
+@dataclass
+class AutoIdDC:
+    """A round-trip-capable dataclass whose ``_id`` defaults to None."""
+
+    name: str
+    age: int
+    _id: Optional[ObjectId] = None
+
+
+@dataclass
+class OtherDC:
+    _id: ObjectId
+    color: str
 
 
 class ProtocolDoc:
@@ -69,6 +91,14 @@ class ProtocolDoc:
     @classmethod
     def from_bson(cls, doc: dict[str, Any], codec_options: CodecOptions[Any]) -> ProtocolDoc:
         return cls(doc)
+
+
+class EncodableProtocolDoc(ProtocolDoc):
+    """A protocol document class that also implements the to_bson hook."""
+
+    @classmethod
+    def to_bson(cls, doc: EncodableProtocolDoc, codec_options: CodecOptions[Any]) -> dict[str, Any]:
+        return dict(doc.fields)
 
 
 class NotADocumentClass:
@@ -337,13 +367,106 @@ class TestFromBsonHook(UnitTest):
         self.assertIsInstance(square, Square)
 
 
-class TestUnpackTypedResponseSinglePass(UnitTest):
-    """Reply unpacking for typed document classes.
+class TestConvertTypedDocument(UnitTest):
+    """Write-path conversion of typed document instances into documents."""
 
-    The reply is decoded to dicts in a single pass exactly like the
-    plain-dict path (envelope included) and the batch documents are
-    replaced with constructed instances.
-    """
+    def test_mappings_pass_through_unchanged(self):
+        # Mappings never convert, even with a typed adapter configured.
+        opts = CodecOptions(document_class=UserDC)
+        for doc in ({"x": 1}, SON([("x", 1)]), RawBSONDocument(encode({"x": 1}))):
+            with self.subTest(type=type(doc).__name__):
+                self.assertIs(_convert_typed_document(doc, opts), doc)
+
+    def test_typed_instance_converted_to_document(self):
+        oid = ObjectId()
+        opts = CodecOptions(document_class=UserDC)
+        converted = _convert_typed_document(UserDC(oid, "Ada", 36), opts)
+        self.assertEqual(converted, {"_id": oid, "name": "Ada", "age": 36})
+
+    def test_no_adapter_returns_document_unchanged(self):
+        # Untyped codec options never convert; downstream validation rejects.
+        user = UserDC(ObjectId(), "Ada", 36)
+        self.assertIs(_convert_typed_document(user, CodecOptions()), user)
+
+    def test_unrelated_instance_not_converted(self):
+        # Only document_type instances are encoded: an instance of a
+        # different (even encodable) class passes through for validation
+        # to reject instead of being silently encoded with its own fields.
+        opts = CodecOptions(document_class=UserDC)
+        other = OtherDC(ObjectId(), "red")
+        self.assertIs(_convert_typed_document(other, opts), other)
+
+    def test_protocol_class_with_to_bson_converts(self):
+        opts = CodecOptions(document_class=EncodableProtocolDoc)
+        converted = _convert_typed_document(EncodableProtocolDoc({"x": 1}), opts)
+        self.assertEqual(converted, {"x": 1})
+
+    def test_protocol_class_without_to_bson_rejected(self):
+        # A from_bson-only protocol class is decode-only: writes must fail
+        # with a clear error, not an adapter-internal AttributeError.
+        opts = CodecOptions(document_class=ProtocolDoc)
+        with self.assertRaisesRegex(TypeError, "does not implement to_bson"):
+            _convert_typed_document(ProtocolDoc({"x": 1}), opts)
+
+
+class TestToBsonHook(UnitTest):
+    """Semantics of the adapters' to_bson hook."""
+
+    def test_dataclass_to_bson_dumps_fields(self):
+        oid = ObjectId()
+        dumped = _DataclassAdapter(UserDC).to_bson(UserDC(oid, "Ada", 36), CodecOptions())
+        self.assertEqual(dumped, {"_id": oid, "name": "Ada", "age": 36})
+
+    def test_dataclass_to_bson_drops_none_id(self):
+        # A default None _id must not reach the server: call sites see a
+        # missing _id and generate an ObjectId client side instead of
+        # storing _id: null.
+        dumped = _DataclassAdapter(AutoIdDC).to_bson(AutoIdDC("Ada", 36), CodecOptions())
+        self.assertEqual(dumped, {"name": "Ada", "age": 36})
+
+    def test_dataclass_to_bson_recurses_into_nested_dataclasses(self):
+        @dataclass
+        class Address:
+            city: str
+
+        @dataclass
+        class Person:
+            _id: ObjectId
+            address: Address
+
+        oid = ObjectId()
+        dumped = _DataclassAdapter(Person).to_bson(Person(oid, Address("NYC")), CodecOptions())
+        self.assertEqual(dumped, {"_id": oid, "address": {"city": "NYC"}})
+        # The dumped document must survive wire encoding.
+        encode(dumped)
+
+    def test_dataclass_without_id_field_rejected(self):
+        # A dataclass with no _id field would write documents its own
+        # from_bson could never read back, so it is rejected up front.
+        @dataclass
+        class NoIdDC:
+            name: str
+
+        with self.assertRaisesRegex(TypeError, "_id"):
+            _DataclassAdapter(NoIdDC)
+        with self.assertRaisesRegex(TypeError, "_id"):
+            CodecOptions(document_class=NoIdDC)
+
+    @unittest.skipUnless(_HAVE_PYDANTIC, "pydantic v2 is not installed")
+    def test_pydantic_to_bson_dumps_wire_names(self):
+        # Aliased fields (id -> _id) are dumped under their wire names, so
+        # a dumped document round-trips through from_bson.
+        oid = ObjectId()
+        adapter = _PydanticAdapter(UserModel)
+        dumped = adapter.to_bson(UserModel(id=oid, name="Ada", age=36), CodecOptions())
+        self.assertEqual(dumped, {"_id": oid, "name": "Ada", "age": 36})
+        self.assertEqual(
+            adapter.from_bson(dumped, CodecOptions()), UserModel(id=oid, name="Ada", age=36)
+        )
+
+
+class TestUnpackTypedResponseSinglePass(UnitTest):
+    """Reply unpacking for typed document classes."""
 
     USER_FIELDS = {"cursor": {"firstBatch": 1}}
 
@@ -651,6 +774,137 @@ class TestTypedDocumentClassIntegration(IntegrationTest):
         self.assertEqual(users, [])
 
 
+class TestTypedDocumentWriteIntegration(IntegrationTest):
+    """Write-path support for typed document instances."""
+
+    def setUp(self):
+        super().setUp()
+        self.coll = self.db.typed_writes
+        self.coll.drop()
+
+    def typed_coll(self, cls):
+        return self.db.get_collection(
+            "typed_writes", codec_options=CodecOptions(document_class=cls)
+        )
+
+    def test_insert_one_typed_roundtrip(self):
+        oid = ObjectId()
+        coll = self.typed_coll(UserDC)
+        result = coll.insert_one(UserDC(oid, "Ada", 36))
+        self.assertEqual(result.inserted_id, oid)
+        self.assertEqual(coll.find_one({"_id": oid}), UserDC(oid, "Ada", 36))
+
+    def test_insert_one_generates_id_for_default_none(self):
+        coll = self.typed_coll(AutoIdDC)
+        user = AutoIdDC("Ada", 36)
+        result = coll.insert_one(user)
+        self.assertIsInstance(result.inserted_id, ObjectId)
+        self.assertEqual(
+            coll.find_one({"_id": result.inserted_id}),
+            AutoIdDC("Ada", 36, result.inserted_id),
+        )
+        # The caller's instance is not mutated (no _id back-propagation).
+        self.assertIsNone(user._id)
+        # A second default-_id insert must not collide on _id: null.
+        result2 = coll.insert_one(AutoIdDC("Bea", 25))
+        self.assertNotEqual(result.inserted_id, result2.inserted_id)
+
+    def test_insert_many_typed_and_plain_mixed(self):
+        coll = self.typed_coll(UserDC)
+        oids = [ObjectId() for _ in range(3)]
+        result = coll.insert_many(
+            [
+                UserDC(oids[0], "user0", 0),
+                {"_id": oids[1], "name": "user1", "age": 1},
+                UserDC(oids[2], "user2", 2),
+            ]
+        )
+        self.assertEqual(result.inserted_ids, oids)
+        users = coll.find(sort=[("age", 1)]).to_list()
+        self.assertEqual(users, [UserDC(oid, f"user{i}", i) for i, oid in enumerate(oids)])
+
+    def test_plain_dict_insert_unchanged_on_typed_collection(self):
+        # Mappings pass through untouched: the caller's dict still acquires
+        # the generated _id.
+        doc: dict[str, Any] = {"name": "Ada", "age": 36}
+        result = self.typed_coll(UserDC).insert_one(doc)
+        self.assertEqual(doc["_id"], result.inserted_id)
+
+    def test_wrong_instance_type_rejected(self):
+        coll = self.typed_coll(UserDC)
+        with self.assertRaisesRegex(TypeError, "document must be an instance of dict"):
+            coll.insert_one(NotADocumentClass())
+        # An instance of a different dataclass is not silently encoded.
+        with self.assertRaisesRegex(TypeError, "document must be an instance of dict"):
+            coll.insert_one(OtherDC(ObjectId(), "red"))
+
+    def test_untyped_collection_rejects_typed_instance(self):
+        with self.assertRaisesRegex(TypeError, "document must be an instance of dict"):
+            self.coll.insert_one(UserDC(ObjectId(), "Ada", 36))
+
+    def test_replace_one_typed(self):
+        coll = self.typed_coll(AutoIdDC)
+        oid = (coll.insert_one(AutoIdDC("Ada", 36))).inserted_id
+        result = coll.replace_one({"_id": oid}, AutoIdDC("Ada", 37))
+        self.assertEqual(result.modified_count, 1)
+        self.assertEqual(coll.find_one({"_id": oid}), AutoIdDC("Ada", 37, oid))
+
+    def test_find_one_and_replace_typed(self):
+        coll = self.typed_coll(AutoIdDC)
+        oid = (coll.insert_one(AutoIdDC("Ada", 36))).inserted_id
+        coll.find_one_and_replace({"_id": oid}, AutoIdDC("Bea", 20))
+        self.assertEqual(coll.find_one({"_id": oid}), AutoIdDC("Bea", 20, oid))
+
+    def test_find_one_and_update_rejects_typed_instance(self):
+        # A typed instance is never a valid update spec ($ operators).
+        coll = self.typed_coll(UserDC)
+        with self.assertRaises((TypeError, ValueError)):
+            coll.find_one_and_update({"name": "Ada"}, UserDC(ObjectId(), "Ada", 36))
+
+    def test_bulk_write_typed_insert_and_replace(self):
+        coll = self.typed_coll(UserDC)
+        oids = [ObjectId() for _ in range(2)]
+        result = coll.bulk_write(
+            [
+                InsertOne(UserDC(oids[0], "user0", 0)),
+                InsertOne(UserDC(oids[1], "user1", 1)),
+                ReplaceOne({"_id": oids[0]}, UserDC(oids[0], "user0", 100)),
+            ]
+        )
+        self.assertEqual(result.inserted_count, 2)
+        self.assertEqual(result.modified_count, 1)
+        users = coll.find(sort=[("age", 1)]).to_list()
+        self.assertEqual(users, [UserDC(oids[1], "user1", 1), UserDC(oids[0], "user0", 100)])
+
+    @client_context.require_version_min(8, 0, 0, -24)
+    def test_client_bulk_write_typed_insert(self):
+        # Client-level bulk writes convert against the client's options.
+        client = self.rs_or_single_client(document_class=UserDC)
+        oid = ObjectId()
+        result = client.bulk_write(
+            [InsertOne(namespace=f"{self.db.name}.typed_writes", document=UserDC(oid, "Ada", 36))]
+        )
+        self.assertEqual(result.inserted_count, 1)
+        self.assertEqual(self.coll.find_one({"_id": oid}), {"_id": oid, "name": "Ada", "age": 36})
+
+    @client_context.require_version_min(8, 0, 0, -24)
+    def test_client_bulk_write_typed_replace(self):
+        client = self.rs_or_single_client(document_class=UserDC)
+        oid = ObjectId()
+        self.coll.insert_one({"_id": oid, "name": "Ada", "age": 36})
+        result = client.bulk_write(
+            [
+                ReplaceOne(
+                    namespace=f"{self.db.name}.typed_writes",
+                    filter={"_id": oid},
+                    replacement=UserDC(oid, "Ada", 37),
+                )
+            ]
+        )
+        self.assertEqual(result.modified_count, 1)
+        self.assertEqual(self.coll.find_one({"_id": oid}), {"_id": oid, "name": "Ada", "age": 37})
+
+
 @unittest.skipUnless(_HAVE_PYDANTIC, "pydantic v2 is not installed")
 class TestPydanticIntegration(IntegrationTest):
     def setUp(self):
@@ -685,6 +939,32 @@ class TestPydanticIntegration(IntegrationTest):
         self.coll.insert_one({"_id": ObjectId(), "name": "bad", "age": "not-an-int"})
         with self.assertRaises(ValidationError):
             self.typed.find(batch_size=3).to_list()
+
+
+@unittest.skipUnless(_HAVE_PYDANTIC, "pydantic v2 is not installed")
+class TestPydanticWriteIntegration(IntegrationTest):
+    def setUp(self):
+        super().setUp()
+        self.coll = self.db.typed_writes_pydantic
+        self.coll.drop()
+        self.typed = self.db.get_collection(
+            "typed_writes_pydantic", codec_options=CodecOptions(document_class=UserModel)
+        )
+
+    def test_insert_one_roundtrip(self):
+        oid = ObjectId()
+        result = self.typed.insert_one(UserModel(id=oid, name="Ada", age=36))
+        # The aliased id field is dumped under its wire name.
+        self.assertEqual(result.inserted_id, oid)
+        self.assertEqual(self.typed.find_one({"_id": oid}), UserModel(id=oid, name="Ada", age=36))
+
+    def test_replace_one_typed(self):
+        oid = ObjectId()
+        self.typed.insert_one(UserModel(id=oid, name="Ada", age=36))
+        result = self.typed.replace_one({"_id": oid}, UserModel(id=oid, name="Ada", age=37))
+        self.assertEqual(result.modified_count, 1)
+        user = self.typed.find_one({"_id": oid})
+        self.assertEqual(user.age, 37)
 
 
 if __name__ == "__main__":

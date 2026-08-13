@@ -29,6 +29,7 @@ from typing import (
     Union,
 )
 
+from bson.adapters import _convert_typed_document
 from bson.objectid import ObjectId
 from bson.raw_bson import RawBSONDocument
 from pymongo import _csot, common
@@ -124,11 +125,12 @@ class _ClientBulk:
 
     def add_insert(self, namespace: str, document: _DocumentOut) -> None:
         """Add an insert document to the list of ops."""
-        validate_is_document_type("document", document)
+        doc = _convert_typed_document(document, self.client.codec_options)
+        validate_is_document_type("document", doc)
         # Generate ObjectId client side.
-        if not (isinstance(document, RawBSONDocument) or "_id" in document):
-            document["_id"] = ObjectId()
-        cmd = {"insert": -1, "document": document}
+        if not (isinstance(doc, RawBSONDocument) or "_id" in doc):
+            doc["_id"] = ObjectId()
+        cmd = {"insert": -1, "document": doc}
         self.ops.append(("insert", cmd))
         self.namespaces.append(namespace)
         self.total_ops += 1
@@ -183,11 +185,12 @@ class _ClientBulk:
         sort: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """Create a replace document and add it to the list of ops."""
-        validate_ok_for_replace(replacement)
+        replacement_doc = _convert_typed_document(replacement, self.client.codec_options)
+        validate_ok_for_replace(replacement_doc)
         cmd = {
             "update": -1,
             "filter": selector,
-            "updateMods": replacement,
+            "updateMods": replacement_doc,
             "multi": False,
         }
         if upsert is not None:
