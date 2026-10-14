@@ -454,8 +454,7 @@ class Topology:
             and self._description.topology_type not in SRV_POLLING_TOPOLOGIES
         ):
             self._srv_monitor.close()
-            if not _IS_SYNC:
-                self._monitor_tasks.append(self._srv_monitor)
+            self._monitor_tasks.append(self._srv_monitor)
 
         # Wake anything waiting in select_servers().
         self._condition.notify_all()
@@ -612,8 +611,7 @@ class Topology:
             old_td = self._description
             for server in self._servers.values():
                 server.close()
-                if not _IS_SYNC:
-                    self._monitor_tasks.append(server._monitor)
+                self._monitor_tasks.append(server._monitor)
 
             # Mark all servers Unknown.
             self._description = self._description.reset()
@@ -624,8 +622,7 @@ class Topology:
             # Stop SRV polling thread.
             if self._srv_monitor:
                 self._srv_monitor.close()
-                if not _IS_SYNC:
-                    self._monitor_tasks.append(self._srv_monitor)
+                self._monitor_tasks.append(self._srv_monitor)
 
             self._opened = False
             self._closed = True
@@ -845,8 +842,7 @@ class Topology:
         for address, server in list(self._servers.items()):
             if not self._description.has_server(address):
                 server.close()
-                if not _IS_SYNC:
-                    self._monitor_tasks.append(server._monitor)
+                self._monitor_tasks.append(server._monitor)
                 self._servers.pop(address)
 
     def _create_pool_for_server(self, address: _Address) -> Pool:
@@ -938,7 +934,11 @@ class Topology:
                 tasks.append(self._monitor_tasks.pop())
         except IndexError:
             pass
-        asyncio.gather(*[t.join() for t in tasks], return_exceptions=True)  # type: ignore[func-returns-value]
+        if _IS_SYNC:
+            for t in tasks:
+                t.join()
+        else:
+            asyncio.gather(*[t.join() for t in tasks], return_exceptions=True)  # type: ignore[func-returns-value]
 
     def __repr__(self) -> str:
         msg = ""
